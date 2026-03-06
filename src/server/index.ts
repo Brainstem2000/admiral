@@ -58,7 +58,7 @@ if (isDev) {
   app.get('*', serveStatic({ path: './dist/index.html' }))
 }
 
-const port = parseInt(process.env.PORT || '8000')
+const port = parseInt(process.env.PORT || '3031')
 console.log(`Admiral listening on http://0.0.0.0:${port}`)
 
 export default {
