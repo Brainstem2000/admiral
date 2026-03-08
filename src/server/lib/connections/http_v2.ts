@@ -28,6 +28,9 @@ export class HttpV2Connection implements GameConnection {
   private specLog: SpecLogFn | undefined
   private v1FallbackLogged = false
   private ensureSessionPromise: Promise<void> | null = null
+  // Parallel v1 session for commands missing from the v2 route map
+  private v1Session: ApiSession | null = null
+  private v1SessionPromise: Promise<void> | null = null
 
   constructor(serverUrl: string) {
     this.baseUrl = serverUrl.replace(/\/$/, '') + '/api/v2'
@@ -71,6 +74,19 @@ export class HttpV2Connection implements GameConnection {
         // v2 operationId -> route
         if (operationId) {
           this.commandRouteMap.set(operationId, route)
+        }
+        // v1-style aliases: strip "spacemolt_" prefix, register both orderings
+        // e.g. spacemolt_faction/join → "join_faction" AND "faction_join"
+        const toolShort = tool.startsWith('spacemolt_') ? tool.slice('spacemolt_'.length) : tool
+        if (toolShort !== tool) {
+          const alias1 = `${action}_${toolShort}`
+          const alias2 = `${toolShort}_${action}`
+          if (!this.commandRouteMap.has(alias1)) {
+            this.commandRouteMap.set(alias1, route)
+          }
+          if (!this.commandRouteMap.has(alias2)) {
+            this.commandRouteMap.set(alias2, route)
+          }
         }
       } else if (parts.length === 1 && seg !== 'session' && seg !== 'notifications') {
         // 1-part path: tool IS the command (e.g. spacemolt_catalog)
@@ -187,6 +203,7 @@ export class HttpV2Connection implements GameConnection {
 
   async disconnect(): Promise<void> {
     this.session = null
+    this.v1Session = null
     this.connected = false
   }
 
@@ -194,12 +211,75 @@ export class HttpV2Connection implements GameConnection {
     return this.connected
   }
 
+  private get v1BaseUrl(): string {
+    return this.baseUrl.replace(/\/api\/v2$/, '/api/v1')
+  }
+
   /** Returns the v1 base URL when the v2 route map is unavailable. */
   private get effectiveBaseUrl(): string {
     if (this.commandRouteMap.size === 0) {
-      return this.baseUrl.replace(/\/api\/v2$/, '/api/v1')
+      return this.v1BaseUrl
     }
     return this.baseUrl
+  }
+
+  /**
+   * Lazily create a parallel v1 session for fallback commands.
+   * Only needed when the v2 route map is populated but a specific command is missing.
+   */
+  private async ensureV1Session(): Promise<void> {
+    if (this.v1Session && !this.isSessionExpiringSoon(this.v1Session)) return
+    if (!this.v1SessionPromise) {
+      this.v1SessionPromise = this.createV1Session().finally(() => {
+        this.v1SessionPromise = null
+      })
+    }
+    return this.v1SessionPromise
+  }
+
+  private async createV1Session(): Promise<void> {
+    let lastError: Error | null = null
+    for (let attempt = 0; attempt < MAX_RECONNECT_ATTEMPTS; attempt++) {
+      try {
+        const resp = await fetch(`${this.v1BaseUrl}/session`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+        })
+        if (!resp.ok) throw new Error(`Failed to create v1 session: ${resp.status}`)
+        const data = await resp.json()
+        if (data.session) {
+          this.v1Session = data.session
+        } else {
+          throw new Error('No session in v1 response')
+        }
+        if (this.credentials) {
+          const loginResp = await fetch(`${this.v1BaseUrl}/login`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'User-Agent': USER_AGENT,
+              'X-Session-Id': this.v1Session!.id,
+            },
+            body: JSON.stringify({
+              username: this.credentials.username,
+              password: this.credentials.password,
+            }),
+          })
+          if (!loginResp.ok) throw new Error(`v1 login failed: ${loginResp.status}`)
+        }
+        return
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err))
+        const delay = RECONNECT_BASE_DELAY * Math.pow(2, attempt)
+        await sleep(delay)
+      }
+    }
+    throw lastError || new Error('Failed to create v1 fallback session')
+  }
+
+  private isSessionExpiringSoon(session: ApiSession): boolean {
+    const expiresAt = new Date(session.expiresAt).getTime()
+    return expiresAt - Date.now() < 60_000
   }
 
   private async ensureSession(): Promise<void> {
@@ -251,23 +331,43 @@ export class HttpV2Connection implements GameConnection {
 
   private isSessionExpiring(): boolean {
     if (!this.session) return true
-    const expiresAt = new Date(this.session.expiresAt).getTime()
-    return expiresAt - Date.now() < 60_000
+    return this.isSessionExpiringSoon(this.session)
   }
 
   private async doRequest(command: string, payload?: Record<string, unknown>): Promise<CommandResult> {
     const base = this.effectiveBaseUrl
-    const route = this.commandRouteMap.get(command)
-    // v2: POST /api/v2/{tool}/{action}
-    // v1 fallback for unknown commands: POST /api/v1/{command}
-    const v1Base = this.baseUrl.replace(/\/api\/v2$/, '/api/v1')
-    const url = route ? `${base}/${route}` : `${v1Base}/${command}`
-    if (base !== this.baseUrl && !this.v1FallbackLogged) {
-      this.specLog?.('warn', 'v2 route map unavailable, falling back to v1 API endpoints')
-      this.v1FallbackLogged = true
+    let route = this.commandRouteMap.get(command)
+
+    // Fallback: try spacemolt_ prefix (e.g. "catalog" → "spacemolt_catalog")
+    if (!route) {
+      route = this.commandRouteMap.get(`spacemolt_${command}`)
     }
+
+    let url: string
+    let useV1Fallback = false
+    if (route) {
+      url = `${base}/${route}`
+    } else if (this.commandRouteMap.size === 0) {
+      // No route map at all — fall back to v1 entirely (session is already v1)
+      url = `${this.v1BaseUrl}/${command}`
+      if (!this.v1FallbackLogged) {
+        this.specLog?.('warn', 'v2 route map unavailable, falling back to v1 API endpoints')
+        this.v1FallbackLogged = true
+      }
+    } else {
+      // Route map exists but command not found — use v1 with a separate v1 session
+      url = `${this.v1BaseUrl}/${command}`
+      useV1Fallback = true
+      this.specLog?.('warn', `Command "${command}" not in v2 route map, using v1 fallback`)
+    }
+
     const headers: Record<string, string> = { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT }
-    if (this.session) headers['X-Session-Id'] = this.session.id
+    if (useV1Fallback) {
+      await this.ensureV1Session()
+      if (this.v1Session) headers['X-Session-Id'] = this.v1Session.id
+    } else {
+      if (this.session) headers['X-Session-Id'] = this.session.id
+    }
 
     const resp = await fetch(url, {
       method: 'POST',
@@ -276,12 +376,47 @@ export class HttpV2Connection implements GameConnection {
     })
 
     if (resp.status === 401) {
+      // If v1 fallback got a 401, try refreshing the v1 session once
+      if (useV1Fallback) {
+        this.v1Session = null
+        try {
+          await this.ensureV1Session()
+        } catch {
+          return { error: { code: 'session_invalid', message: 'v1 fallback session failed' } }
+        }
+        if (this.v1Session) {
+          const retryResp = await fetch(url, {
+            method: 'POST',
+            headers: { ...headers, 'X-Session-Id': this.v1Session.id },
+            body: payload ? JSON.stringify(payload) : undefined,
+          })
+          if (retryResp.status === 401) {
+            return { error: { code: 'session_invalid', message: 'Unauthorized (v1 fallback)' } }
+          }
+          try {
+            const data = await retryResp.json()
+            if (data.session) this.v1Session = data.session
+            if (data.structuredContent !== undefined && data.structuredContent !== null) {
+              data.result = data.structuredContent
+            }
+            return data as CommandResult
+          } catch {
+            return { error: { code: 'http_error', message: `HTTP ${retryResp.status}` } }
+          }
+        }
+      }
       return { error: { code: 'session_invalid', message: 'Unauthorized' } }
     }
 
     try {
       const data = await resp.json()
-      if (data.session) this.session = data.session
+      if (data.session) {
+        if (useV1Fallback) {
+          this.v1Session = data.session
+        } else {
+          this.session = data.session
+        }
+      }
       // v2 returns { result: <text>, structuredContent: <JSON> }
       // Normalize: prefer structuredContent as `result` for programmatic consumers
       if (data.structuredContent !== undefined && data.structuredContent !== null) {

@@ -47,6 +47,12 @@ async function fetchModelsForProvider(providerId: string): Promise<string[]> {
     return fetchOpenAICompatModels(modelsUrl, undefined)
   }
 
+  // claude-max uses Anthropic models via OAuth
+  if (providerId === 'claude-max') {
+    const piModels = getModels('anthropic' as KnownProvider)
+    return piModels.map(m => m.id).sort()
+  }
+
   // Custom provider - try to fetch from configured base_url
   if (providerId === 'custom' && dbProvider?.base_url) {
     const modelsUrl = dbProvider.base_url.replace(/\/+$/, '') + (dbProvider.base_url.includes('/models') ? '' : '/models')

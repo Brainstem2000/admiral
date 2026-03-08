@@ -1,6 +1,7 @@
 import { getModel, getModels, getProviders } from '@mariozechner/pi-ai'
 import type { Model, KnownProvider } from '@mariozechner/pi-ai'
 import { getProvider } from './db'
+import { getClaudeMaxToken } from './claude-max-auth'
 
 const LOCALHOST = '127.0.0.1'
 
@@ -31,9 +32,33 @@ const CUSTOM_BASE_URLS: Record<string, string> = {
 /**
  * Resolve a model string like "anthropic/claude-sonnet-4-20250514" to a pi-ai Model.
  * Reads API keys from the providers DB table instead of environment variables.
+ * For "claude-max" provider, resolves as Anthropic model with OAuth token from Claude Code.
  */
-export function resolveModel(modelStr: string): { model: Model<any>; apiKey?: string } {
+export async function resolveModel(modelStr: string): Promise<{ model: Model<any>; apiKey?: string }> {
   const { provider, modelId: rawModelId } = parseModelString(modelStr)
+
+  // Claude MAX: resolve as Anthropic model with OAuth token
+  if (provider === 'claude-max') {
+    const apiKey = await getClaudeMaxToken()
+    const anthropicModels = getModels('anthropic' as KnownProvider)
+
+    // Try exact match in Anthropic registry
+    try {
+      const model = getModel('anthropic' as KnownProvider, rawModelId as never)
+      if (model) return { model, apiKey }
+    } catch {
+      // Fall through
+    }
+
+    // Fallback: create model from first Anthropic model as template
+    if (anthropicModels.length > 0) {
+      const base = anthropicModels[0]
+      const model: Model<any> = { ...base, id: rawModelId, name: rawModelId }
+      return { model, apiKey }
+    }
+
+    throw new Error('No Anthropic models found in registry for claude-max provider')
+  }
 
   const modelId = provider === 'openrouter' && !rawModelId.includes('/')
     ? `openrouter/${rawModelId}`

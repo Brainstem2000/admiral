@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { RefreshCw, BookOpen, ListTodo, ChevronDown, ChevronRight, Activity, X } from 'lucide-react'
+import { RefreshCw, BookOpen, ListTodo, ChevronDown, ChevronRight, Activity, X, Brain, Pencil } from 'lucide-react'
 import { MarkdownRenderer } from './MarkdownRenderer'
 
 interface CaptainsLogEntry {
@@ -11,29 +11,36 @@ interface CaptainsLogEntry {
 interface Props {
   profileId: string
   todo: string
+  memory: string
   connected: boolean
   playerData: Record<string, unknown> | null
   onRefreshStatus?: () => void
 }
 
-export function SidePane({ profileId, todo: initialTodo, connected, playerData, onRefreshStatus }: Props) {
+export function SidePane({ profileId, todo: initialTodo, memory: initialMemory, connected, playerData, onRefreshStatus }: Props) {
   const [logEntries, setLogEntries] = useState<CaptainsLogEntry[]>([])
   const [logLoading, setLogLoading] = useState(false)
   const [todo, setTodo] = useState(initialTodo)
+  const [memory, setMemory] = useState(initialMemory)
   const [statusOpen, setStatusOpen] = useState(true)
   const [logOpen, setLogOpen] = useState(true)
   const [todoOpen, setTodoOpen] = useState(true)
+  const [memoryOpen, setMemoryOpen] = useState(true)
+  const [showMemoryModal, setShowMemoryModal] = useState(false)
+  const [memoryDraft, setMemoryDraft] = useState('')
 
   // Resizable section heights as fractions of container (0-1)
-  const [statusFrac, setStatusFrac] = useState(0.15)
-  const [logFrac, setLogFrac] = useState(0.35)
-  // todoFrac is implicitly 1 - statusFrac - logFrac
+  const [statusFrac, setStatusFrac] = useState(0.10)
+  const [logFrac, setLogFrac] = useState(0.30)
+  const [todoFrac, setTodoFrac] = useState(0.25)
+  // memoryFrac is implicitly 1 - statusFrac - logFrac - todoFrac
   const containerRef = useRef<HTMLDivElement>(null)
   const resizingRef = useRef<string | null>(null)
   const HANDLE_HEIGHT = 4
   const HEADER_HEIGHT = 32
 
   useEffect(() => { setTodo(initialTodo) }, [initialTodo])
+  useEffect(() => { setMemory(initialMemory) }, [initialMemory])
 
   const fetchCaptainsLog = useCallback(async () => {
     if (!connected) return
@@ -80,11 +87,12 @@ export function SidePane({ profileId, todo: initialTodo, connected, playerData, 
     }
   }, [profileId, connected])
 
-  const refreshTodo = useCallback(async () => {
+  const refreshTodoAndMemory = useCallback(async () => {
     try {
       const resp = await fetch(`/api/profiles/${profileId}`)
       const data = await resp.json()
       if (data.todo !== undefined) setTodo(data.todo)
+      if (data.memory !== undefined) setMemory(data.memory)
     } catch {
       // ignore
     }
@@ -98,6 +106,17 @@ export function SidePane({ profileId, todo: initialTodo, connected, playerData, 
         body: JSON.stringify({ todo: '' }),
       })
       setTodo('')
+    } catch { /* ignore */ }
+  }, [profileId])
+
+  const saveMemory = useCallback(async (content: string) => {
+    try {
+      await fetch(`/api/profiles/${profileId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ memory: content }),
+      })
+      setMemory(content)
     } catch { /* ignore */ }
   }, [profileId])
 
@@ -118,16 +137,36 @@ export function SidePane({ profileId, todo: initialTodo, connected, playerData, 
     if (connected) fetchCaptainsLog()
   }, [connected, fetchCaptainsLog])
 
-  // Poll todo every 10s
+  // Poll todo + memory every 10s
   useEffect(() => {
-    refreshTodo()
-    const interval = setInterval(refreshTodo, 10000)
+    refreshTodoAndMemory()
+    const interval = setInterval(refreshTodoAndMemory, 10000)
     return () => clearInterval(interval)
-  }, [refreshTodo])
+  }, [refreshTodoAndMemory])
 
   const statusMessage = playerData
     ? (playerData.player as Record<string, unknown> | undefined)?.status_message as string | undefined
     : undefined
+
+  // Memory editor helpers
+  const draftKey = `admiral-memory-draft-${profileId}`
+
+  const openMemoryEditor = useCallback(() => {
+    // Restore draft from localStorage if available, else use current memory
+    let draft: string | null = null
+    try { draft = localStorage.getItem(draftKey) } catch { /* ignore */ }
+    setMemoryDraft(draft ?? memory)
+    setShowMemoryModal(true)
+  }, [memory, draftKey])
+
+  const saveMemoryDraft = useCallback((val: string) => {
+    setMemoryDraft(val)
+    try { localStorage.setItem(draftKey, val) } catch { /* ignore */ }
+  }, [draftKey])
+
+  const clearMemoryDraft = useCallback(() => {
+    try { localStorage.removeItem(draftKey) } catch { /* ignore */ }
+  }, [draftKey])
 
   // Vertical resize handler -- adjusts both adjacent sections simultaneously
   const handleResizeStart = useCallback((section: string, e: React.MouseEvent) => {
@@ -141,13 +180,13 @@ export function SidePane({ profileId, todo: initialTodo, connected, playerData, 
 
     const startStatusFrac = statusFrac
     const startLogFrac = logFrac
+    const startTodoFrac = todoFrac
 
     function onMouseMove(e: MouseEvent) {
       const deltaFrac = (e.clientY - startY) / containerH
-      const MIN_FRAC = HEADER_HEIGHT / containerH // minimum = just the header
+      const MIN_FRAC = HEADER_HEIGHT / containerH
 
       if (section === 'status-log') {
-        // Redistribute between status and log
         const total = startStatusFrac + startLogFrac
         let newStatus = Math.max(MIN_FRAC, Math.min(total - MIN_FRAC, startStatusFrac + deltaFrac))
         let newLog = total - newStatus
@@ -155,11 +194,17 @@ export function SidePane({ profileId, todo: initialTodo, connected, playerData, 
         setStatusFrac(newStatus)
         setLogFrac(newLog)
       } else if (section === 'log-todo') {
-        // Redistribute between log and todo
-        const todoFrac = 1 - startStatusFrac - startLogFrac
-        const total = startLogFrac + todoFrac
+        const total = startLogFrac + startTodoFrac
         let newLog = Math.max(MIN_FRAC, Math.min(total - MIN_FRAC, startLogFrac + deltaFrac))
+        let newTodo = total - newLog
+        if (newTodo < MIN_FRAC) { newTodo = MIN_FRAC; newLog = total - MIN_FRAC }
         setLogFrac(newLog)
+        setTodoFrac(newTodo)
+      } else if (section === 'todo-memory') {
+        const memoryFrac = Math.max(0.05, 1 - startStatusFrac - startLogFrac - startTodoFrac)
+        const total = startTodoFrac + memoryFrac
+        let newTodo = Math.max(MIN_FRAC, Math.min(total - MIN_FRAC, startTodoFrac + deltaFrac))
+        setTodoFrac(newTodo)
       }
     }
 
@@ -175,9 +220,9 @@ export function SidePane({ profileId, todo: initialTodo, connected, playerData, 
     document.body.style.userSelect = 'none'
     document.addEventListener('mousemove', onMouseMove)
     document.addEventListener('mouseup', onMouseUp)
-  }, [statusFrac, logFrac])
+  }, [statusFrac, logFrac, todoFrac])
 
-  const todoFrac = Math.max(0.05, 1 - statusFrac - logFrac)
+  const memoryFrac = Math.max(0.05, 1 - statusFrac - logFrac - todoFrac)
 
   return (
     <div ref={containerRef} className="flex flex-col h-full bg-card/50 overflow-hidden">
@@ -292,7 +337,7 @@ export function SidePane({ profileId, todo: initialTodo, connected, playerData, 
             </button>
           )}
           <button
-            onClick={refreshTodo}
+            onClick={refreshTodoAndMemory}
             className="text-muted-foreground hover:text-foreground transition-colors ml-1 shrink-0"
           >
             <RefreshCw size={10} />
@@ -312,6 +357,109 @@ export function SidePane({ profileId, todo: initialTodo, connected, playerData, 
           </div>
         )}
       </div>
+
+      {/* Resize handle: todo <-> memory */}
+      <div
+        onMouseDown={(e) => handleResizeStart('todo-memory', e)}
+        className="h-1 shrink-0 cursor-row-resize bg-border hover:bg-primary/40 transition-colors"
+      />
+
+      {/* Memory */}
+      <div className="flex flex-col overflow-hidden" style={{ flex: memoryOpen ? `0 0 ${memoryFrac * 100}%` : `0 0 ${HEADER_HEIGHT}px` }}>
+        <div className="flex items-center gap-2 w-full px-3 py-2 hover:bg-secondary/20 transition-colors shrink-0">
+          <div role="button" tabIndex={0} onClick={() => setMemoryOpen(!memoryOpen)} onKeyDown={e => e.key === 'Enter' && setMemoryOpen(!memoryOpen)} className="flex items-center gap-2 flex-1 cursor-pointer">
+            {memoryOpen ? <ChevronDown size={10} className="text-muted-foreground shrink-0" /> : <ChevronRight size={10} className="text-muted-foreground shrink-0" />}
+            <Brain size={11} className="text-muted-foreground shrink-0" />
+            <span className="text-[11px] uppercase tracking-[1.5px] font-medium text-foreground/80">Memory</span>
+          </div>
+          <span className="text-[9px] leading-none text-[hsl(var(--smui-orange))] uppercase tracking-wider">Local</span>
+          <button
+            onClick={openMemoryEditor}
+            className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+            title="Edit memory"
+          >
+            <Pencil size={10} />
+          </button>
+          <button
+            onClick={refreshTodoAndMemory}
+            className="text-muted-foreground hover:text-foreground transition-colors ml-1 shrink-0"
+          >
+            <RefreshCw size={10} />
+          </button>
+        </div>
+        {memoryOpen && (
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {!memory ? (
+              <div className="px-3 py-3 text-[11px] text-muted-foreground/50 italic">
+                No memory stored yet
+              </div>
+            ) : (
+              <div className="px-3 py-2">
+                <MarkdownRenderer content={memory} />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Memory Edit Modal */}
+      {showMemoryModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-card border border-border rounded-lg shadow-xl w-[90vw] max-w-3xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+              <div className="flex items-center gap-2">
+                <Brain size={14} className="text-muted-foreground" />
+                <span className="text-sm font-medium">Edit Agent Memory</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-muted-foreground">Ctrl+Enter to save</span>
+                <button
+                  onClick={() => { clearMemoryDraft(); setShowMemoryModal(false) }}
+                  className="text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+            <textarea
+              value={memoryDraft}
+              onChange={(e) => saveMemoryDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                  e.preventDefault()
+                  saveMemory(memoryDraft)
+                  clearMemoryDraft()
+                  setShowMemoryModal(false)
+                } else if (e.key === 'Escape') {
+                  clearMemoryDraft()
+                  setShowMemoryModal(false)
+                }
+              }}
+              className="flex-1 min-h-0 p-4 bg-background text-sm font-mono resize-none focus:outline-none"
+              placeholder="Agent memory content (markdown)..."
+              autoFocus
+            />
+            <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-border">
+              <button
+                onClick={() => { clearMemoryDraft(); setShowMemoryModal(false) }}
+                className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  saveMemory(memoryDraft)
+                  clearMemoryDraft()
+                  setShowMemoryModal(false)
+                }}
+                className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors"
+              >
+                Save Memory
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -36,45 +36,218 @@ bun run build
 bun run dev
 ```
 
-This starts both the API server and Vite frontend with hot reload via `concurrently`.
+This starts both the API server (port 3031) and Vite frontend (port 3030) with hot reload via `concurrently`.
 
 ## Features
 
 ### Multiple Simultaneous Agents
 
-Run as many agents as you want at the same time. Each profile gets its own connection, LLM loop, and log stream. Switch between them instantly from the sidebar, which shows live connection status for every agent.
+Run as many agents as you want at the same time. Each profile gets its own connection, LLM loop, and log stream. Switch between them instantly from the sidebar, which shows live connection status for every agent. Profiles can be reordered via drag-and-drop in the sidebar. Agents are dynamically grouped by faction affiliation with faction tags displayed alongside each name.
 
 ### Any LLM Provider
 
-Admiral supports frontier cloud providers (Anthropic, OpenAI, Google, Groq, xAI, Mistral, MiniMax, OpenRouter), local models (Ollama, LM Studio), and any OpenAI-compatible endpoint via the custom provider. Configure API keys and endpoint URLs from the settings panel -- local providers are auto-detected on your network.
+Admiral supports frontier cloud providers (Anthropic, OpenAI, Google, Groq, xAI, Mistral, MiniMax, OpenRouter, NVIDIA), local models (Ollama, LM Studio), and any OpenAI-compatible endpoint via the custom provider. Configure API keys and endpoint URLs from the settings panel -- local providers are auto-detected on your network.
+
+**Claude MAX** is supported natively via OAuth integration. Admiral reads Claude Code credentials from `~/.claude/.credentials.json` and handles automatic token refresh.
+
+### Dual-Model Planning
+
+Assign a separate **planner model** and **executor model** to each agent. The planner (typically a larger, more capable model like Claude Opus) runs periodically to analyze the game state and write a strategic plan to the agent's TODO list. The executor (a faster, cheaper model like Claude Haiku) runs the remaining turns, following the plan step-by-step.
+
+- Configurable planning interval (e.g. every 5 turns)
+- System prompt automatically switches between `[Planning]` and `[Executing]` phases
+- Planning phase is read-only analysis; execution phase carries out actions
+- Reduces cost while maintaining strategic coherence
 
 ### Full Activity Inspection
 
-Every agent action is logged in a Chrome DevTools-style log viewer. Filter by category -- LLM calls, tool executions, server responses, errors, system events -- and expand any entry to see the full detail. Token usage and costs are tracked per LLM call.
+Every agent action is logged in a Chrome DevTools-style log viewer. Filter by category -- LLM calls, tool executions, server responses, errors, system events -- and expand any entry to see the full detail. Each LLM call shows input/output tokens, cost, model, provider, stop reason, and any thinking blocks. Context tracking displays current message count and estimated token usage.
+
+Real-time log streaming via Server-Sent Events (SSE) keeps the dashboard updated live.
 
 ### Command Panel with Dynamic Help
 
-Send game commands manually with autocomplete and fuzzy search across all 150+ SpaceMolt commands. Each command shows its parameters and descriptions inline so you don't need to look up the docs.
+Send game commands manually with autocomplete and fuzzy search across all 150+ SpaceMolt commands. Each command shows its parameters and descriptions inline so you don't need to look up the docs. Command execution history is stored locally for quick re-use.
 
 ### Quick Action Bar
 
 One-click buttons for common queries (status, cargo, system, ship, POI, market, skills, nearby) that fire the command and display results immediately. Useful for checking game state at a glance without interrupting the agent.
 
-### Player Status and Data
+### Player Status Dashboard
 
-View your agent's live game state -- empire, location, credits, ship, cargo, skills -- pulled directly from the server. Player colors are rendered from in-game customization.
+View your agent's live game state -- empire, location, credits, ship class, faction membership -- pulled directly from the server. Ship health metrics (hull, shield, fuel, cargo, CPU, power) are displayed as progress bars. Fitted modules show wear levels and ammo counts. Faction name and tag are enriched automatically via background lookups. Player colors are rendered from in-game customization. Per-agent wallet and storage totals are visible at a glance.
+
+### 3D Galaxy Map
+
+An interactive WebGL star map built with React Three Fiber shows the entire SpaceMolt galaxy:
+
+- Star systems color-coded by empire affiliation
+- Jump connections between adjacent systems
+- Real-time agent position markers showing where each agent is currently located
+- Click any system for a detail popup with POIs, resources, and discovered intel
+- Full camera controls (zoom, pan, rotate)
+- Fleet legend for colors and symbols
+
+### Fleet Intelligence Network
+
+All agents passively contribute to a shared intelligence database:
+
+- **Market Intel** -- Best buy/sell prices per item per station, reported by any agent that checks a market
+- **System Intel** -- POI count, available services, resources, and empire affiliation per system
+- **Threat Intel** -- Combat reports and pirate sightings with automatic expiration
+- **Briefing** -- Aggregated intel is injected into every agent's system prompt so they make informed decisions
+
+Intel is extracted automatically from game responses (`view_market`, `get_system`, `scan`, etc.) with no manual configuration needed.
 
 ### Directives
 
-Set a high-level directive for each agent ("mine ore and sell it", "explore new systems", "hunt pirates"). Changing the directive restarts the agent's current turn immediately so it picks up the new mission without waiting.
+Set a high-level directive for each agent ("mine ore and sell it", "explore new systems", "hunt pirates"). Changing the directive restarts the agent's current turn immediately so it picks up the new mission without waiting. The directive is injected into the system prompt at the start of every turn.
 
-### Log and TODO
+### Agent Memory Systems
 
-Each agent maintains a local TODO list for tracking its own goals and progress. The server-side captain's log is also viewable and editable, letting you read and write log entries that persist across sessions.
+Each agent has three layers of persistent memory:
+
+1. **TODO List** -- A local task tracker persisted in the database. Used by the dual-model planner to communicate strategy to the executor. Viewable and editable from the dashboard.
+
+2. **Persistent Memory** -- Multi-line markdown storage that survives full logout/login cycles. Agents use it to track discovered routes, market prices, storage locations, and lessons learned.
+
+3. **Captain's Log** -- Server-side journal hosted on SpaceMolt. Viewable and editable from the Admiral UI. Persists independently of Admiral.
+
+### Nudge System
+
+Inject guidance messages into a running agent's conversation without stopping its loop. Useful for course-correcting an agent mid-mission ("stop mining and go sell your cargo", "avoid the Krynn system").
 
 ### Five Connection Modes
 
-Connect via HTTP v1 (polling), HTTP v2 (streaming), WebSocket (persistent), MCP v1, or MCP v2 (Model Context Protocol). HTTP v2 is the default and most reliable; WebSocket gives lower latency; MCP is for agents that use the standardized tool protocol.
+| Mode | Transport | Best For |
+|------|-----------|----------|
+| HTTP v1 | REST polling | Basic setups |
+| HTTP v2 | Grouped REST endpoints | Default (most reliable) |
+| WebSocket | Persistent bidirectional | Low latency |
+| MCP v1 | Model Context Protocol | Standard tool protocol |
+| MCP v2 | MCP with OpenAPI discovery | Grouped tools (~15 meta-tools) |
+
+HTTP v2 includes automatic v1 fallback: if a command is missing from the v2 API spec, Admiral transparently creates a parallel v1 session and routes the command there. This ensures all 150+ game commands work regardless of v2 spec completeness.
+
+### Context Management
+
+Agents automatically compact their conversation context when it approaches the model's token limit:
+
+- Configurable context budget ratio (default 55% of context window)
+- LLM-powered summarization preserves key information from old messages
+- Recent messages are always kept intact
+- Graceful fallback if summarization fails
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│                   Browser UI                     │
+│  React 19 + Vite 6 + Tailwind v4 + Three.js    │
+│  Dashboard / Logs / Commands / Galaxy Map        │
+└──────────────────────┬──────────────────────────┘
+                       │ REST + SSE
+┌──────────────────────┴──────────────────────────┐
+│                  Admiral Server                   │
+│            Bun + Hono + bun:sqlite               │
+│                                                   │
+│  ┌─────────────┐  ┌──────────────┐  ┌─────────┐ │
+│  │ Agent Manager│  │ Fleet Intel  │  │ Galaxy  │ │
+│  │  (per-agent  │  │  (shared DB) │  │  Cache  │ │
+│  │   LLM loop) │  │              │  │         │ │
+│  └──────┬──────┘  └──────────────┘  └─────────┘ │
+│         │                                         │
+│  ┌──────┴──────────────────────────────────────┐ │
+│  │           Game Connections                    │ │
+│  │  HTTP v1 │ HTTP v2 │ WebSocket │ MCP v1/v2  │ │
+│  └──────────────────────┬───────────────────────┘ │
+└─────────────────────────┼─────────────────────────┘
+                          │
+              ┌───────────┴───────────┐
+              │   SpaceMolt Game API   │
+              │  game.spacemolt.com    │
+              └───────────────────────┘
+```
+
+### Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Runtime | [Bun](https://bun.sh) v1.1+ |
+| Backend | [Hono](https://hono.dev) (HTTP framework) |
+| Database | bun:sqlite (WAL mode, `data/admiral.db`) |
+| Frontend | React 19 + Vite 6 |
+| Styling | Tailwind CSS v4 |
+| 3D Map | React Three Fiber + drei |
+| LLM Interface | [@mariozechner/pi-ai](https://github.com/mariozechner/pi-ai) |
+| Virtual Scrolling | @tanstack/react-virtual |
+| Guided Tour | driver.js |
+
+### Database
+
+SQLite with 9 tables:
+
+- **providers** -- LLM provider configs (API keys, base URLs, status)
+- **profiles** -- Agent configurations (credentials, provider, model, directive, connection mode, planner settings)
+- **log_entries** -- Agent activity logs (type, summary, detail, timestamp)
+- **preferences** -- Global settings (registration code, gameserver URL, max turns, LLM timeout)
+- **galaxy_map** -- Cached galaxy data (systems, connections, POIs)
+- **fleet_intel_market** -- Market price intel per station/item
+- **fleet_intel_systems** -- System discovery intel (resources, services, empire)
+- **fleet_intel_threats** -- Combat/threat reports with expiration
+
+Schema auto-migrates on startup -- new columns are added automatically.
+
+### API Endpoints
+
+| Route | Description |
+|-------|-------------|
+| `GET /api/profiles` | List all profiles with live status |
+| `POST /api/profiles` | Create new agent profile |
+| `PUT /api/profiles/:id` | Update profile settings |
+| `DELETE /api/profiles/:id` | Delete profile |
+| `POST /api/profiles/:id/connect` | Connect, disconnect, or start LLM loop |
+| `POST /api/profiles/:id/command` | Execute a game command manually |
+| `POST /api/profiles/:id/nudge` | Inject guidance into running agent |
+| `GET /api/profiles/:id/logs?stream=true` | Stream logs via SSE |
+| `GET /api/providers` | List LLM providers with status |
+| `PUT /api/providers` | Configure provider (API key, URL) |
+| `POST /api/providers/detect` | Auto-detect local providers |
+| `GET /api/models` | List available models |
+| `GET /api/commands` | Fetch game command catalog |
+| `GET /api/preferences` | Get global settings |
+| `PUT /api/preferences` | Set global settings |
+| `GET /api/galaxy` | Get cached galaxy map |
+| `POST /api/galaxy/refresh` | Fetch fresh galaxy data |
+| `GET /api/fleet-intel` | Get collected fleet intel |
+| `GET /api/health` | Service health check |
+
+## Configuration
+
+### Profile Settings
+
+Each agent profile supports:
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Provider | LLM provider to use | -- |
+| Model | Executor model ID | -- |
+| Planner Model | Optional strategic planner model | (none) |
+| Planning Interval | Turns between planner runs | 5 |
+| Connection Mode | Game API connection type | `http_v2` |
+| Directive | High-level mission text | "Play the game..." |
+| Context Budget Ratio | % of context window before compaction | 0.55 |
+| Max Tool Rounds | Tool calls per turn before forcing stop | 30 |
+| Autoconnect | Connect on server start | false |
+
+### Global Preferences
+
+| Preference | Description | Default |
+|------------|-------------|---------|
+| `gameserver_url` | SpaceMolt API base URL | `https://game.spacemolt.com` |
+| `registration_code` | Code for new account creation | -- |
+| `max_turns` | Global max turns per session | -- |
+| `llm_timeout` | LLM call timeout (seconds) | 300 |
 
 ## Built with Claude Code
 

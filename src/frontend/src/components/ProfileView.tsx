@@ -123,6 +123,10 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   const [editProvider, setEditProvider] = useState('')
   const [editModel, setEditModel] = useState('')
   const [editContextBudget, setEditContextBudget] = useState<number | null>(null)
+  const [editPlannerEnabled, setEditPlannerEnabled] = useState(false)
+  const [editPlannerProvider, setEditPlannerProvider] = useState('')
+  const [editPlannerModel, setEditPlannerModel] = useState('')
+  const [editPlanningInterval, setEditPlanningInterval] = useState(5)
   const [editUsername, setEditUsername] = useState('')
   const [editPassword, setEditPassword] = useState('')
   const editNameRef = useRef<HTMLInputElement>(null)
@@ -349,7 +353,14 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
     const newModel = editProvider === 'manual' ? null : (editModel || null)
     const providerChanged = newProvider !== (profile.provider || null) || newModel !== (profile.model || null)
     setEditing(null)
-    await saveProfileField({ provider: newProvider, model: newModel, context_budget: editContextBudget }, providerChanged)
+    await saveProfileField({
+      provider: newProvider,
+      model: newModel,
+      context_budget: editContextBudget,
+      planner_provider: editPlannerEnabled ? (editPlannerProvider || null) : null,
+      planner_model: editPlannerEnabled ? (editPlannerModel || null) : null,
+      planning_interval: editPlannerEnabled ? editPlanningInterval : null,
+    }, providerChanged)
   }
 
   async function handleSaveCredentials() {
@@ -670,9 +681,12 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
           <div className="relative" data-tour="provider-model">
             <span
               className="text-[10px] text-[hsl(var(--smui-purple))] cursor-pointer hover:text-foreground transition-colors"
-              onClick={() => { setEditing('provider'); setEditProvider(profile.provider || ''); setEditModel(profile.model || ''); setEditContextBudget(profile.context_budget ?? null) }}
+              onClick={() => { setEditing('provider'); setEditProvider(profile.provider || ''); setEditModel(profile.model || ''); setEditContextBudget(profile.context_budget ?? null); setEditPlannerEnabled(!!(profile.planner_model)); setEditPlannerProvider(profile.planner_provider || ''); setEditPlannerModel(profile.planner_model || ''); setEditPlanningInterval(profile.planning_interval ?? 5) }}
             >
               {profile.provider}/{profile.model}
+              {profile.planner_model && (
+                <span className="text-[hsl(var(--smui-frost-2))] ml-1">+planner</span>
+              )}
               <span className="text-muted-foreground/60 ml-1.5">
                 budget:{profile.context_budget != null && !isNaN(profile.context_budget) ? `${Math.round(profile.context_budget * 100)}%` : '55%'}
               </span>
@@ -719,6 +733,39 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
                       </div>
                     </div>
                   )}
+                  {editProvider && editProvider !== 'manual' && (
+                    <div className="border-t border-border/50 pt-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px]">Strategic Planner</span>
+                        <label className="flex items-center gap-1.5 cursor-pointer">
+                          <input type="checkbox" checked={editPlannerEnabled} onChange={e => setEditPlannerEnabled(e.target.checked)} className="accent-[hsl(var(--smui-purple))]" />
+                          <span className="text-[10px] text-muted-foreground">Dual-model</span>
+                        </label>
+                      </div>
+                      {editPlannerEnabled && (
+                        <div className="space-y-1.5 mt-1.5 ml-1 pl-2 border-l-2 border-[hsl(var(--smui-purple)/0.3)]">
+                          <div>
+                            <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-0.5">Planner Provider</span>
+                            <Select value={editPlannerProvider} onChange={e => { setEditPlannerProvider(e.target.value); setEditPlannerModel('') }} className="h-7 text-xs">
+                              <option value="">Same as executor</option>
+                              {availableProviders.filter(p => p !== 'manual').map(p => <option key={p} value={p}>{p}</option>)}
+                            </Select>
+                          </div>
+                          <div>
+                            <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-0.5">Planner Model</span>
+                            <ModelPicker provider={editPlannerProvider || editProvider} value={editPlannerModel} onChange={setEditPlannerModel} />
+                          </div>
+                          <div>
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px]">Plan Every</span>
+                              <span className="text-[10px] text-muted-foreground tabular-nums">{editPlanningInterval} turns</span>
+                            </div>
+                            <input type="range" min={1} max={20} step={1} value={editPlanningInterval} onChange={e => setEditPlanningInterval(parseInt(e.target.value, 10))} className="w-full h-1.5 accent-[hsl(var(--smui-purple))] cursor-pointer" />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <div className="flex justify-end gap-1.5 pt-1 border-t border-border/50">
                     <Button variant="ghost" size="sm" onClick={() => setEditing(null)} className="h-6 text-[10px] px-2">
                       Cancel
@@ -738,7 +785,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
           <div className="relative" data-tour="provider-model">
             <span
               className="text-[10px] text-muted-foreground/50 italic cursor-pointer hover:text-foreground transition-colors"
-              onClick={() => { setEditing('provider'); setEditProvider(profile.provider || ''); setEditModel(profile.model || ''); setEditContextBudget(profile.context_budget ?? null) }}
+              onClick={() => { setEditing('provider'); setEditProvider(profile.provider || ''); setEditModel(profile.model || ''); setEditContextBudget(profile.context_budget ?? null); setEditPlannerEnabled(!!(profile.planner_model)); setEditPlannerProvider(profile.planner_provider || ''); setEditPlannerModel(profile.planner_model || ''); setEditPlanningInterval(profile.planning_interval ?? 5) }}
             >
               {isManual && profile.provider ? 'manual' : 'no provider'}
             </span>
@@ -782,6 +829,39 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
                         <span>5% (small/local)</span>
                         <span>90% (large context)</span>
                       </div>
+                    </div>
+                  )}
+                  {editProvider && editProvider !== 'manual' && (
+                    <div className="border-t border-border/50 pt-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px]">Strategic Planner</span>
+                        <label className="flex items-center gap-1.5 cursor-pointer">
+                          <input type="checkbox" checked={editPlannerEnabled} onChange={e => setEditPlannerEnabled(e.target.checked)} className="accent-[hsl(var(--smui-purple))]" />
+                          <span className="text-[10px] text-muted-foreground">Dual-model</span>
+                        </label>
+                      </div>
+                      {editPlannerEnabled && (
+                        <div className="space-y-1.5 mt-1.5 ml-1 pl-2 border-l-2 border-[hsl(var(--smui-purple)/0.3)]">
+                          <div>
+                            <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-0.5">Planner Provider</span>
+                            <Select value={editPlannerProvider} onChange={e => { setEditPlannerProvider(e.target.value); setEditPlannerModel('') }} className="h-7 text-xs">
+                              <option value="">Same as executor</option>
+                              {availableProviders.filter(p => p !== 'manual').map(p => <option key={p} value={p}>{p}</option>)}
+                            </Select>
+                          </div>
+                          <div>
+                            <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-0.5">Planner Model</span>
+                            <ModelPicker provider={editPlannerProvider || editProvider} value={editPlannerModel} onChange={setEditPlannerModel} />
+                          </div>
+                          <div>
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px]">Plan Every</span>
+                              <span className="text-[10px] text-muted-foreground tabular-nums">{editPlanningInterval} turns</span>
+                            </div>
+                            <input type="range" min={1} max={20} step={1} value={editPlanningInterval} onChange={e => setEditPlanningInterval(parseInt(e.target.value, 10))} className="w-full h-1.5 accent-[hsl(var(--smui-purple))] cursor-pointer" />
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                   <div className="flex justify-end gap-1.5 pt-1 border-t border-border/50">
@@ -876,7 +956,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
               className="w-1 shrink-0 cursor-col-resize bg-border hover:bg-primary/40 transition-colors"
             />
             <div data-tour="side-pane" style={{ width: sidePaneWidth }} className="shrink-0">
-              <SidePane profileId={profile.id} todo={profile.todo} connected={status.connected} playerData={playerData} onRefreshStatus={fetchStatus} />
+              <SidePane profileId={profile.id} todo={profile.todo} memory={profile.memory} connected={status.connected} playerData={playerData} onRefreshStatus={fetchStatus} />
             </div>
           </>
         )}

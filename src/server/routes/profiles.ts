@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile } from '../lib/db'
+import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, reorderProfiles } from '../lib/db'
 import { agentManager } from '../lib/agent-manager'
 
 const profiles = new Hono()
@@ -13,7 +13,7 @@ profiles.get('/', (c) => {
 // POST /api/profiles
 profiles.post('/', async (c) => {
   const body = await c.req.json()
-  const { name, username, password, empire, provider, model, directive, connection_mode, server_url, context_budget } = body
+  const { name, username, password, empire, provider, model, planner_provider, planner_model, planning_interval, directive, connection_mode, server_url, context_budget } = body
   if (!name) return c.json({ error: 'Name is required' }, 400)
   try {
     const profile = createProfile({
@@ -25,13 +25,19 @@ profiles.post('/', async (c) => {
       player_id: null,
       provider: provider || null,
       model: model || null,
+      planner_provider: planner_provider || null,
+      planner_model: planner_model || null,
+      planning_interval: planning_interval ?? null,
       directive: directive || '',
       todo: '',
+      memory: '',
       context_budget: context_budget ?? null,
       connection_mode: connection_mode || 'http',
       server_url: server_url || 'https://game.spacemolt.com',
       autoconnect: true,
       enabled: true,
+      sort_order: body.sort_order ?? listProfiles().length,
+      group_name: body.group_name || '',
     })
     return c.json(profile, 201)
   } catch (err) {
@@ -39,6 +45,15 @@ profiles.post('/', async (c) => {
     if (msg.includes('UNIQUE constraint')) return c.json({ error: 'A profile with that name already exists' }, 409)
     return c.json({ error: msg }, 500)
   }
+})
+
+// PUT /api/profiles/reorder
+profiles.put('/reorder', async (c) => {
+  const body = await c.req.json()
+  const ids = body.ids as string[]
+  if (!Array.isArray(ids)) return c.json({ error: 'ids array required' }, 400)
+  reorderProfiles(ids)
+  return c.json({ ok: true })
 })
 
 // GET /api/profiles/:id

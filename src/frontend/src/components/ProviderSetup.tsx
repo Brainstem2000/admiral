@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
-import { KeyRound, Wifi, WifiOff, Search, Server, X } from 'lucide-react'
+import { KeyRound, Wifi, WifiOff, Search, Server, X, Zap } from 'lucide-react'
 import type { Provider } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { ModelPicker } from '@/components/ModelPicker'
 
 const LOCALHOST = '127.0.0.1'
 
@@ -12,6 +13,7 @@ const DEFAULT_LOCAL_URLS: Record<string, string> = {
 }
 
 const PROVIDER_INFO: Record<string, { label: string; description: string; isLocal: boolean; keyPlaceholder: string }> = {
+  'claude-max': { label: 'Claude MAX', description: 'Claude Code subscription (OAuth)', isLocal: false, keyPlaceholder: '' },
   anthropic: { label: 'Anthropic', description: 'Claude models', isLocal: false, keyPlaceholder: 'sk-ant-...' },
   openai: { label: 'OpenAI', description: 'GPT models', isLocal: false, keyPlaceholder: 'sk-...' },
   groq: { label: 'Groq', description: 'Fast inference', isLocal: false, keyPlaceholder: 'gsk_...' },
@@ -36,10 +38,14 @@ interface Props {
   onMaxTurnsChange: (turns: number) => void
   llmTimeout: number
   onLlmTimeoutChange: (seconds: number) => void
+  defaultProvider: string
+  onDefaultProviderChange: (provider: string) => void
+  defaultModel: string
+  onDefaultModelChange: (model: string) => void
   onClose: () => void
 }
 
-export function ProviderSetup({ providers: initialProviders, registrationCode, onRegistrationCodeChange, gameserverUrl, onGameserverUrlChange, maxTurns, onMaxTurnsChange, llmTimeout, onLlmTimeoutChange, onClose }: Props) {
+export function ProviderSetup({ providers: initialProviders, registrationCode, onRegistrationCodeChange, gameserverUrl, onGameserverUrlChange, maxTurns, onMaxTurnsChange, llmTimeout, onLlmTimeoutChange, defaultProvider, onDefaultProviderChange, defaultModel, onDefaultModelChange, onClose }: Props) {
   const [providers, setProviders] = useState(initialProviders)
   const [keys, setKeys] = useState<Record<string, string>>(() => {
     const m: Record<string, string> = {}
@@ -60,6 +66,12 @@ export function ProviderSetup({ providers: initialProviders, registrationCode, o
   })
   const [saving, setSaving] = useState<Record<string, boolean>>({})
   const [detecting, setDetecting] = useState(false)
+
+  // Group providers
+  const claudeMaxProvider = providers.find(p => p.id === 'claude-max')
+  const cloudProviders = providers.filter(p => !PROVIDER_INFO[p.id]?.isLocal && p.id !== 'claude-max')
+  const localProviders = providers.filter(p => PROVIDER_INFO[p.id]?.isLocal || p.id === 'custom')
+  const validProviders = providers.filter(p => p.status === 'valid' || p.api_key)
 
   // Close on Escape
   useEffect(() => {
@@ -150,6 +162,135 @@ export function ProviderSetup({ providers: initialProviders, registrationCode, o
     }
   }
 
+  function statusDot(status: string) {
+    return `status-dot ${
+      status === 'valid' ? 'status-dot-green' :
+      status === 'invalid' ? 'status-dot-red' :
+      status === 'unreachable' ? 'status-dot-orange' :
+      'status-dot-grey'
+    }`
+  }
+
+  function renderCloudProvider(p: Provider) {
+    const info = PROVIDER_INFO[p.id] || { label: p.id, description: '', isLocal: false, keyPlaceholder: '' }
+    return (
+      <div key={p.id} className="border border-border/60 bg-background/30 px-3 py-2">
+        <div className="flex items-center gap-2.5">
+          <div className={statusDot(p.status)} />
+          <span className="text-xs font-medium text-foreground">{info.label}</span>
+          <span className="text-[10px] text-muted-foreground">{info.description}</span>
+        </div>
+        <div className="flex items-center gap-2 mt-2 ml-4">
+          <KeyRound size={10} className="text-muted-foreground shrink-0" />
+          <Input
+            type="password"
+            value={keys[p.id] || ''}
+            onChange={e => setKeys(k => ({ ...k, [p.id]: e.target.value }))}
+            placeholder={info.keyPlaceholder || 'API key'}
+            className="flex-1 h-6 text-[11px]"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => saveKey(p.id)}
+            disabled={saving[p.id]}
+            className="h-6 text-[10px] hover:text-primary hover:border-primary/40"
+          >
+            {saving[p.id] ? '...' : 'Save'}
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
+  function renderLocalProvider(p: Provider) {
+    const info = PROVIDER_INFO[p.id] || { label: p.id, description: '', isLocal: true, keyPlaceholder: '' }
+
+    if (p.id === 'custom') {
+      return (
+        <div key={p.id} className="border border-border/60 bg-background/30 px-3 py-2">
+          <div className="flex items-center gap-2.5">
+            <div className={statusDot(p.status)} />
+            <span className="text-xs font-medium text-foreground">{info.label}</span>
+            <span className="text-[10px] text-muted-foreground">{info.description}</span>
+          </div>
+          <div className="flex items-center gap-2 mt-2 ml-4">
+            <Server size={10} className="text-muted-foreground shrink-0" />
+            <Input
+              value={urls['custom'] || ''}
+              onChange={e => setUrls(u => ({ ...u, custom: e.target.value }))}
+              placeholder="http://host:port/v1"
+              className="flex-1 h-6 text-[11px]"
+            />
+          </div>
+          <div className="flex items-center gap-2 mt-1.5 ml-4">
+            <KeyRound size={10} className="text-muted-foreground shrink-0" />
+            <Input
+              type="password"
+              value={keys['custom'] || ''}
+              onChange={e => setKeys(k => ({ ...k, custom: e.target.value }))}
+              placeholder="API key (optional)"
+              className="flex-1 h-6 text-[11px]"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={saveCustomProvider}
+              disabled={saving['custom']}
+              className="h-6 text-[10px] hover:text-primary hover:border-primary/40"
+            >
+              {saving['custom'] ? '...' : 'Save'}
+            </Button>
+          </div>
+          <div className="flex items-center gap-1.5 mt-1.5 ml-4">
+            {p.status === 'valid' ? (
+              <><Wifi size={10} className="text-[hsl(var(--smui-green))]" /><span className="text-[10px] text-[hsl(var(--smui-green))]">Reachable</span></>
+            ) : p.status === 'unreachable' ? (
+              <><WifiOff size={10} className="text-[hsl(var(--smui-orange))]" /><span className="text-[10px] text-[hsl(var(--smui-orange))]">Unreachable</span></>
+            ) : urls['custom'] ? (
+              <><WifiOff size={10} className="text-muted-foreground" /><span className="text-[10px] text-muted-foreground">Not tested</span></>
+            ) : null}
+          </div>
+        </div>
+      )
+    }
+
+    return (
+      <div key={p.id} className="border border-border/60 bg-background/30 px-3 py-2">
+        <div className="flex items-center gap-2.5">
+          <div className={statusDot(p.status)} />
+          <span className="text-xs font-medium text-foreground">{info.label}</span>
+          <span className="text-[10px] text-muted-foreground">{info.description}</span>
+        </div>
+        <div className="flex items-center gap-2 mt-2 ml-4">
+          <Server size={10} className="text-muted-foreground shrink-0" />
+          <Input
+            value={urls[p.id] || DEFAULT_LOCAL_URLS[p.id] || ''}
+            onChange={e => setUrls(u => ({ ...u, [p.id]: e.target.value }))}
+            placeholder={DEFAULT_LOCAL_URLS[p.id] || 'http://host:port'}
+            className="flex-1 h-6 text-[11px]"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => saveLocalUrl(p.id)}
+            disabled={saving[p.id]}
+            className="h-6 text-[10px] hover:text-primary hover:border-primary/40"
+          >
+            {saving[p.id] ? '...' : 'Save'}
+          </Button>
+        </div>
+        <div className="flex items-center gap-1.5 mt-1.5 ml-4">
+          {p.status === 'valid' ? (
+            <><Wifi size={10} className="text-[hsl(var(--smui-green))]" /><span className="text-[10px] text-[hsl(var(--smui-green))]">Running</span></>
+          ) : (
+            <><WifiOff size={10} className="text-muted-foreground" /><span className="text-[10px] text-muted-foreground">Not detected</span></>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-8"
@@ -232,10 +373,50 @@ export function ProviderSetup({ providers: initialProviders, registrationCode, o
             </div>
           </div>
 
-          {/* Providers section */}
+          {/* LLM Defaults section */}
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <Zap size={11} className="text-[hsl(var(--smui-green))]" />
+              <span className="text-[11px] text-[hsl(var(--smui-green))] uppercase tracking-[1.5px] font-medium">LLM Defaults</span>
+            </div>
+            <p className="text-[10px] text-muted-foreground mb-2.5">Default provider and model for new profiles. Does not change existing profiles.</p>
+            <div className="space-y-2.5">
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Provider</span>
+                <select
+                  value={defaultProvider}
+                  onChange={e => {
+                    onDefaultProviderChange(e.target.value)
+                    if (e.target.value !== defaultProvider) onDefaultModelChange('')
+                  }}
+                  className="flex-1 h-7 text-xs bg-background border border-input px-2 font-jetbrains text-foreground outline-none focus:border-ring focus:ring-ring/50 focus:ring-[3px]"
+                >
+                  <option value="">None</option>
+                  {validProviders.map(p => {
+                    const info = PROVIDER_INFO[p.id]
+                    return <option key={p.id} value={p.id}>{info?.label || p.id}</option>
+                  })}
+                </select>
+              </div>
+              {defaultProvider && (
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-muted-foreground w-28 shrink-0">Model</span>
+                  <div className="flex-1">
+                    <ModelPicker
+                      provider={defaultProvider}
+                      value={defaultModel}
+                      onChange={onDefaultModelChange}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* API Configuration section */}
           <div>
             <div className="flex items-center justify-between mb-2.5">
-              <span className="text-[11px] text-[hsl(var(--smui-frost-2))] uppercase tracking-[1.5px] font-medium">Providers</span>
+              <span className="text-[11px] text-[hsl(var(--smui-frost-2))] uppercase tracking-[1.5px] font-medium">API Configuration</span>
               <Button
                 variant="outline"
                 size="sm"
@@ -247,115 +428,44 @@ export function ProviderSetup({ providers: initialProviders, registrationCode, o
                 {detecting ? 'Scanning...' : 'Detect Local'}
               </Button>
             </div>
-            <div className="space-y-1.5">
-              {providers.map(p => {
-                const info = PROVIDER_INFO[p.id] || { label: p.id, description: '', isLocal: false, keyPlaceholder: '' }
-                return (
-                  <div key={p.id} className="border border-border/60 bg-background/30 px-3 py-2">
-                    <div className="flex items-center gap-2.5">
-                      <div className={`status-dot ${
-                        p.status === 'valid' ? 'status-dot-green' :
-                        p.status === 'invalid' ? 'status-dot-red' :
-                        p.status === 'unreachable' ? 'status-dot-orange' :
-                        'status-dot-grey'
-                      }`} />
-                      <span className="text-xs font-medium text-foreground">{info.label}</span>
-                      <span className="text-[10px] text-muted-foreground">{info.description}</span>
-                    </div>
 
-                    {p.id === 'custom' ? (
-                      <>
-                        <div className="flex items-center gap-2 mt-2 ml-4">
-                          <Server size={10} className="text-muted-foreground shrink-0" />
-                          <Input
-                            value={urls['custom'] || ''}
-                            onChange={e => setUrls(u => ({ ...u, custom: e.target.value }))}
-                            placeholder="http://host:port/v1"
-                            className="flex-1 h-6 text-[11px]"
-                          />
-                        </div>
-                        <div className="flex items-center gap-2 mt-1.5 ml-4">
-                          <KeyRound size={10} className="text-muted-foreground shrink-0" />
-                          <Input
-                            type="password"
-                            value={keys['custom'] || ''}
-                            onChange={e => setKeys(k => ({ ...k, custom: e.target.value }))}
-                            placeholder="API key (optional)"
-                            className="flex-1 h-6 text-[11px]"
-                          />
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={saveCustomProvider}
-                            disabled={saving['custom']}
-                            className="h-6 text-[10px] hover:text-primary hover:border-primary/40"
-                          >
-                            {saving['custom'] ? '...' : 'Save'}
-                          </Button>
-                        </div>
-                        <div className="flex items-center gap-1.5 mt-1.5 ml-4">
-                          {p.status === 'valid' ? (
-                            <><Wifi size={10} className="text-[hsl(var(--smui-green))]" /><span className="text-[10px] text-[hsl(var(--smui-green))]">Reachable</span></>
-                          ) : p.status === 'unreachable' ? (
-                            <><WifiOff size={10} className="text-[hsl(var(--smui-orange))]" /><span className="text-[10px] text-[hsl(var(--smui-orange))]">Unreachable</span></>
-                          ) : urls['custom'] ? (
-                            <><WifiOff size={10} className="text-muted-foreground" /><span className="text-[10px] text-muted-foreground">Not tested</span></>
-                          ) : null}
-                        </div>
-                      </>
-                    ) : !info.isLocal ? (
-                      <div className="flex items-center gap-2 mt-2 ml-4">
-                        <KeyRound size={10} className="text-muted-foreground shrink-0" />
-                        <Input
-                          type="password"
-                          value={keys[p.id] || ''}
-                          onChange={e => setKeys(k => ({ ...k, [p.id]: e.target.value }))}
-                          placeholder={info.keyPlaceholder || 'API key'}
-                          className="flex-1 h-6 text-[11px]"
-                        />
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => saveKey(p.id)}
-                          disabled={saving[p.id]}
-                          className="h-6 text-[10px] hover:text-primary hover:border-primary/40"
-                        >
-                          {saving[p.id] ? '...' : 'Save'}
-                        </Button>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="flex items-center gap-2 mt-2 ml-4">
-                          <Server size={10} className="text-muted-foreground shrink-0" />
-                          <Input
-                            value={urls[p.id] || DEFAULT_LOCAL_URLS[p.id] || ''}
-                            onChange={e => setUrls(u => ({ ...u, [p.id]: e.target.value }))}
-                            placeholder={DEFAULT_LOCAL_URLS[p.id] || 'http://host:port'}
-                            className="flex-1 h-6 text-[11px]"
-                          />
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => saveLocalUrl(p.id)}
-                            disabled={saving[p.id]}
-                            className="h-6 text-[10px] hover:text-primary hover:border-primary/40"
-                          >
-                            {saving[p.id] ? '...' : 'Save'}
-                          </Button>
-                        </div>
-                        <div className="flex items-center gap-1.5 mt-1.5 ml-4">
-                          {p.status === 'valid' ? (
-                            <><Wifi size={10} className="text-[hsl(var(--smui-green))]" /><span className="text-[10px] text-[hsl(var(--smui-green))]">Running</span></>
-                          ) : (
-                            <><WifiOff size={10} className="text-muted-foreground" /><span className="text-[10px] text-muted-foreground">Not detected</span></>
-                          )}
-                        </div>
-                      </>
-                    )}
+            {/* Claude MAX - special (OAuth, no key input) */}
+            {claudeMaxProvider && (
+              <div className="mb-3">
+                <span className="text-[10px] text-muted-foreground uppercase tracking-[1px] mb-1 block">Subscription</span>
+                <div className="border border-border/60 bg-background/30 px-3 py-2">
+                  <div className="flex items-center gap-2.5">
+                    <div className={statusDot(claudeMaxProvider.status)} />
+                    <span className="text-xs font-medium text-foreground">Claude MAX</span>
+                    <span className="text-[10px] text-muted-foreground">
+                      {claudeMaxProvider.status === 'valid'
+                        ? 'Connected via Claude Code OAuth'
+                        : 'Not detected — requires Claude Code login'}
+                    </span>
                   </div>
-                )
-              })}
-            </div>
+                </div>
+              </div>
+            )}
+
+            {/* Cloud Providers */}
+            {cloudProviders.length > 0 && (
+              <div className="mb-3">
+                <span className="text-[10px] text-muted-foreground uppercase tracking-[1px] mb-1 block">Cloud Providers</span>
+                <div className="space-y-1.5">
+                  {cloudProviders.map(renderCloudProvider)}
+                </div>
+              </div>
+            )}
+
+            {/* Local Providers */}
+            {localProviders.length > 0 && (
+              <div>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-[1px] mb-1 block">Local Providers</span>
+                <div className="space-y-1.5">
+                  {localProviders.map(renderLocalProvider)}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

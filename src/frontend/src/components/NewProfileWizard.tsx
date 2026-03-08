@@ -10,6 +10,8 @@ interface Props {
   providers: Provider[]
   registrationCode: string
   gameserverUrl: string
+  defaultProvider: string
+  defaultModel: string
   onClose: () => void
   onCreate: (data: Partial<Profile>) => void
   onShowSettings: () => void
@@ -17,7 +19,7 @@ interface Props {
 
 type Step = 'account' | 'provider'
 
-export function NewProfileWizard({ providers, registrationCode, gameserverUrl, onClose, onCreate, onShowSettings }: Props) {
+export function NewProfileWizard({ providers, registrationCode, gameserverUrl, defaultProvider, defaultModel, onClose, onCreate, onShowSettings }: Props) {
   const [step, setStep] = useState<Step>('account')
   const [accountMode, setAccountMode] = useState<'new' | 'existing' | null>(null)
 
@@ -28,10 +30,16 @@ export function NewProfileWizard({ providers, registrationCode, gameserverUrl, o
   const nameRef = useRef<HTMLInputElement>(null)
   const usernameRef = useRef<HTMLInputElement>(null)
 
-  // Provider fields
-  const [provider, setProvider] = useState('')
-  const [model, setModel] = useState('')
+  // Provider fields — pre-fill from LLM Defaults
+  const [provider, setProvider] = useState(defaultProvider || '')
+  const [model, setModel] = useState(defaultModel || '')
   const [contextBudget, setContextBudget] = useState<number | null>(null)
+
+  // Dual-model planner fields
+  const [plannerEnabled, setPlannerEnabled] = useState(false)
+  const [plannerProvider, setPlannerProvider] = useState('')
+  const [plannerModel, setPlannerModel] = useState('')
+  const [planningInterval, setPlanningInterval] = useState(5)
 
   const validProviders = providers.filter(p => p.status === 'valid' || p.api_key)
   const hasValidProvider = validProviders.length > 0
@@ -70,6 +78,9 @@ export function NewProfileWizard({ providers, registrationCode, gameserverUrl, o
       provider: provider === 'manual' ? null : (provider || null),
       model: provider && provider !== 'manual' ? (model || null) : null,
       context_budget: provider && provider !== 'manual' ? (contextBudget ?? null) : null,
+      planner_provider: plannerEnabled ? (plannerProvider || null) : null,
+      planner_model: plannerEnabled ? (plannerModel || null) : null,
+      planning_interval: plannerEnabled ? planningInterval : null,
       server_url: gameserverUrl,
       username: accountMode === 'existing' ? (username || null) : null,
       password: accountMode === 'existing' ? (password || null) : null,
@@ -297,6 +308,67 @@ export function NewProfileWizard({ providers, registrationCode, gameserverUrl, o
                     <p className="text-[10px] text-muted-foreground/60 mt-1">
                       Controls when context is compacted. Lower values keep less history but run faster on small models.
                     </p>
+                  </div>
+                )}
+
+                {provider && provider !== 'manual' && (
+                  <div className="border-t border-border/50 pt-3 mt-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px]">Strategic Planner</span>
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={plannerEnabled}
+                          onChange={e => setPlannerEnabled(e.target.checked)}
+                          className="accent-[hsl(var(--smui-purple))]"
+                        />
+                        <span className="text-[10px] text-muted-foreground">Enable dual-model</span>
+                      </label>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground/60 mt-1">
+                      Use a smarter model for periodic strategic planning while the main model handles fast execution.
+                    </p>
+
+                    {plannerEnabled && (
+                      <div className="space-y-2 mt-2 ml-1 pl-3 border-l-2 border-[hsl(var(--smui-purple)/0.3)]">
+                        <div>
+                          <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Planner Provider</span>
+                          <Select
+                            value={plannerProvider}
+                            onChange={e => { setPlannerProvider(e.target.value); setPlannerModel('') }}
+                            className="h-7 text-xs"
+                          >
+                            <option value="">Same as executor</option>
+                            {availableProviders.filter(p => p !== 'manual').map(p => (
+                              <option key={p} value={p}>{p}</option>
+                            ))}
+                          </Select>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] block mb-1">Planner Model</span>
+                          <ModelPicker provider={plannerProvider || provider} value={plannerModel} onChange={setPlannerModel} />
+                        </div>
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px]">Plan Every</span>
+                            <span className="text-[10px] text-muted-foreground tabular-nums">{planningInterval} turns</span>
+                          </div>
+                          <input
+                            type="range"
+                            min={1}
+                            max={20}
+                            step={1}
+                            value={planningInterval}
+                            onChange={e => setPlanningInterval(parseInt(e.target.value, 10))}
+                            className="w-full h-1.5 accent-[hsl(var(--smui-purple))] cursor-pointer"
+                          />
+                          <div className="flex justify-between text-[9px] text-muted-foreground/50 mt-0.5">
+                            <span>Every turn (expensive)</span>
+                            <span>Every 20 turns</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

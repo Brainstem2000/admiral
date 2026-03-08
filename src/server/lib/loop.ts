@@ -32,8 +32,10 @@ export async function runAgentTurn(
   context: Context,
   connection: GameConnection,
   profileId: string,
+  profileName: string,
   log: LogFn,
   todo: { value: string },
+  memory: { value: string },
   options?: LoopOptions,
   compaction?: CompactionState,
 ): Promise<void> {
@@ -151,7 +153,7 @@ export async function runAgentTurn(
 
     if (reasoning) log('llm_thought', reasoning)
 
-    const toolCtx = { connection, profileId, log, todo: todo.value }
+    const toolCtx = { connection, profileId, profileName, log, todo: todo.value, memory: memory.value }
 
     let showedReason = false
     for (const toolCall of toolCalls) {
@@ -162,8 +164,9 @@ export async function runAgentTurn(
       showedReason = true
       const result = await executeTool(toolCall.name, toolCall.arguments, toolCtx, callReason)
 
-      // If update_todo changed the todo via local tool, sync back
+      // If local tools changed todo/memory, sync back
       todo.value = toolCtx.todo
+      memory.value = toolCtx.memory
 
       const isError = result.startsWith('Error')
       const toolResultMessage: Message = {

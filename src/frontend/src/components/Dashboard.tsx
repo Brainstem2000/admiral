@@ -1,22 +1,26 @@
-import { useState, useEffect, useCallback } from 'react'
-import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp } from 'lucide-react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp, Globe, BarChart3, Coins, Vault } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 import type { Profile, Provider } from '@/types'
 import { ProfileList } from './ProfileList'
 import { ProfileView } from './ProfileView'
+import { FleetMap } from './FleetMap'
 import { NewProfileWizard } from './NewProfileWizard'
 import { AdmiralTour } from './AdmiralTour'
+import { AnalyticsPane } from './AnalyticsPane'
 
 interface Props {
   profiles: Profile[]
   providers: Provider[]
   registrationCode: string
   gameserverUrl: string
+  defaultProvider: string
+  defaultModel: string
   onRefresh: () => void
   onShowProviders: () => void
 }
 
-export function Dashboard({ profiles: initialProfiles, providers, registrationCode, gameserverUrl, onRefresh, onShowProviders }: Props) {
+export function Dashboard({ profiles: initialProfiles, providers, registrationCode, gameserverUrl, defaultProvider, defaultModel, onRefresh, onShowProviders }: Props) {
   const [profiles, setProfiles] = useState(initialProfiles)
   const [searchParams, setSearchParams] = useSearchParams()
   const activeId = searchParams.get('profile') || initialProfiles[0]?.id || ''
@@ -30,6 +34,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const [playerDataMap, setPlayerDataMap] = useState<Record<string, Record<string, unknown>>>({})
   const [showWizard, setShowWizard] = useState(false)
   const [showTour, setShowTour] = useState(false)
+  const [view, setView] = useState<'profiles' | 'map' | 'analytics'>('profiles')
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try { return localStorage.getItem('admiral-sidebar-open') !== 'false' } catch { return true }
   })
@@ -81,6 +86,23 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     }
   }, [])
 
+  const handleReorder = useCallback(async (orderedIds: string[]) => {
+    // Optimistic update
+    setProfiles(prev => {
+      const byId = new Map(prev.map(p => [p.id, p]))
+      return orderedIds.map(id => byId.get(id)!).filter(Boolean)
+    })
+    try {
+      await fetch('/api/profiles/reorder', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: orderedIds }),
+      })
+    } catch {
+      refreshProfiles()
+    }
+  }, [refreshProfiles])
+
   function handleNewProfile() {
     setShowWizard(true)
   }
@@ -113,6 +135,36 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     }
   }
 
+  const { totalWallet, totalStorage, activeWallet, activeStorage } = useMemo(() => {
+    let wallet = 0
+    let storage = 0
+    let aWallet = 0
+    let aStorage = 0
+    for (const p of profiles) {
+      // Wallet credits from live game state
+      const pd = playerDataMap[p.id]
+      let pWallet = 0
+      if (pd) {
+        const player = (pd.player || {}) as Record<string, unknown>
+        pWallet = Number(player.credits ?? pd.credits ?? 0)
+        wallet += pWallet
+      }
+
+      // Storage credits from agent memory ledger
+      let pStorage = 0
+      if (p.memory) {
+        pStorage = parseStorageCreditsFromMemory(p.memory)
+        storage += pStorage
+      }
+
+      if (p.id === activeId) {
+        aWallet = pWallet
+        aStorage = pStorage
+      }
+    }
+    return { totalWallet: wallet, totalStorage: storage, activeWallet: aWallet, activeStorage: aStorage }
+  }, [profiles, playerDataMap, activeId])
+
   const hasValidProvider = providers.some(p => p.status === 'valid' || p.api_key)
 
   return (
@@ -125,6 +177,24 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
           </h1>
           <span className="text-[11px] text-muted-foreground tracking-[1.5px] uppercase">SpaceMolt Agent Manager</span>
         </div>
+        {(totalWallet > 0 || totalStorage > 0) && (
+          <div className="flex items-center gap-4 text-[11px] text-muted-foreground">
+            {(activeProfile ? activeWallet > 0 : totalWallet > 0) && (
+              <div className="flex items-center gap-1.5" title={activeProfile ? `${activeProfile.name} wallet (fleet total: ${totalWallet.toLocaleString()})` : 'Total fleet credits (wallet)'}>
+                <Coins size={12} className="text-yellow-500/70" />
+                <span className="font-mono font-medium text-foreground/80">{(activeProfile ? activeWallet : totalWallet).toLocaleString()}</span>
+                <span className="text-[10px]">wallet</span>
+              </div>
+            )}
+            {(activeProfile ? activeStorage > 0 : totalStorage > 0) && (
+              <div className="flex items-center gap-1.5" title={activeProfile ? `${activeProfile.name} storage (fleet total: ${totalStorage.toLocaleString()})` : 'Total credits in station storage'}>
+                <Vault size={12} className="text-blue-400/70" />
+                <span className="font-mono font-medium text-foreground/80">{(activeProfile ? activeStorage : totalStorage).toLocaleString()}</span>
+                <span className="text-[10px]">storage</span>
+              </div>
+            )}
+          </div>
+        )}
         <div className="flex items-center gap-3">
           <a
             href="https://github.com/SpaceMolt/admiral"
@@ -135,6 +205,20 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
           >
             <Github size={13} />
           </a>
+          <button
+            onClick={() => setView(v => v === 'map' ? 'profiles' : 'map')}
+            className={`flex items-center justify-center w-7 h-7 transition-colors border border-border ${view === 'map' ? 'text-primary bg-primary/10' : 'text-muted-foreground hover:text-foreground'}`}
+            title={view === 'map' ? 'Show profiles' : 'Show fleet map'}
+          >
+            <Globe size={13} />
+          </button>
+          <button
+            onClick={() => setView(v => v === 'analytics' ? 'profiles' : 'analytics')}
+            className={`flex items-center justify-center w-7 h-7 transition-colors border border-border ${view === 'analytics' ? 'text-primary bg-primary/10' : 'text-muted-foreground hover:text-foreground'}`}
+            title={view === 'analytics' ? 'Show profiles' : 'Show analytics'}
+          >
+            <BarChart3 size={13} />
+          </button>
           <ThemeToggle />
           <button
             onClick={() => {
@@ -166,15 +250,27 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
               activeId={activeId}
               statuses={statuses}
               playerDataMap={playerDataMap}
-              onSelect={setActiveId}
+              onSelect={(id) => { setActiveId(id); setView('profiles') }}
               onNew={handleNewProfile}
+              onReorder={handleReorder}
             />
           </div>
         )}
 
         {/* Content area */}
         <div className="flex-1 min-w-0">
-          {activeProfile ? (
+          {view === 'map' ? (
+            <FleetMap
+              profiles={profiles}
+              statuses={statuses}
+              playerDataMap={playerDataMap}
+            />
+          ) : view === 'analytics' ? (
+            <AnalyticsPane
+              profiles={profiles}
+              statuses={statuses}
+            />
+          ) : activeProfile ? (
             <ProfileView
               profile={activeProfile}
               providers={providers}
@@ -249,6 +345,8 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
           providers={providers}
           registrationCode={registrationCode}
           gameserverUrl={gameserverUrl}
+          defaultProvider={defaultProvider}
+          defaultModel={defaultModel}
           onClose={() => setShowWizard(false)}
           onCreate={handleWizardCreate}
           onShowSettings={() => {
@@ -269,6 +367,93 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
       )}
     </div>
   )
+}
+
+/**
+ * Parse total storage credits from an agent's memory ledger.
+ *
+ * Section-aware parser: only extracts credits from sections whose headings
+ * indicate storage/credits content. Uses summary-vs-individual priority
+ * to prevent double-counting when agents list credits in both a summary
+ * section and per-station detail sections.
+ *
+ * Supported formats:
+ *   - "- **Station:** 577,067cr"        (CyberSapper summary)
+ *   - "- Station storage: 50,000cr"     (Bob Credits & Assets)
+ *   - "- **Credits:** 1,268,440"        (CyberSpock per-station)
+ *   - "- Credits: 2,202,999"            (Nova per-station detail)
+ *   - "- **Station:** 0 credits, ..."   (Morg'Thar station storage)
+ *   - "| CCC (Sol) | 2,202,999 |"      (Nova verified ledger table)
+ */
+function parseStorageCreditsFromMemory(memory: string): number {
+  const lines = memory.split('\n')
+  let summaryFound = false
+  let summaryTotal = 0
+  let individualTotal = 0
+  let sectionType: 'summary' | 'individual' | 'none' = 'none'
+
+  for (const line of lines) {
+    // Track section headers (## or ###)
+    if (/^#{2,3}\s/.test(line)) {
+      const heading = line.replace(/^#+\s*/, '').trim().toLowerCase()
+      // Summary: heading starts with "credits" or has "storage credits" as a phrase
+      if (/^credits\b/i.test(heading) || /storage\s+credits/i.test(heading)) {
+        sectionType = 'summary'
+        summaryFound = true
+      // Individual: heading has "storage" but not market/resource noise
+      } else if (/storage/i.test(heading) && !/market|palladium|resource|sales log/i.test(heading)) {
+        sectionType = 'individual'
+      } else {
+        sectionType = 'none'
+      }
+      continue
+    }
+
+    if (sectionType === 'none') continue
+
+    const trimmed = line.trim()
+    if (!trimmed || trimmed === '|---|---|') continue
+
+    const credits = extractStorageCredits(trimmed)
+    if (credits > 0) {
+      if (sectionType === 'summary') summaryTotal += credits
+      else individualTotal += credits
+    }
+  }
+
+  return summaryFound ? summaryTotal : individualTotal
+}
+
+function extractStorageCredits(trimmed: string): number {
+  // Table row: | Name | Number |
+  if (trimmed.startsWith('|')) {
+    const cells = trimmed.split('|').filter(c => c.trim())
+    if (cells.length !== 2) return 0
+    const label = cells[0].trim().toLowerCase().replace(/\*/g, '')
+    if (/wallet|total|location|credits|^-+$/.test(label)) return 0
+    const value = cells[1].trim().replace(/\*/g, '')
+    const num = parseInt(value.replace(/,/g, ''), 10)
+    return (num > 0 && !isNaN(num)) ? num : 0
+  }
+
+  if (!trimmed.startsWith('-') && !trimmed.startsWith('*')) return 0
+  const content = trimmed.replace(/^[-*]\s*/, '')
+  const clean = content.toLowerCase().replace(/\*/g, '')
+  if (/^(wallet|total|sell credit|dock readout|true balance|uncertain|estimated)/i.test(clean)) return 0
+
+  // "**Station:** N,NNNcr" or "Station storage: N,NNNcr"
+  const labelCrMatch = content.match(/^(?:\*\*[^*]+\*\*|[^:]+storage)\s*:?\s*([\d,]+)\s*cr\b/i)
+  if (labelCrMatch) return parseInt(labelCrMatch[1].replace(/,/g, ''), 10) || 0
+
+  // "Credits: N" or "**Credits:** N" — match on clean (stars stripped)
+  const creditsMatch = clean.match(/^credits\s*:?\s*([\d,]+)/i)
+  if (creditsMatch) return parseInt(creditsMatch[1].replace(/,/g, ''), 10) || 0
+
+  // "**Station:** N credits" (e.g., "**Ironhearth:** 0 credits, items...")
+  const nCreditsMatch = content.match(/^\*\*[^*]+\*\*:?\s*([\d,]+)\s+credits?\b/i)
+  if (nCreditsMatch) return parseInt(nCreditsMatch[1].replace(/,/g, ''), 10) || 0
+
+  return 0
 }
 
 function ThemeToggle() {

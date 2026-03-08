@@ -14,6 +14,9 @@ export interface Profile {
   player_id: string | null
   provider: string | null
   model: string | null
+  planner_provider: string | null
+  planner_model: string | null
+  planning_interval: number | null
   directive: string
   todo: string
   context_budget: number | null

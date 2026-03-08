@@ -12,6 +12,8 @@ export function Home() {
   const [gameserverUrl, setGameserverUrl] = useState('https://game.spacemolt.com')
   const [maxTurns, setMaxTurns] = useState(30)
   const [llmTimeout, setLlmTimeout] = useState(300)
+  const [defaultProvider, setDefaultProvider] = useState('')
+  const [defaultModel, setDefaultModel] = useState('')
 
   useEffect(() => {
     loadData()
@@ -43,6 +45,8 @@ export function Home() {
         const v = parseInt(prefs.llm_timeout, 10)
         if (!isNaN(v) && v > 0) setLlmTimeout(v)
       }
+      if (prefs.default_provider) setDefaultProvider(prefs.default_provider)
+      if (prefs.default_model) setDefaultModel(prefs.default_model)
 
       // Show settings if no profiles and no configured providers
       if (profs.length === 0 && !provs.some(p => p.status === 'valid')) {
@@ -107,6 +111,32 @@ export function Home() {
     }
   }, [])
 
+  const handleSetDefaultProvider = useCallback(async (provider: string) => {
+    setDefaultProvider(provider)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'default_provider', value: provider }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const handleSetDefaultModel = useCallback(async (model: string) => {
+    setDefaultModel(model)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'default_model', value: model }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-screen">
@@ -122,6 +152,8 @@ export function Home() {
         providers={providers}
         registrationCode={registrationCode}
         gameserverUrl={gameserverUrl}
+        defaultProvider={defaultProvider}
+        defaultModel={defaultModel}
         onRefresh={loadData}
         onShowProviders={() => setShowSettings(true)}
       />
@@ -136,6 +168,10 @@ export function Home() {
           onMaxTurnsChange={handleSetMaxTurns}
           llmTimeout={llmTimeout}
           onLlmTimeoutChange={handleSetLlmTimeout}
+          defaultProvider={defaultProvider}
+          onDefaultProviderChange={handleSetDefaultProvider}
+          defaultModel={defaultModel}
+          onDefaultModelChange={handleSetDefaultModel}
           onClose={() => {
             setShowSettings(false)
             loadData()

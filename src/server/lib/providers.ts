@@ -1,4 +1,5 @@
 import { getProvider, upsertProvider } from './db'
+import { isClaudeMaxAvailable, getClaudeMaxInfo } from './claude-max-auth'
 
 const LOCALHOST = '127.0.0.1'
 
@@ -50,6 +51,15 @@ export async function detectLocalProviders(customUrls?: Record<string, string>):
     }
   } catch {
     results.push({ id: 'lmstudio', status: 'unreachable', baseUrl: `${lmStudioUrl}/v1` })
+  }
+
+  // Check Claude MAX (local OAuth credentials from Claude Code)
+  if (isClaudeMaxAvailable()) {
+    const info = getClaudeMaxInfo()
+    upsertProvider('claude-max', 'oauth', '', 'valid')
+    results.push({ id: 'claude-max', status: 'valid', baseUrl: `Claude MAX (${info.subscriptionType || 'subscription'})` })
+  } else {
+    results.push({ id: 'claude-max', status: 'unreachable', baseUrl: 'No Claude Code credentials found' })
   }
 
   return results
@@ -123,6 +133,9 @@ export async function validateApiKey(provider: string, apiKey: string): Promise<
         })
         return resp.ok
       }
+      case 'claude-max':
+        // Claude MAX uses OAuth tokens from local Claude Code installation
+        return isClaudeMaxAvailable()
       default:
         // For unknown providers, assume valid if non-empty
         return apiKey.length > 0

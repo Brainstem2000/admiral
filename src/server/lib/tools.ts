@@ -2,6 +2,7 @@ import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import { updateProfile } from './db'
+import { FleetIntelCollector } from './fleet-intel'
 
 // --- Tool Definitions ---
 
@@ -37,6 +38,18 @@ export const allTools: Tool[] = [
     parameters: Type.Object({}),
   },
   {
+    name: 'read_memory',
+    description: 'Read your persistent memory - accumulated knowledge, routes, market intel, storage inventories, lessons learned, strategic plans. Persists across all sessions.',
+    parameters: Type.Object({}),
+  },
+  {
+    name: 'update_memory',
+    description: 'Update your persistent memory. Save important discoveries, routes, market intel, storage inventories, combat data, lessons. Replaces entire memory - include everything you want to keep.',
+    parameters: Type.Object({
+      content: Type.String({ description: 'Full memory content (replaces existing). Use markdown.' }),
+    }),
+  },
+  {
     name: 'status_log',
     description: 'Log a status message visible to the human watching.',
     parameters: Type.Object({
@@ -48,7 +61,7 @@ export const allTools: Tool[] = [
   },
 ]
 
-const LOCAL_TOOLS = new Set(['save_credentials', 'update_todo', 'read_todo', 'status_log'])
+const LOCAL_TOOLS = new Set(['save_credentials', 'update_todo', 'read_todo', 'update_memory', 'read_memory', 'status_log'])
 
 const MAX_RESULT_CHARS = 4000
 
@@ -57,8 +70,10 @@ export type LogFn = (type: string, summary: string, detail?: string) => void
 interface ToolContext {
   connection: GameConnection
   profileId: string
+  profileName: string
   log: LogFn
   todo: string
+  memory: string
 }
 
 export async function executeTool(
@@ -97,6 +112,13 @@ export async function executeTool(
 
     const result = formatToolResult(command, resp.result, resp.notifications)
     ctx.log('tool_result', truncate(result, 200), result)
+
+    // Passively collect fleet intel from game results
+    try {
+      FleetIntelCollector.processCommandResult(command, resp.result, ctx.profileName)
+      if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
+    } catch { /* never break game execution */ }
+
     return truncateResult(result)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -132,6 +154,15 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
     }
     case 'read_todo': {
       return ctx.todo || '(empty TODO list)'
+    }
+    case 'update_memory': {
+      ctx.memory = String(args.content)
+      updateProfile(ctx.profileId, { memory: ctx.memory })
+      ctx.log('system', 'Memory updated')
+      return 'Memory updated.'
+    }
+    case 'read_memory': {
+      return ctx.memory || '(empty memory)'
     }
     case 'status_log': {
       ctx.log('system', `[${args.category}] ${args.message}`)

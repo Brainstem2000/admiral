@@ -14,13 +14,19 @@ export interface Profile {
   player_id: string | null
   provider: string | null
   model: string | null
+  planner_provider: string | null
+  planner_model: string | null
+  planning_interval: number | null
   directive: string
   todo: string
+  memory: string
   context_budget: number | null
   connection_mode: 'http' | 'http_v2' | 'websocket' | 'mcp' | 'mcp_v2'
   server_url: string
   autoconnect: boolean
   enabled: boolean
+  sort_order: number
+  group_name: string
   created_at: string
   updated_at: string
 }

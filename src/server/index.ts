@@ -9,6 +9,9 @@ import providers from './routes/providers'
 import models from './routes/models'
 import commands from './routes/commands'
 import preferences from './routes/preferences'
+import galaxy from './routes/galaxy'
+import fleetIntel from './routes/fleet-intel'
+import analytics from './routes/analytics'
 
 const app = new Hono()
 app.use('*', cors())
@@ -20,6 +23,9 @@ app.route('/api/providers', providers)
 app.route('/api/models', models)
 app.route('/api/commands', commands)
 app.route('/api/preferences', preferences)
+app.route('/api/galaxy', galaxy)
+app.route('/api/fleet-intel', fleetIntel)
+app.route('/api/analytics', analytics)
 
 // Health check
 app.get('/api/health', (c) => c.json({ ok: true }))

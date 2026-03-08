@@ -2,6 +2,7 @@ import { Database } from 'bun:sqlite'
 import path from 'path'
 import fs from 'fs'
 import type { Provider, Profile, LogEntry } from '../../shared/types'
+import type { GalaxyMapData } from '../../shared/galaxy-types'
 
 const DB_DIR = path.join(process.cwd(), 'data')
 const DB_PATH = path.join(DB_DIR, 'admiral.db')
@@ -83,6 +84,39 @@ function migrate(db: Database): void {
   if (!profileCols.some(c => c.name === 'context_budget')) {
     db.exec('ALTER TABLE profiles ADD COLUMN context_budget REAL DEFAULT NULL')
   }
+  if (!profileCols.some(c => c.name === 'memory')) {
+    db.exec("ALTER TABLE profiles ADD COLUMN memory TEXT DEFAULT ''")
+  }
+  if (!profileCols.some(c => c.name === 'sort_order')) {
+    db.exec('ALTER TABLE profiles ADD COLUMN sort_order INTEGER DEFAULT 0')
+    // Backfill: assign order based on creation time
+    db.exec(`
+      UPDATE profiles SET sort_order = (
+        SELECT COUNT(*) FROM profiles p2 WHERE p2.created_at <= profiles.created_at AND p2.id != profiles.id
+      )
+    `)
+  }
+  if (!profileCols.some(c => c.name === 'group_name')) {
+    db.exec("ALTER TABLE profiles ADD COLUMN group_name TEXT DEFAULT ''")
+  }
+  if (!profileCols.some(c => c.name === 'planner_provider')) {
+    db.exec('ALTER TABLE profiles ADD COLUMN planner_provider TEXT DEFAULT NULL')
+  }
+  if (!profileCols.some(c => c.name === 'planner_model')) {
+    db.exec('ALTER TABLE profiles ADD COLUMN planner_model TEXT DEFAULT NULL')
+  }
+  if (!profileCols.some(c => c.name === 'planning_interval')) {
+    db.exec('ALTER TABLE profiles ADD COLUMN planning_interval INTEGER DEFAULT NULL')
+  }
+
+  // Galaxy map cache (single-row table)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS galaxy_map (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      data TEXT NOT NULL,
+      fetched_at TEXT NOT NULL
+    );
+  `)
 
   // Preferences table
   db.exec(`
@@ -92,12 +126,55 @@ function migrate(db: Database): void {
     );
   `)
 
+  // Fleet intel tables
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS fleet_intel_market (
+      station_id TEXT NOT NULL,
+      station_name TEXT NOT NULL,
+      system_name TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      best_buy INTEGER,
+      best_sell INTEGER,
+      reported_by TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(station_id, item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_fim_item ON fleet_intel_market(item_id);
+
+    CREATE TABLE IF NOT EXISTS fleet_intel_systems (
+      system_id TEXT PRIMARY KEY,
+      system_name TEXT NOT NULL,
+      empire TEXT,
+      poi_count INTEGER DEFAULT 0,
+      has_station INTEGER DEFAULT 0,
+      station_services TEXT,
+      resources TEXT,
+      discovered_by TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS fleet_intel_threats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      system_id TEXT NOT NULL,
+      system_name TEXT NOT NULL,
+      threat_type TEXT NOT NULL,
+      description TEXT NOT NULL,
+      reported_by TEXT NOT NULL,
+      reported_at TEXT DEFAULT (datetime('now')),
+      expires_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_fit_system ON fleet_intel_threats(system_id);
+  `)
+
+  // Drop legacy table (storage credits now parsed from agent memory)
+  db.exec('DROP TABLE IF EXISTS fleet_intel_storage_credits')
+
   // Clean up legacy preferences
   db.exec("DELETE FROM preferences WHERE key = 'display_format'")
 
   // Seed default providers
   const defaultProviders = [
-    'anthropic', 'openai', 'groq', 'google', 'xai',
+    'claude-max', 'anthropic', 'openai', 'groq', 'google', 'xai',
     'mistral', 'minimax', 'nvidia', 'openrouter', 'ollama', 'lmstudio', 'custom',
   ]
   const upsert = db.query(
@@ -137,7 +214,7 @@ function rowToProfile(row: Record<string, unknown>): Profile {
 }
 
 export function listProfiles(): Profile[] {
-  const rows = getDb().query('SELECT * FROM profiles ORDER BY created_at').all() as Record<string, unknown>[]
+  const rows = getDb().query('SELECT * FROM profiles ORDER BY sort_order ASC, created_at ASC').all() as Record<string, unknown>[]
   return rows.map(rowToProfile)
 }
 
@@ -148,13 +225,15 @@ export function getProfile(id: string): Profile | undefined {
 
 export function createProfile(profile: Omit<Profile, 'created_at' | 'updated_at'>): Profile {
   getDb().query(
-    `INSERT INTO profiles (id, name, username, password, empire, player_id, provider, model, directive, todo, connection_mode, server_url, autoconnect, enabled, context_budget)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO profiles (id, name, username, password, empire, player_id, provider, model, planner_provider, planner_model, planning_interval, directive, todo, memory, connection_mode, server_url, autoconnect, enabled, context_budget, sort_order, group_name)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     profile.id, profile.name, profile.username, profile.password,
     profile.empire, profile.player_id, profile.provider, profile.model,
-    profile.directive, profile.todo || '', profile.connection_mode, profile.server_url,
+    profile.planner_provider ?? null, profile.planner_model ?? null, profile.planning_interval ?? null,
+    profile.directive, profile.todo || '', profile.memory || '', profile.connection_mode, profile.server_url,
     profile.autoconnect ? 1 : 0, profile.enabled ? 1 : 0, profile.context_budget ?? null,
+    profile.sort_order ?? 0, profile.group_name || '',
   )
   return getProfile(profile.id)!
 }
@@ -162,8 +241,10 @@ export function createProfile(profile: Omit<Profile, 'created_at' | 'updated_at'
 export function updateProfile(id: string, updates: Partial<Profile>): Profile | undefined {
   const allowed = [
     'name', 'username', 'password', 'empire', 'player_id',
-    'provider', 'model', 'directive', 'connection_mode', 'server_url',
-    'autoconnect', 'enabled', 'todo', 'context_budget',
+    'provider', 'model', 'planner_provider', 'planner_model', 'planning_interval',
+    'directive', 'connection_mode', 'server_url',
+    'autoconnect', 'enabled', 'todo', 'memory', 'context_budget',
+    'sort_order', 'group_name',
   ]
   const sets: string[] = []
   const vals: unknown[] = []
@@ -190,6 +271,14 @@ export function deleteProfile(id: string): void {
   getDb().query('DELETE FROM profiles WHERE id = ?').run(id)
 }
 
+export function reorderProfiles(orderedIds: string[]): void {
+  const db = getDb()
+  const stmt = db.query('UPDATE profiles SET sort_order = ? WHERE id = ?')
+  for (let i = 0; i < orderedIds.length; i++) {
+    stmt.run(i, orderedIds[i])
+  }
+}
+
 // --- Log CRUD ---
 
 export function addLogEntry(profileId: string, type: string, summary: string, detail?: string): number {
@@ -214,6 +303,109 @@ export function clearLogs(profileId: string): void {
   getDb().query('DELETE FROM log_entries WHERE profile_id = ?').run(profileId)
 }
 
+/**
+ * Cross-profile timeline query: returns log entries from ALL profiles,
+ * ordered by id (chronological), with optional type filtering.
+ */
+export function getTimelineEntries(opts: {
+  afterId?: number
+  limit?: number
+  types?: string[]
+  profileIds?: string[]
+}): LogEntry[] {
+  const { afterId, limit = 200, types, profileIds } = opts
+  const conditions: string[] = []
+  const params: unknown[] = []
+
+  if (afterId) {
+    conditions.push('id > ?')
+    params.push(afterId)
+  }
+  if (types && types.length > 0) {
+    conditions.push(`type IN (${types.map(() => '?').join(',')})`)
+    params.push(...types)
+  }
+  if (profileIds && profileIds.length > 0) {
+    conditions.push(`profile_id IN (${profileIds.map(() => '?').join(',')})`)
+    params.push(...profileIds)
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+  const query = afterId
+    ? `SELECT * FROM log_entries ${where} ORDER BY id LIMIT ?`
+    : `SELECT * FROM log_entries ${where} ORDER BY id DESC LIMIT ?`
+  params.push(limit)
+
+  const rows = getDb().query(query).all(...params) as LogEntry[]
+  return afterId ? rows : rows.reverse()
+}
+
+/**
+ * Aggregate token usage and cost from llm_call log entries.
+ * Parses the JSON detail field for each llm_call entry.
+ */
+export function getTokenAnalytics(opts: {
+  profileId?: string
+  since?: string
+}): {
+  byProfile: Record<string, { calls: number; inputTokens: number; outputTokens: number; cost: number }>
+  byModel: Record<string, { calls: number; inputTokens: number; outputTokens: number; cost: number }>
+  timeline: { timestamp: string; cost: number; tokens: number; profile_id: string; model: string }[]
+} {
+  const { profileId, since } = opts
+  const conditions = ["type = 'llm_call'"]
+  const params: unknown[] = []
+
+  if (profileId) {
+    conditions.push('profile_id = ?')
+    params.push(profileId)
+  }
+  if (since) {
+    conditions.push('timestamp >= ?')
+    params.push(since)
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+  const rows = getDb().query(
+    `SELECT profile_id, timestamp, detail FROM log_entries ${where} ORDER BY id`
+  ).all(...params) as { profile_id: string; timestamp: string; detail: string | null }[]
+
+  const byProfile: Record<string, { calls: number; inputTokens: number; outputTokens: number; cost: number }> = {}
+  const byModel: Record<string, { calls: number; inputTokens: number; outputTokens: number; cost: number }> = {}
+  const timeline: { timestamp: string; cost: number; tokens: number; profile_id: string; model: string }[] = []
+
+  for (const row of rows) {
+    if (!row.detail) continue
+    try {
+      const d = JSON.parse(row.detail)
+      const input = d.usage?.input ?? 0
+      const output = d.usage?.output ?? 0
+      const cost = d.usage?.cost?.total ?? 0
+      const model = d.model ?? 'unknown'
+
+      // By profile
+      if (!byProfile[row.profile_id]) byProfile[row.profile_id] = { calls: 0, inputTokens: 0, outputTokens: 0, cost: 0 }
+      byProfile[row.profile_id].calls++
+      byProfile[row.profile_id].inputTokens += input
+      byProfile[row.profile_id].outputTokens += output
+      byProfile[row.profile_id].cost += cost
+
+      // By model
+      if (!byModel[model]) byModel[model] = { calls: 0, inputTokens: 0, outputTokens: 0, cost: 0 }
+      byModel[model].calls++
+      byModel[model].inputTokens += input
+      byModel[model].outputTokens += output
+      byModel[model].cost += cost
+
+      timeline.push({ timestamp: row.timestamp, cost, tokens: input + output, profile_id: row.profile_id, model })
+    } catch {
+      // Skip unparseable entries
+    }
+  }
+
+  return { byProfile, byModel, timeline }
+}
+
 // --- Preferences CRUD ---
 
 export function getPreference(key: string): string | null {
@@ -232,4 +424,19 @@ export function getAllPreferences(): Record<string, string> {
   const prefs: Record<string, string> = {}
   for (const row of rows) prefs[row.key] = row.value
   return prefs
+}
+
+// --- Galaxy Map Cache ---
+
+export function getGalaxyMap(): GalaxyMapData | null {
+  const row = getDb().query('SELECT data FROM galaxy_map WHERE id = 1').get() as { data: string } | undefined
+  if (!row) return null
+  return JSON.parse(row.data) as GalaxyMapData
+}
+
+export function setGalaxyMap(data: GalaxyMapData): void {
+  getDb().query(
+    `INSERT INTO galaxy_map (id, data, fetched_at) VALUES (1, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET data = ?, fetched_at = ?`
+  ).run(JSON.stringify(data), data.fetched_at, JSON.stringify(data), data.fetched_at)
 }
