@@ -1,4 +1,9 @@
 import { Agent } from './agent'
+import { getProfile, addLogEntry } from './db'
+
+const BACKOFF_BASE = 5_000      // 5 seconds
+const BACKOFF_MAX = 5 * 60_000  // 5 minutes
+const BACKOFF_RESET = 60_000    // Reset backoff after 1 min of successful running
 
 type SlimGameState = {
   credits?: unknown
@@ -64,6 +69,8 @@ function slimGameState(raw: Record<string, unknown> | null): SlimGameState {
 
 class AgentManager {
   private agents = new Map<string, Agent>()
+  private stopRequested = new Set<string>()
+  private backoff = new Map<string, { attempts: number; timer: ReturnType<typeof setTimeout> | null }>()
 
   getAgent(profileId: string): Agent | undefined {
     return this.agents.get(profileId)
@@ -87,13 +94,89 @@ class AgentManager {
     if (!agent) throw new Error('Agent not connected')
     if (agent.isRunning) return
 
+    this.stopRequested.delete(profileId)
+    this.resetBackoff(profileId)
+
     // Run in background (don't await)
-    agent.startLLMLoop().catch(() => {
-      // Loop ended (normal or error) -- agent handles logging
+    const loopStarted = Date.now()
+    agent.startLLMLoop().then(() => {
+      this.handleLoopExit(profileId, loopStarted)
+    }).catch(() => {
+      this.handleLoopExit(profileId, loopStarted)
     })
   }
 
+  private handleLoopExit(profileId: string, loopStarted: number): void {
+    // If stop was explicitly requested (disconnect), don't restart
+    if (this.stopRequested.has(profileId)) {
+      this.resetBackoff(profileId)
+      return
+    }
+
+    // If session expired (duration limit), don't restart
+    const agent = this.agents.get(profileId)
+    if (agent?.sessionExpired) {
+      this.resetBackoff(profileId)
+      return
+    }
+
+    // Check if profile still wants to be running
+    const profile = getProfile(profileId)
+    if (!profile || !profile.enabled || !profile.provider || profile.provider === 'manual' || !profile.model) {
+      return
+    }
+
+    // If the loop ran for a while, reset backoff (it was working fine)
+    const ranFor = Date.now() - loopStarted
+    const bo = this.backoff.get(profileId) || { attempts: 0, timer: null }
+    if (ranFor > BACKOFF_RESET) {
+      bo.attempts = 0
+    }
+
+    bo.attempts++
+    const delay = Math.min(BACKOFF_BASE * Math.pow(2, bo.attempts - 1), BACKOFF_MAX)
+    this.backoff.set(profileId, bo)
+
+    const delaySec = Math.round(delay / 1000)
+    addLogEntry(profileId, 'system', `Agent loop exited unexpectedly. Auto-restarting in ${delaySec}s (attempt ${bo.attempts})`)
+
+    bo.timer = setTimeout(async () => {
+      if (this.stopRequested.has(profileId)) return
+      try {
+        // Reconnect if needed
+        let agent = this.agents.get(profileId)
+        if (!agent || !agent.isConnected) {
+          agent = new Agent(profileId)
+          this.agents.set(profileId, agent)
+          await agent.connect()
+        }
+        if (!agent.isRunning) {
+          addLogEntry(profileId, 'system', `Auto-restart: reconnected, resuming LLM loop`)
+          const restartedAt = Date.now()
+          agent.startLLMLoop().then(() => {
+            this.handleLoopExit(profileId, restartedAt)
+          }).catch(() => {
+            this.handleLoopExit(profileId, restartedAt)
+          })
+        }
+      } catch (err) {
+        addLogEntry(profileId, 'error', `Auto-restart failed: ${err instanceof Error ? err.message : String(err)}`)
+        // Retry with next backoff
+        this.handleLoopExit(profileId, Date.now())
+      }
+    }, delay)
+  }
+
+  private resetBackoff(profileId: string): void {
+    const bo = this.backoff.get(profileId)
+    if (bo?.timer) clearTimeout(bo.timer)
+    this.backoff.delete(profileId)
+  }
+
   async disconnect(profileId: string): Promise<void> {
+    this.stopRequested.add(profileId)
+    this.resetBackoff(profileId)
+
     const agent = this.agents.get(profileId)
     if (!agent) return
 

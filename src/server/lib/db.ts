@@ -166,6 +166,20 @@ function migrate(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_fit_system ON fleet_intel_threats(system_id);
   `)
 
+  // Financial snapshots for session-level tracking
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS financial_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id TEXT NOT NULL,
+      timestamp TEXT DEFAULT (datetime('now')),
+      wallet INTEGER DEFAULT 0,
+      storage INTEGER DEFAULT 0,
+      total INTEGER DEFAULT 0,
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_fsnap_profile ON financial_snapshots(profile_id, timestamp);
+  `)
+
   // Drop legacy table (storage credits now parsed from agent memory)
   db.exec('DROP TABLE IF EXISTS fleet_intel_storage_credits')
 
@@ -439,4 +453,36 @@ export function setGalaxyMap(data: GalaxyMapData): void {
     `INSERT INTO galaxy_map (id, data, fetched_at) VALUES (1, ?, ?)
      ON CONFLICT(id) DO UPDATE SET data = ?, fetched_at = ?`
   ).run(JSON.stringify(data), data.fetched_at, JSON.stringify(data), data.fetched_at)
+}
+
+// --- Financial Snapshots ---
+
+export function addFinancialSnapshot(profileId: string, wallet: number, storage: number): void {
+  getDb().query(
+    'INSERT INTO financial_snapshots (profile_id, wallet, storage, total) VALUES (?, ?, ?, ?)'
+  ).run(profileId, wallet, storage, wallet + storage)
+}
+
+export function getFinancialSnapshots(opts: {
+  profileId?: string
+  since?: string
+  limit?: number
+}): Array<{ profile_id: string; timestamp: string; wallet: number; storage: number; total: number }> {
+  const conditions: string[] = []
+  const params: (string | number)[] = []
+
+  if (opts.profileId) {
+    conditions.push('profile_id = ?')
+    params.push(opts.profileId)
+  }
+  if (opts.since) {
+    conditions.push('timestamp >= ?')
+    params.push(opts.since)
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+  const limit = opts.limit || 500
+  return getDb().query(
+    `SELECT profile_id, timestamp, wallet, storage, total FROM financial_snapshots ${where} ORDER BY timestamp ASC LIMIT ?`
+  ).all(...params, limit) as Array<{ profile_id: string; timestamp: string; wallet: number; storage: number; total: number }>
 }

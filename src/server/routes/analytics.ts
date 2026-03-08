@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
-import { getTimelineEntries, getTokenAnalytics, listProfiles } from '../lib/db'
+import { getTimelineEntries, getTokenAnalytics, listProfiles, addFinancialSnapshot, getFinancialSnapshots } from '../lib/db'
 import { agentManager } from '../lib/agent-manager'
 
 const analytics = new Hono()
@@ -196,6 +196,41 @@ analytics.get('/roi', (c) => {
 
   return c.json(result)
 })
+
+/**
+ * GET /api/analytics/snapshots
+ * Historical financial snapshots for wealth-over-time charts.
+ * Query params: profileId, since (ISO date)
+ */
+analytics.get('/snapshots', (c) => {
+  const profileId = c.req.query('profileId') || undefined
+  const since = c.req.query('since') || undefined
+  const data = getFinancialSnapshots({ profileId, since })
+  return c.json(data)
+})
+
+/**
+ * Background snapshot timer: every 5 minutes, snapshot wallet+storage for all connected agents.
+ */
+function takeFinancialSnapshots() {
+  const profiles = listProfiles()
+  for (const profile of profiles) {
+    const agent = agentManager.getAgent(profile.id)
+    if (!agent?.isConnected) continue
+    const gameState = agent.gameState as Record<string, unknown> | null | undefined
+    const player = (gameState?.player ?? {}) as Record<string, unknown>
+    const wallet = typeof player.credits === 'number' ? player.credits : 0
+    const storage = parseStorageCreditsFromMemory(profile.memory || '')
+    if (wallet > 0 || storage > 0) {
+      addFinancialSnapshot(profile.id, wallet, storage)
+    }
+  }
+}
+
+// Start snapshotting every 5 minutes
+setInterval(takeFinancialSnapshots, 5 * 60 * 1000)
+// Take an initial snapshot after a short delay (let agents connect first)
+setTimeout(takeFinancialSnapshots, 30_000)
 
 /**
  * Reuse the same storage credit parser from the frontend.

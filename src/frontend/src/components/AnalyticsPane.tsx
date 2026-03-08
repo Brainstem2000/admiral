@@ -483,9 +483,18 @@ interface FinancialData {
   fleetCargo: Record<string, number>
 }
 
+interface Snapshot {
+  profile_id: string
+  timestamp: string
+  wallet: number
+  storage: number
+  total: number
+}
+
 function FinancialTab({ profiles }: { profiles: Profile[] }) {
   const [data, setData] = useState<FinancialData | null>(null)
   const [history, setHistory] = useState<Array<{ time: string; total: number }>>([])
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([])
 
   useEffect(() => {
     const fetchData = async () => {
@@ -504,6 +513,14 @@ function FinancialTab({ profiles }: { profiles: Profile[] }) {
     fetchData()
     const interval = setInterval(fetchData, 30_000)
     return () => clearInterval(interval)
+  }, [])
+
+  // Fetch historical snapshots
+  useEffect(() => {
+    fetch('/api/analytics/snapshots')
+      .then(r => r.json())
+      .then(setSnapshots)
+      .catch(() => {})
   }, [])
 
   if (!data) return <div className="flex items-center justify-center h-full text-muted-foreground text-xs">Loading...</div>
@@ -552,6 +569,30 @@ function FinancialTab({ profiles }: { profiles: Profile[] }) {
           <MiniChart data={history.map(h => h.total)} labels={history.map(h => h.time)} color="hsl(var(--smui-primary))" />
         </div>
       )}
+
+      {/* Historical wealth chart from snapshots */}
+      {snapshots.length > 1 && (() => {
+        // Aggregate snapshots into fleet-level totals by timestamp
+        const byTime = new Map<string, number>()
+        for (const s of snapshots) {
+          byTime.set(s.timestamp, (byTime.get(s.timestamp) || 0) + s.total)
+        }
+        const sorted = Array.from(byTime.entries()).sort(([a], [b]) => a.localeCompare(b))
+        if (sorted.length < 2) return null
+        return (
+          <div className="space-y-2">
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Fleet Wealth Over Time</div>
+            <MiniChart
+              data={sorted.map(([, v]) => v)}
+              labels={sorted.map(([t]) => {
+                try { return new Date(t + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) } catch { return t }
+              })}
+              color="hsl(var(--smui-green))"
+              suffix=" cr"
+            />
+          </div>
+        )
+      })()}
 
       {/* Fleet inventory */}
       {data.fleetCargo && Object.keys(data.fleetCargo).length > 0 && (
@@ -780,7 +821,7 @@ function StatCard({ label, value }: { label: string; value: string }) {
 /**
  * Pure SVG sparkline chart — no charting library needed.
  */
-function MiniChart({ data, labels, color, prefix = '' }: { data: number[]; labels?: string[]; color: string; prefix?: string }) {
+function MiniChart({ data, labels, color, prefix = '', suffix = '' }: { data: number[]; labels?: string[]; color: string; prefix?: string; suffix?: string }) {
   if (data.length < 2) return null
 
   const w = 600
@@ -807,7 +848,7 @@ function MiniChart({ data, labels, color, prefix = '' }: { data: number[]; label
         <polyline points={points.join(' ')} fill="none" stroke={color} strokeWidth={2} />
         {/* Latest value label */}
         <text x={w - pad} y={14} textAnchor="end" fill={color} fontSize={12} fontFamily="monospace">
-          {prefix}{data[data.length - 1] >= 1000 ? data[data.length - 1].toLocaleString() : data[data.length - 1].toFixed(data[data.length - 1] < 1 ? 4 : 2)}
+          {prefix}{data[data.length - 1] >= 1000 ? data[data.length - 1].toLocaleString() : data[data.length - 1].toFixed(data[data.length - 1] < 1 ? 4 : 2)}{suffix}
         </text>
       </svg>
     </div>

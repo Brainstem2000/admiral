@@ -41,6 +41,7 @@ export class Agent {
   private pendingNudges: string[] = []
   private _activity: string = 'idle'
   private _gameState: Record<string, unknown> | null = null
+  private _sessionExpired = false
 
   constructor(profileId: string) {
     this.profileId = profileId
@@ -60,6 +61,10 @@ export class Agent {
 
   get gameState(): Record<string, unknown> | null {
     return this._gameState
+  }
+
+  get sessionExpired(): boolean {
+    return this._sessionExpired
   }
 
   private setActivity(activity: string) {
@@ -164,6 +169,7 @@ export class Agent {
     if (!this.connection) throw new Error('Not connected')
 
     this.running = true
+    this._sessionExpired = false
     this.abortController = new AbortController()
 
     this.log('system', `Starting LLM loop with ${profile.provider}/${profile.model}`)
@@ -213,8 +219,19 @@ export class Agent {
     const memory = { value: profile.memory || '' }
     const planningInterval = profile.planning_interval ?? 5
     let turnCounter = 0
+    const sessionStartedAt = Date.now()
 
     while (this.running) {
+      // Check session duration limit
+      const maxSessionStr = getPreference('max_session_hours')
+      if (maxSessionStr) {
+        const maxHours = parseFloat(maxSessionStr)
+        if (maxHours > 0 && (Date.now() - sessionStartedAt) > maxHours * 3600_000) {
+          this.log('system', `Session duration limit reached (${maxHours}h). Stopping agent.`)
+          this._sessionExpired = true
+          break
+        }
+      }
       // Reset abort controller if it was used (e.g. by a nudge wakeup)
       if (this.abortController.signal.aborted) {
         this.abortController = new AbortController()
