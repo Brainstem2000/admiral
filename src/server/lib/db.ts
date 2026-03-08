@@ -235,6 +235,16 @@ function migrate(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_ford_from ON fleet_orders(from_profile_id);
   `)
 
+  // Migrate fleet_orders: add chain support
+  const fordCols = db.query("PRAGMA table_info(fleet_orders)").all() as { name: string }[]
+  if (!fordCols.some(c => c.name === 'chain_id')) {
+    db.exec('ALTER TABLE fleet_orders ADD COLUMN chain_id TEXT DEFAULT NULL')
+    db.exec('CREATE INDEX IF NOT EXISTS idx_ford_chain ON fleet_orders(chain_id)')
+  }
+  if (!fordCols.some(c => c.name === 'next_orders')) {
+    db.exec('ALTER TABLE fleet_orders ADD COLUMN next_orders TEXT DEFAULT NULL')
+  }
+
   // Drop legacy table (storage credits now parsed from agent memory)
   db.exec('DROP TABLE IF EXISTS fleet_intel_storage_credits')
 
@@ -621,15 +631,17 @@ export interface FleetOrder {
   params: string | null
   status: string
   progress: string | null
+  chain_id: string | null
+  next_orders: string | null
   created_at: string
   updated_at: string
 }
 
-export function createFleetOrder(order: Pick<FleetOrder, 'id' | 'from_profile_id' | 'to_profile_id' | 'type' | 'description' | 'params'>): void {
+export function createFleetOrder(order: Pick<FleetOrder, 'id' | 'from_profile_id' | 'to_profile_id' | 'type' | 'description' | 'params'> & { chain_id?: string | null; next_orders?: string | null }): void {
   getDb().query(
-    `INSERT INTO fleet_orders (id, from_profile_id, to_profile_id, type, description, params)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(order.id, order.from_profile_id, order.to_profile_id, order.type, order.description, order.params)
+    `INSERT INTO fleet_orders (id, from_profile_id, to_profile_id, type, description, params, chain_id, next_orders)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(order.id, order.from_profile_id, order.to_profile_id, order.type, order.description, order.params, order.chain_id ?? null, order.next_orders ?? null)
 }
 
 export function getFleetOrders(opts: {
@@ -653,6 +665,10 @@ export function updateFleetOrder(id: string, updates: { status?: string; progres
   if (updates.progress !== undefined) { sets.push('progress = ?'); vals.push(updates.progress) }
   vals.push(id)
   getDb().query(`UPDATE fleet_orders SET ${sets.join(', ')} WHERE id = ?`).run(...vals)
+}
+
+export function getFleetOrdersByChain(chainId: string): FleetOrder[] {
+  return getDb().query('SELECT * FROM fleet_orders WHERE chain_id = ? ORDER BY created_at ASC').all(chainId) as FleetOrder[]
 }
 
 export function deleteFleetOrder(id: string): void {

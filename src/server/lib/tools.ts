@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, updateFleetOrder, listProfiles } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { agentManager } from './agent-manager'
 
@@ -62,7 +62,7 @@ export const allTools: Tool[] = [
   },
   {
     name: 'fleet_order',
-    description: 'Send an order to another fleet agent. Use this to delegate tasks like delivery, crafting, or buying. The target agent will see the order in their next turn.',
+    description: 'Send an order to another fleet agent. Use this to delegate tasks like delivery, crafting, or buying. The target agent will see the order in their next turn. Use chain_id + next_orders to create dependency chains that auto-trigger on completion.',
     parameters: Type.Object({
       target_agent: Type.String({ description: 'Name of the target agent (e.g. "Bob Comet", "CyberSapper")' }),
       type: StringEnum(['deliver', 'buy', 'sell', 'craft', 'travel', 'mine', 'custom'], {
@@ -70,16 +70,19 @@ export const allTools: Tool[] = [
       }),
       description: Type.String({ description: 'What the target should do. Be specific: item, quantity, destination.' }),
       params: Type.Optional(Type.String({ description: 'JSON params (item_id, quantity, destination, etc.)' })),
+      chain_id: Type.Optional(Type.String({ description: 'Chain name to group related orders (e.g. "iron-pipeline"). Orders in the same chain are tracked together.' })),
+      next_orders: Type.Optional(Type.String({ description: 'JSON array of follow-up orders to auto-create when THIS order completes. Format: [{"target_agent":"Bob","type":"deliver","description":"Haul ore to hub"}]. Supports nesting.' })),
     }),
   },
   {
     name: 'read_fleet_orders',
-    description: 'Read orders assigned to you by other fleet agents, and orders you have issued. Update order status when completing tasks.',
+    description: 'Read orders assigned to you by other fleet agents, and orders you have issued. Update order status when completing tasks. Use action="chain" to view all orders in a dependency chain.',
     parameters: Type.Object({
-      action: StringEnum(['inbox', 'sent', 'accept', 'complete', 'reject'], {
-        description: 'inbox = orders for you, sent = orders you issued, accept/complete/reject = update order status',
+      action: StringEnum(['inbox', 'sent', 'accept', 'complete', 'reject', 'chain'], {
+        description: 'inbox = orders for you, sent = orders you issued, accept/complete/reject = update order status, chain = view all orders in a chain',
       }),
       order_id: Type.Optional(Type.String({ description: 'Order ID (required for accept/complete/reject)' })),
+      chain_id: Type.Optional(Type.String({ description: 'Chain ID (required for action=chain)' })),
       progress: Type.Optional(Type.String({ description: 'Progress note when accepting or completing' })),
     }),
   },
@@ -199,6 +202,8 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
       if (!target) return `Error: No agent named "${targetName}". Available: ${profiles.map(p => p.name).join(', ')}`
 
       const orderId = crypto.randomUUID()
+      const chainId = args.chain_id ? String(args.chain_id) : null
+      const nextOrders = args.next_orders ? String(args.next_orders) : null
       createFleetOrder({
         id: orderId,
         from_profile_id: ctx.profileId,
@@ -206,14 +211,18 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
         type: String(args.type),
         description: String(args.description),
         params: args.params ? String(args.params) : null,
+        chain_id: chainId,
+        next_orders: nextOrders,
       })
 
       // Nudge the target agent if they're running
-      const orderMsg = `Fleet order from ${ctx.profileName}: [${args.type}] ${args.description}`
+      const chainTag = chainId ? ` (chain: ${chainId})` : ''
+      const orderMsg = `Fleet order from ${ctx.profileName}: [${args.type}] ${args.description}${chainTag}`
       agentManager.nudge(target.id, `## Fleet Order Received\n${orderMsg}\nUse read_fleet_orders(action="inbox") to see details and accept/complete orders.`)
 
-      ctx.log('system', `Fleet order sent to ${target.name}: [${args.type}] ${args.description}`)
-      return `Order sent to ${target.name} (id: ${orderId.slice(0, 8)}). They will be notified.`
+      ctx.log('system', `Fleet order sent to ${target.name}: [${args.type}] ${args.description}${chainTag}`)
+      const chainInfo = nextOrders ? ` Chain continues with ${JSON.parse(nextOrders).length} follow-up order(s).` : ''
+      return `Order sent to ${target.name} (id: ${orderId.slice(0, 8)}).${chainInfo} They will be notified.`
     }
     case 'read_fleet_orders': {
       const action = String(args.action)
@@ -234,6 +243,16 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
           `[${o.id.slice(0, 8)}] ${o.status.toUpperCase()} | To: ${nameOf(o.to_profile_id)} | Type: ${o.type}\n  ${o.description}${o.progress ? `\n  Progress: ${o.progress}` : ''}`
         ).join('\n\n')
       }
+      if (action === 'chain') {
+        const chainId = String(args.chain_id || '')
+        if (!chainId) return 'Error: chain_id is required for action=chain'
+        const chainOrders = getFleetOrdersByChain(chainId)
+        if (chainOrders.length === 0) return `No orders found in chain "${chainId}".`
+        const statusIcon = (s: string) => s === 'completed' ? '✅' : s === 'accepted' ? '🔄' : s === 'rejected' ? '❌' : '⏳'
+        return `Chain: ${chainId}\n` + chainOrders.map((o, i) =>
+          `  [${i + 1}] ${statusIcon(o.status)} ${o.status.toUpperCase()} | ${nameOf(o.to_profile_id)}: ${o.description}${o.next_orders ? ' → (has follow-ups)' : ''}`
+        ).join('\n')
+      }
       if (['accept', 'complete', 'reject'].includes(action)) {
         const orderId = String(args.order_id || '')
         if (!orderId) return 'Error: order_id is required'
@@ -249,10 +268,46 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
         const statusMsg = `Order [${order.id.slice(0, 8)}] ${newStatus} by ${ctx.profileName}${args.progress ? `: ${args.progress}` : ''}`
         agentManager.nudge(order.from_profile_id, `## Fleet Order Update\n${statusMsg}`)
 
+        // Chain completion hook: auto-create next orders when this one completes
+        let chainInfo = ''
+        if (newStatus === 'completed' && order.next_orders) {
+          try {
+            const children = JSON.parse(order.next_orders) as Array<{ target_agent: string; type: string; description: string; params?: string; next_orders?: string }>
+            const created: string[] = []
+            for (const child of children) {
+              const childTarget = profiles.find(p => p.name.toLowerCase() === child.target_agent.toLowerCase())
+              if (!childTarget) {
+                ctx.log('error', `Chain: could not find agent "${child.target_agent}" for follow-up order`)
+                continue
+              }
+              const childId = crypto.randomUUID()
+              createFleetOrder({
+                id: childId,
+                from_profile_id: order.from_profile_id,
+                to_profile_id: childTarget.id,
+                type: child.type,
+                description: child.description,
+                params: child.params || null,
+                chain_id: order.chain_id,
+                next_orders: child.next_orders ? JSON.stringify(child.next_orders) : null,
+              })
+              const chainTag = order.chain_id ? ` (chain: ${order.chain_id})` : ''
+              agentManager.nudge(childTarget.id, `## Fleet Order Received${chainTag}\nChain follow-up from ${nameOf(order.from_profile_id)}: [${child.type}] ${child.description}\nUse read_fleet_orders(action="inbox") to see details and accept/complete orders.`)
+              created.push(`${childTarget.name}: [${child.type}] ${child.description}`)
+              ctx.log('system', `Chain: auto-created follow-up order for ${childTarget.name}: [${child.type}] ${child.description}`)
+            }
+            if (created.length > 0) {
+              chainInfo = `\nChain: ${created.length} follow-up order(s) auto-created:\n` + created.map(c => `  → ${c}`).join('\n')
+            }
+          } catch (e) {
+            ctx.log('error', `Chain: failed to parse next_orders: ${e instanceof Error ? e.message : String(e)}`)
+          }
+        }
+
         ctx.log('system', `Fleet order ${order.id.slice(0, 8)} → ${newStatus}`)
-        return `Order ${order.id.slice(0, 8)} marked as ${newStatus}.`
+        return `Order ${order.id.slice(0, 8)} marked as ${newStatus}.${chainInfo}`
       }
-      return `Error: Unknown action "${action}". Use inbox, sent, accept, complete, or reject.`
+      return `Error: Unknown action "${action}". Use inbox, sent, accept, complete, reject, or chain.`
     }
     default:
       return `Unknown local tool: ${name}`

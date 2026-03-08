@@ -928,7 +928,7 @@ const EVENT_TYPES = ['trade', 'combat', 'chat', 'faction', 'friend', 'system', '
 function AutomationTab({ profiles }: { profiles: Profile[] }) {
   const [schedules, setSchedules] = useState<ScheduleEntry[]>([])
   const [triggers, setTriggers] = useState<TriggerEntry[]>([])
-  const [orders, setOrders] = useState<Array<{ id: string; from_profile_id: string; to_profile_id: string; type: string; description: string; status: string; progress: string | null; created_at: string }>>([])
+  const [orders, setOrders] = useState<Array<{ id: string; from_profile_id: string; to_profile_id: string; type: string; description: string; status: string; progress: string | null; chain_id: string | null; next_orders: string | null; created_at: string }>>([])
   const [newSchedProfile, setNewSchedProfile] = useState(profiles[0]?.id || '')
   const [newSchedCron, setNewSchedCron] = useState('0 8 * * *')
   const [newSchedAction, setNewSchedAction] = useState('connect_llm')
@@ -1101,11 +1101,13 @@ function AutomationTab({ profiles }: { profiles: Profile[] }) {
                 o.status === 'completed' ? 'bg-green-500/20 text-green-400' :
                 'bg-red-500/20 text-red-400'
               }`}>{o.status}</span>
+              {o.chain_id && <span className="text-[9px] px-1 rounded bg-purple-500/20 text-purple-400" title={`Chain: ${o.chain_id}`}>⛓ {o.chain_id}</span>}
               <span className="text-muted-foreground">{nameMap[o.from_profile_id] || '?'}</span>
               <span className="text-muted-foreground">→</span>
               <span className="text-muted-foreground">{nameMap[o.to_profile_id] || '?'}</span>
               <span className="font-mono text-[10px] text-primary">[{o.type}]</span>
               <span className="text-foreground truncate max-w-60">{o.description}</span>
+              {o.next_orders && <span className="text-purple-400 text-[10px]" title={`Follow-ups: ${o.next_orders}`}>→…</span>}
               {o.progress && <span className="text-muted-foreground text-[10px] truncate max-w-40">({o.progress})</span>}
               <button onClick={async () => { await fetch(`/api/schedules/orders/${o.id}`, { method: 'DELETE' }); fetchAll() }} className="text-red-400 hover:text-red-300 ml-auto">✕</button>
             </div>
@@ -1117,7 +1119,7 @@ function AutomationTab({ profiles }: { profiles: Profile[] }) {
       <div className="text-muted-foreground text-[10px] space-y-1 border-t border-border pt-2">
         <p><strong>Cron format:</strong> <code className="font-mono">min hour dom mon dow</code> — e.g., <code>0 8 * * 1-5</code> = weekdays at 8am</p>
         <p><strong>Event triggers:</strong> Fire when an agent receives a matching notification. Use "wake" to auto-start a sleeping agent, "nudge" to inject a message.</p>
-        <p><strong>Fleet orders:</strong> Agents create orders via <code>fleet_order</code> tool. Target agents see them and can accept/complete/reject.</p>
+        <p><strong>Fleet orders:</strong> Agents create orders via <code>fleet_order</code> tool. Target agents see them and can accept/complete/reject. Use <code>chain_id</code> + <code>next_orders</code> for dependency chains.</p>
         <p><strong>Duration:</strong> Optional hours to run before auto-disconnect (leave blank for unlimited).</p>
       </div>
     </div>
