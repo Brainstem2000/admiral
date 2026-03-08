@@ -13,6 +13,7 @@ import { allTools } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
 import { addLogEntry, getProfile, updateProfile, getPreference } from './db'
 import { FleetIntelCollector } from './fleet-intel'
+import { checkEventTriggers } from './event-watcher'
 import { EventEmitter } from 'events'
 import fs from 'fs'
 import path from 'path'
@@ -142,6 +143,8 @@ export class Agent {
     // Set up notification handler
     this.connection.onNotification((n) => {
       this.log('notification', formatNotificationSummary(n), JSON.stringify(n, null, 2))
+      // Check event triggers (fire-and-forget)
+      checkEventTriggers(this.profileId, n as Record<string, unknown>).catch(() => {})
     })
 
     // Login if credentials exist

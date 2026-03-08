@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import { ArrowDown, Loader2, Clock, DollarSign, Cpu, Users, MessageSquare } from 'lucide-react'
+import { ArrowDown, Loader2, Clock, DollarSign, Cpu, Users, MessageSquare, CalendarClock } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { Profile, LogEntry, LogType } from '@/types'
 
-type Tab = 'timeline' | 'comms' | 'financial' | 'tokens'
+type Tab = 'timeline' | 'comms' | 'financial' | 'tokens' | 'automation'
 
 const BADGE_CLASS: Record<string, string> = {
   connection: 'log-badge-connection',
@@ -46,6 +46,7 @@ export function AnalyticsPane({ profiles, statuses }: Props) {
     { key: 'comms', label: 'Comms', icon: <MessageSquare size={12} /> },
     { key: 'financial', label: 'Financial', icon: <DollarSign size={12} /> },
     { key: 'tokens', label: 'Token Economics', icon: <Cpu size={12} /> },
+    { key: 'automation', label: 'Automation', icon: <CalendarClock size={12} /> },
   ]
 
   return (
@@ -74,6 +75,7 @@ export function AnalyticsPane({ profiles, statuses }: Props) {
         {tab === 'comms' && <CommsTab profiles={profiles} statuses={statuses} />}
         {tab === 'financial' && <FinancialTab profiles={profiles} />}
         {tab === 'tokens' && <TokensTab profiles={profiles} />}
+        {tab === 'automation' && <AutomationTab profiles={profiles} />}
       </div>
     </div>
   )
@@ -876,4 +878,207 @@ function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
   return String(n)
+}
+
+// ---- Automation Tab ----
+
+interface ScheduleEntry {
+  id: string
+  profile_id: string
+  cron: string
+  action: string
+  duration_hours: number | null
+  enabled: boolean
+  last_run_at: string | null
+  next_run_at: string | null
+}
+
+interface TriggerEntry {
+  id: string
+  profile_id: string
+  event_type: string
+  event_match: string | null
+  action: string
+  action_params: string | null
+  enabled: boolean
+  last_fired_at: string | null
+}
+
+const CRON_PRESETS = [
+  { label: 'Every hour', cron: '0 * * * *' },
+  { label: 'Every 6 hours', cron: '0 */6 * * *' },
+  { label: 'Daily 8am', cron: '0 8 * * *' },
+  { label: 'Daily 8am-11pm', cron: '0 8 * * *' },
+  { label: 'Weekdays 9am', cron: '0 9 * * 1-5' },
+  { label: 'Custom', cron: '' },
+]
+
+const EVENT_TYPES = ['trade', 'combat', 'chat', 'faction', 'friend', 'system', 'tip', '*']
+
+function AutomationTab({ profiles }: { profiles: Profile[] }) {
+  const [schedules, setSchedules] = useState<ScheduleEntry[]>([])
+  const [triggers, setTriggers] = useState<TriggerEntry[]>([])
+  const [newSchedProfile, setNewSchedProfile] = useState(profiles[0]?.id || '')
+  const [newSchedCron, setNewSchedCron] = useState('0 8 * * *')
+  const [newSchedAction, setNewSchedAction] = useState('connect_llm')
+  const [newSchedDuration, setNewSchedDuration] = useState('')
+  const [newTrigProfile, setNewTrigProfile] = useState(profiles[0]?.id || '')
+  const [newTrigEvent, setNewTrigEvent] = useState('trade')
+  const [newTrigMatch, setNewTrigMatch] = useState('')
+  const [newTrigAction, setNewTrigAction] = useState('nudge')
+  const [newTrigParams, setNewTrigParams] = useState('')
+
+  const nameMap = useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const p of profiles) m[p.id] = p.name
+    return m
+  }, [profiles])
+
+  const fetchAll = useCallback(async () => {
+    const [sRes, tRes] = await Promise.all([
+      fetch('/api/schedules').then(r => r.json()),
+      fetch('/api/schedules/triggers').then(r => r.json()),
+    ])
+    setSchedules(sRes)
+    setTriggers(tRes)
+  }, [])
+
+  useEffect(() => { fetchAll() }, [fetchAll])
+
+  async function addSchedule() {
+    await fetch('/api/schedules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        profile_id: newSchedProfile,
+        cron: newSchedCron,
+        action: newSchedAction,
+        duration_hours: newSchedDuration ? parseFloat(newSchedDuration) : null,
+      }),
+    })
+    fetchAll()
+  }
+
+  async function deleteSchedule(id: string) {
+    await fetch(`/api/schedules/${id}`, { method: 'DELETE' })
+    fetchAll()
+  }
+
+  async function toggleSchedule(s: ScheduleEntry) {
+    await fetch(`/api/schedules/${s.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !s.enabled }),
+    })
+    fetchAll()
+  }
+
+  async function addTrigger() {
+    await fetch('/api/schedules/triggers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        profile_id: newTrigProfile,
+        event_type: newTrigEvent,
+        event_match: newTrigMatch || null,
+        action: newTrigAction,
+        action_params: newTrigParams || null,
+      }),
+    })
+    fetchAll()
+  }
+
+  async function deleteTrigger(id: string) {
+    await fetch(`/api/schedules/triggers/${id}`, { method: 'DELETE' })
+    fetchAll()
+  }
+
+  return (
+    <div className="overflow-y-auto h-full p-3 space-y-4 text-xs">
+      {/* Cron Schedules */}
+      <div>
+        <h3 className="text-sm font-semibold text-foreground mb-2">⏰ Cron Schedules</h3>
+        <div className="space-y-1 mb-2">
+          {schedules.length === 0 && <p className="text-muted-foreground italic">No schedules configured</p>}
+          {schedules.map(s => (
+            <div key={s.id} className={`flex items-center gap-2 p-1.5 rounded ${s.enabled ? 'bg-primary/5' : 'bg-muted/30 opacity-60'}`}>
+              <button onClick={() => toggleSchedule(s)} className={`w-2 h-2 rounded-full ${s.enabled ? 'bg-green-400' : 'bg-zinc-500'}`} title={s.enabled ? 'Enabled' : 'Disabled'} />
+              <span className="font-mono text-[10px] text-primary">{s.cron}</span>
+              <span className="text-muted-foreground">{nameMap[s.profile_id] || s.profile_id.slice(0, 8)}</span>
+              <span className="text-muted-foreground">→ {s.action}</span>
+              {s.duration_hours && <span className="text-muted-foreground">({s.duration_hours}h)</span>}
+              {s.next_run_at && (
+                <span className="text-muted-foreground ml-auto" title={s.next_run_at}>
+                  Next: {new Date(s.next_run_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                </span>
+              )}
+              <button onClick={() => deleteSchedule(s.id)} className="text-red-400 hover:text-red-300 ml-1">✕</button>
+            </div>
+          ))}
+        </div>
+
+        {/* Add schedule form */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <select value={newSchedProfile} onChange={e => setNewSchedProfile(e.target.value)} className="bg-input border border-border text-foreground text-[10px] rounded px-1.5 py-0.5">
+            {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          <select value={newSchedCron} onChange={e => setNewSchedCron(e.target.value)} className="bg-input border border-border text-foreground text-[10px] rounded px-1.5 py-0.5">
+            {CRON_PRESETS.map(p => <option key={p.label} value={p.cron}>{p.label}</option>)}
+          </select>
+          <input value={newSchedCron} onChange={e => setNewSchedCron(e.target.value)} placeholder="cron expr" className="bg-input border border-border text-foreground text-[10px] rounded px-1.5 py-0.5 w-28 font-mono" />
+          <select value={newSchedAction} onChange={e => setNewSchedAction(e.target.value)} className="bg-input border border-border text-foreground text-[10px] rounded px-1.5 py-0.5">
+            <option value="connect_llm">Start</option>
+            <option value="disconnect">Stop</option>
+          </select>
+          <input value={newSchedDuration} onChange={e => setNewSchedDuration(e.target.value)} placeholder="hours" className="bg-input border border-border text-foreground text-[10px] rounded px-1.5 py-0.5 w-14" />
+          <button onClick={addSchedule} className="bg-primary text-primary-foreground text-[10px] rounded px-2 py-0.5 hover:opacity-90">Add</button>
+        </div>
+      </div>
+
+      {/* Event Triggers */}
+      <div>
+        <h3 className="text-sm font-semibold text-foreground mb-2">⚡ Event Triggers</h3>
+        <div className="space-y-1 mb-2">
+          {triggers.length === 0 && <p className="text-muted-foreground italic">No event triggers configured</p>}
+          {triggers.map(t => (
+            <div key={t.id} className={`flex items-center gap-2 p-1.5 rounded ${t.enabled ? 'bg-primary/5' : 'bg-muted/30 opacity-60'}`}>
+              <span className={`w-2 h-2 rounded-full ${t.enabled ? 'bg-amber-400' : 'bg-zinc-500'}`} />
+              <span className="text-muted-foreground">{nameMap[t.profile_id] || t.profile_id.slice(0, 8)}</span>
+              <span className="font-mono text-[10px] text-amber-400">{t.event_type}</span>
+              {t.event_match && <span className="text-muted-foreground">contains "{t.event_match}"</span>}
+              <span className="text-muted-foreground">→ {t.action}</span>
+              {t.action_params && <span className="text-muted-foreground truncate max-w-40">({t.action_params})</span>}
+              {t.last_fired_at && <span className="text-muted-foreground ml-auto text-[10px]">Last: {new Date(t.last_fired_at).toLocaleTimeString()}</span>}
+              <button onClick={() => deleteTrigger(t.id)} className="text-red-400 hover:text-red-300 ml-1">✕</button>
+            </div>
+          ))}
+        </div>
+
+        {/* Add trigger form */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <select value={newTrigProfile} onChange={e => setNewTrigProfile(e.target.value)} className="bg-input border border-border text-foreground text-[10px] rounded px-1.5 py-0.5">
+            {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          <select value={newTrigEvent} onChange={e => setNewTrigEvent(e.target.value)} className="bg-input border border-border text-foreground text-[10px] rounded px-1.5 py-0.5">
+            {EVENT_TYPES.map(t => <option key={t} value={t}>{t === '*' ? 'Any event' : t}</option>)}
+          </select>
+          <input value={newTrigMatch} onChange={e => setNewTrigMatch(e.target.value)} placeholder="content filter" className="bg-input border border-border text-foreground text-[10px] rounded px-1.5 py-0.5 w-28" />
+          <select value={newTrigAction} onChange={e => setNewTrigAction(e.target.value)} className="bg-input border border-border text-foreground text-[10px] rounded px-1.5 py-0.5">
+            <option value="nudge">Nudge</option>
+            <option value="wake">Wake</option>
+            <option value="disconnect">Disconnect</option>
+          </select>
+          <input value={newTrigParams} onChange={e => setNewTrigParams(e.target.value)} placeholder="nudge message" className="bg-input border border-border text-foreground text-[10px] rounded px-1.5 py-0.5 w-40" />
+          <button onClick={addTrigger} className="bg-amber-600 text-white text-[10px] rounded px-2 py-0.5 hover:opacity-90">Add</button>
+        </div>
+      </div>
+
+      {/* Help */}
+      <div className="text-muted-foreground text-[10px] space-y-1 border-t border-border pt-2">
+        <p><strong>Cron format:</strong> <code className="font-mono">min hour dom mon dow</code> — e.g., <code>0 8 * * 1-5</code> = weekdays at 8am</p>
+        <p><strong>Event triggers:</strong> Fire when an agent receives a matching notification. Use "wake" to auto-start a sleeping agent, "nudge" to inject a message.</p>
+        <p><strong>Duration:</strong> Optional hours to run before auto-disconnect (leave blank for unlimited).</p>
+      </div>
+    </div>
+  )
 }

@@ -180,6 +180,41 @@ function migrate(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_fsnap_profile ON financial_snapshots(profile_id, timestamp);
   `)
 
+  // Agent schedules for cron-like automation
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schedules (
+      id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      cron TEXT NOT NULL,
+      action TEXT NOT NULL DEFAULT 'connect_llm',
+      duration_hours REAL DEFAULT NULL,
+      enabled INTEGER DEFAULT 1,
+      last_run_at TEXT DEFAULT NULL,
+      next_run_at TEXT DEFAULT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_sched_profile ON schedules(profile_id);
+    CREATE INDEX IF NOT EXISTS idx_sched_next ON schedules(next_run_at);
+  `)
+
+  // Event-driven wake triggers
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS event_triggers (
+      id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      event_match TEXT DEFAULT NULL,
+      action TEXT NOT NULL DEFAULT 'nudge',
+      action_params TEXT DEFAULT NULL,
+      enabled INTEGER DEFAULT 1,
+      last_fired_at TEXT DEFAULT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_etrig_profile ON event_triggers(profile_id);
+  `)
+
   // Drop legacy table (storage credits now parsed from agent memory)
   db.exec('DROP TABLE IF EXISTS fleet_intel_storage_credits')
 
@@ -461,6 +496,98 @@ export function addFinancialSnapshot(profileId: string, wallet: number, storage:
   getDb().query(
     'INSERT INTO financial_snapshots (profile_id, wallet, storage, total) VALUES (?, ?, ?, ?)'
   ).run(profileId, wallet, storage, wallet + storage)
+}
+
+// --- Schedule CRUD ---
+
+export interface Schedule {
+  id: string
+  profile_id: string
+  cron: string
+  action: string
+  duration_hours: number | null
+  enabled: boolean
+  last_run_at: string | null
+  next_run_at: string | null
+  created_at: string
+}
+
+export function listSchedules(profileId?: string): Schedule[] {
+  if (profileId) {
+    const rows = getDb().query('SELECT * FROM schedules WHERE profile_id = ? ORDER BY created_at').all(profileId) as Record<string, unknown>[]
+    return rows.map(r => ({ ...r, enabled: !!r.enabled } as Schedule))
+  }
+  const rows = getDb().query('SELECT * FROM schedules ORDER BY next_run_at ASC').all() as Record<string, unknown>[]
+  return rows.map(r => ({ ...r, enabled: !!r.enabled } as Schedule))
+}
+
+export function getSchedule(id: string): Schedule | undefined {
+  const row = getDb().query('SELECT * FROM schedules WHERE id = ?').get(id) as Record<string, unknown> | undefined
+  if (!row) return undefined
+  return { ...row, enabled: !!row.enabled } as Schedule
+}
+
+export function upsertSchedule(schedule: Omit<Schedule, 'created_at'>): void {
+  getDb().query(
+    `INSERT INTO schedules (id, profile_id, cron, action, duration_hours, enabled, last_run_at, next_run_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET cron = ?, action = ?, duration_hours = ?, enabled = ?, next_run_at = ?`
+  ).run(
+    schedule.id, schedule.profile_id, schedule.cron, schedule.action,
+    schedule.duration_hours, schedule.enabled ? 1 : 0, schedule.last_run_at, schedule.next_run_at,
+    schedule.cron, schedule.action, schedule.duration_hours, schedule.enabled ? 1 : 0, schedule.next_run_at,
+  )
+}
+
+export function deleteSchedule(id: string): void {
+  getDb().query('DELETE FROM schedules WHERE id = ?').run(id)
+}
+
+export function updateScheduleRun(id: string, lastRunAt: string, nextRunAt: string | null): void {
+  getDb().query('UPDATE schedules SET last_run_at = ?, next_run_at = ? WHERE id = ?').run(lastRunAt, nextRunAt, id)
+}
+
+// --- Event Trigger CRUD ---
+
+export interface EventTrigger {
+  id: string
+  profile_id: string
+  event_type: string
+  event_match: string | null
+  action: string
+  action_params: string | null
+  enabled: boolean
+  last_fired_at: string | null
+  created_at: string
+}
+
+export function listEventTriggers(profileId?: string): EventTrigger[] {
+  if (profileId) {
+    const rows = getDb().query('SELECT * FROM event_triggers WHERE profile_id = ? ORDER BY created_at').all(profileId) as Record<string, unknown>[]
+    return rows.map(r => ({ ...r, enabled: !!r.enabled } as EventTrigger))
+  }
+  const rows = getDb().query('SELECT * FROM event_triggers ORDER BY created_at').all() as Record<string, unknown>[]
+  return rows.map(r => ({ ...r, enabled: !!r.enabled } as EventTrigger))
+}
+
+export function upsertEventTrigger(trigger: Omit<EventTrigger, 'created_at'>): void {
+  getDb().query(
+    `INSERT INTO event_triggers (id, profile_id, event_type, event_match, action, action_params, enabled, last_fired_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET event_type = ?, event_match = ?, action = ?, action_params = ?, enabled = ?`
+  ).run(
+    trigger.id, trigger.profile_id, trigger.event_type, trigger.event_match,
+    trigger.action, trigger.action_params, trigger.enabled ? 1 : 0, trigger.last_fired_at,
+    trigger.event_type, trigger.event_match, trigger.action, trigger.action_params, trigger.enabled ? 1 : 0,
+  )
+}
+
+export function deleteEventTrigger(id: string): void {
+  getDb().query('DELETE FROM event_triggers WHERE id = ?').run(id)
+}
+
+export function markEventTriggerFired(id: string): void {
+  getDb().query("UPDATE event_triggers SET last_fired_at = datetime('now') WHERE id = ?").run(id)
 }
 
 export function getFinancialSnapshots(opts: {

@@ -12,6 +12,8 @@ import preferences from './routes/preferences'
 import galaxy from './routes/galaxy'
 import fleetIntel from './routes/fleet-intel'
 import analytics from './routes/analytics'
+import schedules from './routes/schedules'
+import { startScheduler } from './lib/scheduler'
 
 const app = new Hono()
 app.use('*', cors())
@@ -26,6 +28,7 @@ app.route('/api/preferences', preferences)
 app.route('/api/galaxy', galaxy)
 app.route('/api/fleet-intel', fleetIntel)
 app.route('/api/analytics', analytics)
+app.route('/api/schedules', schedules)
 
 // Health check
 app.get('/api/health', (c) => c.json({ ok: true }))
@@ -63,6 +66,9 @@ if (isDev) {
   // SPA fallback
   app.get('*', serveStatic({ path: './dist/index.html' }))
 }
+
+// Start cron scheduler
+startScheduler()
 
 const port = parseInt(process.env.PORT || '3031')
 console.log(`Admiral listening on http://0.0.0.0:${port}`)
