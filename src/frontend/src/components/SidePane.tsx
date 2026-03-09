@@ -8,6 +8,9 @@ interface CaptainsLogEntry {
   created_at: string
 }
 
+// Per-profile cache survives component remounts — instant data on switch
+const captainsLogCache = new Map<string, CaptainsLogEntry[]>()
+
 interface Props {
   profileId: string
   todo: string
@@ -18,7 +21,7 @@ interface Props {
 }
 
 export function SidePane({ profileId, todo: initialTodo, memory: initialMemory, connected, playerData, onRefreshStatus }: Props) {
-  const [logEntries, setLogEntries] = useState<CaptainsLogEntry[]>([])
+  const [logEntries, setLogEntries] = useState<CaptainsLogEntry[]>(() => captainsLogCache.get(profileId) || [])
   const [logLoading, setLogLoading] = useState(false)
   const [todo, setTodo] = useState(initialTodo)
   const [memory, setMemory] = useState(initialMemory)
@@ -46,7 +49,7 @@ export function SidePane({ profileId, todo: initialTodo, memory: initialMemory, 
   const profileIdRef = useRef(profileId)
   useEffect(() => {
     profileIdRef.current = profileId
-    setLogEntries([])
+    setLogEntries(captainsLogCache.get(profileId) || [])
   }, [profileId])
 
   const fetchCaptainsLog = useCallback(async () => {
@@ -89,6 +92,7 @@ export function SidePane({ profileId, todo: initialTodo, memory: initialMemory, 
         if (entry) entries.push(entry)
       }
 
+      captainsLogCache.set(targetId, entries)
       setLogEntries(entries)
     } catch {
       // ignore
