@@ -68,9 +68,28 @@ export function LogPane({ profileId, connected }: Props) {
     setSseKey(k => k + 1)
   }, [connected])
 
-  // Restore cached entries on profile switch, then SSE refreshes
+  // Restore cached entries on profile switch, then HTTP + SSE refresh
   useEffect(() => {
     setEntries(logCache.get(profileId) || [])
+  }, [profileId])
+
+  // HTTP fetch for reliable initial data (SSE _init can be unreliable)
+  useEffect(() => {
+    const pid = profileId
+    fetch(`/api/profiles/${pid}/logs`)
+      .then(r => r.json())
+      .then((data: LogEntry[]) => {
+        if (!Array.isArray(data) || data.length === 0) return
+        const sorted = data.sort((a, b) => a.id - b.id)
+        setEntries(prev => {
+          const ids = new Set(sorted.map(e => e.id))
+          const extra = prev.filter(e => !ids.has(e.id))
+          const combined = [...sorted, ...extra].sort((a, b) => a.id - b.id)
+          logCache.set(pid, combined)
+          return combined
+        })
+      })
+      .catch(() => {})
   }, [profileId])
 
   useEffect(() => {
@@ -87,9 +106,16 @@ export function LogPane({ profileId, connected }: Props) {
         const data = JSON.parse(event.data)
         // Initial batch arrives as { _init: true, entries: [...] }
         if (data._init && Array.isArray(data.entries)) {
-          const sorted = (data.entries as LogEntry[]).sort((a: LogEntry, b: LogEntry) => a.id - b.id)
-          logCache.set(pid, sorted)
-          setEntries(sorted)
+          const initEntries = (data.entries as LogEntry[]).sort((a: LogEntry, b: LogEntry) => a.id - b.id)
+          setEntries(prev => {
+            // Merge with existing — HTTP fetch may have already loaded more
+            const ids = new Set(prev.map(e => e.id))
+            const newEntries = initEntries.filter(e => !ids.has(e.id))
+            if (newEntries.length === 0) return prev
+            const combined = [...prev, ...newEntries].sort((a, b) => a.id - b.id)
+            logCache.set(pid, combined)
+            return combined
+          })
           return
         }
         // Live entries arrive individually

@@ -22,7 +22,7 @@ interface Props {
 
 export function SidePane({ profileId, todo: initialTodo, memory: initialMemory, connected, playerData, onRefreshStatus }: Props) {
   const [logEntries, setLogEntries] = useState<CaptainsLogEntry[]>(() => captainsLogCache.get(profileId) || [])
-  const [logLoading, setLogLoading] = useState(false)
+  const [logLoading, setLogLoading] = useState(() => connected && !captainsLogCache.has(profileId))
   const [todo, setTodo] = useState(initialTodo)
   const [memory, setMemory] = useState(initialMemory)
   const [statusOpen, setStatusOpen] = useState(true)
