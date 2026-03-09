@@ -18,6 +18,7 @@ const SPHERE_SEGMENTS = 6
 
 const tempObj = new THREE.Object3D()
 const tempColor = new THREE.Color()
+const _white = new THREE.Color('#ffffff')
 
 export function StarSystems({ systems, colors, hoveredId, selectedId, onHover, onSelect }: Props) {
   const meshRef = useRef<THREE.InstancedMesh>(null)
@@ -40,7 +41,11 @@ export function StarSystems({ systems, colors, hoveredId, selectedId, onHover, o
       const z = systemZ(sys.system_id)
 
       tempObj.position.set(sys.position.x, z, sys.position.y)
-      tempObj.scale.setScalar(isHovered || isSelected ? 1.8 : 1)
+
+      // Activity density: systems with more online players are slightly larger
+      const onlineBoost = Math.min((sys.online || 0) / 10, 0.8) * 0.4 // up to 0.32 extra
+      const baseScale = isHovered || isSelected ? 1.8 : 1 + onlineBoost
+      tempObj.scale.setScalar(baseScale)
       tempObj.updateMatrix()
       mesh.setMatrixAt(i, tempObj.matrix)
 
@@ -48,6 +53,10 @@ export function StarSystems({ systems, colors, hoveredId, selectedId, onHover, o
       tempColor.set(hex)
       if (!sys.visited && !isHovered && !isSelected) {
         tempColor.multiplyScalar(0.15)
+      } else if (sys.online > 0 && !isSelected) {
+        // Brightness boost for populated systems — lerp toward white
+        const brightFactor = Math.min(sys.online / 15, 0.3)
+        tempColor.lerp(_white, brightFactor)
       }
       mesh.setColorAt(i, tempColor)
     }

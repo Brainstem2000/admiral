@@ -2,6 +2,15 @@
 
 All notable changes to Admiral are documented here.
 
+## [0.3.2] - 2026-03-09
+
+### Added
+- **Empire Nebula Glow** -- Ambient colored glow around empire territory clusters using additive-blended transparent spheres. Cluster density computation weights neighboring systems for brighter cores in dense empire regions.
+- **Security Heatmap Overlay** -- Togglable overlay showing safe empire zones (green) and threatened/lawless areas (red). Uses fleet intel threat data polled every 30 seconds. Toggle button in bottom bar.
+- **Agent Heading Indicators** -- Directional cones on the galaxy map showing each agent's last travel direction, inferred from position history between poll cycles.
+- **Player Activity Density** -- Star systems with more online players appear slightly larger and brighter on the galaxy map. Zero additional draw calls.
+- **Enhanced Starfield** -- Second ambient particle layer with warm gold and cool blue tinted stars for richer background depth.
+
 ## [0.3.1] - 2026-03-09
 
 ### Fixed

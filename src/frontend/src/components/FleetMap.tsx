@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { CameraControls } from '@react-three/drei'
-import { Loader2, RefreshCw, Maximize2, Minimize2 } from 'lucide-react'
+import { Loader2, RefreshCw, Maximize2, Minimize2, Shield } from 'lucide-react'
 import type CameraControlsImpl from 'camera-controls'
 import type { Profile } from '@/types'
 import type { GalaxyMapData, GalaxySystem } from '@shared/galaxy-types'
+import type { ThreatIntel } from '@shared/fleet-intel-types'
 import { FleetLegend } from './FleetLegend'
 import { FleetIntelPanel } from './FleetIntelPanel'
 import { resolveThemeColors, systemZ, type ThemeColors } from './fleet-map/galaxy-utils'
@@ -12,6 +13,9 @@ import { BackgroundStars } from './fleet-map/BackgroundStars'
 import { Connections } from './fleet-map/Connections'
 import { StarSystems } from './fleet-map/StarSystems'
 import { AgentMarkers, type AgentPosition } from './fleet-map/AgentMarkers'
+import { AgentHeadings, type AgentHeading } from './fleet-map/AgentHeadings'
+import { EmpireNebula } from './fleet-map/EmpireNebula'
+import { SecurityOverlay } from './fleet-map/SecurityOverlay'
 import { SystemPopup } from './fleet-map/SystemPopup'
 
 interface Props {
@@ -29,7 +33,12 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
   const [colors, setColors] = useState<ThemeColors>(() => resolveThemeColors())
   const [selectedSystem, setSelectedSystem] = useState<GalaxySystem | null>(null)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
+  const [securityOverlay, setSecurityOverlay] = useState(false)
+  const [threats, setThreats] = useState<ThreatIntel[]>([])
   const controlsRef = useRef<CameraControlsImpl>(null)
+
+  // Track previous agent positions to infer heading direction
+  const agentPrevSystems = useRef<Map<string, string>>(new Map())
 
   const systemById = useMemo(() => {
     if (!galaxyData) return new Map<string, GalaxySystem>()
@@ -60,6 +69,23 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
     })
     return result
   }, [profiles, playerDataMap, statuses, systemByName])
+
+  // Compute agent headings from position changes
+  const agentHeadings = useMemo(() => {
+    const headings = new Map<string, AgentHeading>()
+    const prev = agentPrevSystems.current
+    for (const ap of agentPositions) {
+      const prevSysId = prev.get(ap.profile.id)
+      if (prevSysId && prevSysId !== ap.system.system_id) {
+        const fromSys = systemById.get(prevSysId)
+        if (fromSys) {
+          headings.set(ap.profile.id, { from: fromSys, to: ap.system })
+        }
+      }
+      prev.set(ap.profile.id, ap.system.system_id)
+    }
+    return headings
+  }, [agentPositions, systemById])
 
   const agentsAtSelected = useMemo(() => {
     if (!selectedSystem) return []
@@ -93,6 +119,24 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
     obs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
     return () => obs.disconnect()
   }, [])
+
+  // Poll fleet intel for threat data (used by security overlay)
+  useEffect(() => {
+    if (!securityOverlay) return
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const resp = await fetch('/api/fleet-intel')
+        if (resp.ok && !cancelled) {
+          const data = await resp.json()
+          setThreats(data.threats || [])
+        }
+      } catch { /* ignore */ }
+    }
+    poll()
+    const interval = setInterval(poll, 30_000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [securityOverlay])
 
   // Keyboard
   useEffect(() => {
@@ -162,6 +206,10 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
           />
           <ambientLight intensity={0.8} />
           <BackgroundStars />
+          <EmpireNebula systems={galaxyData.systems} systemById={systemById} colors={colors} />
+          {securityOverlay && (
+            <SecurityOverlay systems={galaxyData.systems} threats={threats} colors={colors} />
+          )}
           <Connections systems={galaxyData.systems} systemById={systemById} colors={colors} />
           <StarSystems
             systems={galaxyData.systems}
@@ -172,6 +220,7 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
             onSelect={handleSelect}
           />
           <AgentMarkers agents={agentPositions} colors={colors} />
+          <AgentHeadings agents={agentPositions} headings={agentHeadings} colors={colors} />
           {selectedSystem && (
             <SystemPopup
               system={selectedSystem}
@@ -236,6 +285,14 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
           title="Refresh galaxy data"
         >
           <RefreshCw size={10} />
+        </button>
+        <button
+          onClick={() => setSecurityOverlay(v => !v)}
+          className={`flex items-center gap-1 transition-colors ${securityOverlay ? 'text-green-400' : 'hover:text-muted-foreground'}`}
+          title={securityOverlay ? 'Hide security overlay' : 'Show security overlay (safe/dangerous zones)'}
+        >
+          <Shield size={10} />
+          <span>Security</span>
         </button>
       </div>
 
