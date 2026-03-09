@@ -66,6 +66,18 @@ export function LogPane({ profileId, connected }: Props) {
   }, [connected])
 
   useEffect(() => {
+    // Fetch recent entries immediately so the pane isn't blank on switch
+    fetch(`/api/profiles/${profileId}/logs`)
+      .then(r => r.json())
+      .then((batch: LogEntry[]) => {
+        setEntries(prev => {
+          const ids = new Set(prev.map(e => e.id))
+          const fresh = batch.filter((e: LogEntry) => !ids.has(e.id))
+          return [...prev, ...fresh].sort((a, b) => a.id - b.id).slice(-500)
+        })
+      })
+      .catch(() => {})
+
     setEntries([])
 
     if (eventSourceRef.current) {
