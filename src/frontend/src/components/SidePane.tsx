@@ -42,15 +42,24 @@ export function SidePane({ profileId, todo: initialTodo, memory: initialMemory, 
   useEffect(() => { setTodo(initialTodo) }, [initialTodo])
   useEffect(() => { setMemory(initialMemory) }, [initialMemory])
 
+  // Track profileId to ignore stale fetches from previous profiles
+  const profileIdRef = useRef(profileId)
+  useEffect(() => {
+    profileIdRef.current = profileId
+    setLogEntries([])
+  }, [profileId])
+
   const fetchCaptainsLog = useCallback(async () => {
     if (!connected) return
+    const targetId = profileId
     setLogLoading(true)
     try {
-      const resp = await fetch(`/api/profiles/${profileId}/command`, {
+      const resp = await fetch(`/api/profiles/${targetId}/command`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: 'captains_log_list' }),
       })
+      if (profileIdRef.current !== targetId) return  // Profile changed during fetch
       const data = await resp.json()
       const result = data.result || data
 
@@ -66,7 +75,7 @@ export function SidePane({ profileId, todo: initialTodo, memory: initialMemory, 
       const promises = []
       for (let i = 1; i < result.total_count; i++) {
         promises.push(
-          fetch(`/api/profiles/${profileId}/command`, {
+          fetch(`/api/profiles/${targetId}/command`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ command: 'captains_log_list', args: { index: i } }),
@@ -74,6 +83,7 @@ export function SidePane({ profileId, todo: initialTodo, memory: initialMemory, 
         )
       }
       const results = await Promise.all(promises)
+      if (profileIdRef.current !== targetId) return  // Profile changed during fetch
       for (const r of results) {
         const entry = r?.result?.entry || r?.entry
         if (entry) entries.push(entry)
@@ -83,7 +93,7 @@ export function SidePane({ profileId, todo: initialTodo, memory: initialMemory, 
     } catch {
       // ignore
     } finally {
-      setLogLoading(false)
+      if (profileIdRef.current === targetId) setLogLoading(false)
     }
   }, [profileId, connected])
 
