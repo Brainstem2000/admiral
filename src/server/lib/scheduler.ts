@@ -11,7 +11,7 @@ const TICK_INTERVAL = 30_000 // Check every 30 seconds
 
 /**
  * Parse a 5-field cron expression: minute hour dayOfMonth month dayOfWeek
- * Supports: *, numbers, ranges (1-5), lists (1,3,5), steps (*/5)
+ * Supports: *, numbers, ranges (1-5), lists (1,3,5), steps (e.g. star/5)
  */
 function parseCronField(field: string, min: number, max: number): Set<number> {
   const values = new Set<number>()

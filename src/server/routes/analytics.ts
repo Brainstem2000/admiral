@@ -121,7 +121,7 @@ analytics.get('/financial', (c) => {
 
     // Extract cargo items from game state
     const cargo: Array<{ item: string; quantity: number }> = []
-    const rawCargo = (gameState?.cargo ?? gameState?.ship && (gameState.ship as Record<string, unknown>)?.cargo) as Array<Record<string, unknown>> | undefined
+    const rawCargo = (gameState?.cargo ?? (gameState?.ship ? (gameState.ship as Record<string, unknown>)?.cargo : undefined)) as Array<Record<string, unknown>> | undefined
     if (Array.isArray(rawCargo)) {
       for (const c of rawCargo) {
         const item = String(c.item_id || c.name || '')
