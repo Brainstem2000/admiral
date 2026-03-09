@@ -597,7 +597,7 @@ function FinancialTab({ profiles }: { profiles: Profile[] }) {
             <MiniChart
               data={sorted.map(([, v]) => v)}
               labels={sorted.map(([t]) => {
-                try { return new Date(t + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) } catch { return t }
+                try { return new Date(t.endsWith('Z') ? t : t + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) } catch { return t }
               })}
               color="hsl(var(--smui-green))"
               suffix=" cr"
@@ -871,7 +871,7 @@ function MiniChart({ data, labels, color, prefix = '', suffix = '' }: { data: nu
 
 function formatTime(ts: string): string {
   try {
-    const d = new Date(ts + 'Z')
+    const d = new Date(ts.endsWith('Z') ? ts : ts + 'Z')
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   } catch {
     return ts

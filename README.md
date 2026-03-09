@@ -42,22 +42,36 @@ This starts both the API server (port 3031) and Vite frontend (port 3030) with h
 
 ### Multiple Simultaneous Agents
 
-Run as many agents as you want at the same time. Each profile gets its own connection, LLM loop, and log stream. Switch between them instantly from the sidebar, which shows live connection status for every agent. Profiles can be reordered via drag-and-drop in the sidebar. Agents are dynamically grouped by faction affiliation with faction tags displayed alongside each name.
+Run as many agents as you want at the same time. Each profile gets its own connection, LLM loop, and log stream. Switch between them instantly from the sidebar, which shows live connection status for every agent. Profiles can be reordered via drag-and-drop in the sidebar. Agents are dynamically grouped by faction affiliation with faction tags displayed alongside each name. Batch connect/disconnect all agents (or a group) with a single click from the header bar.
 
 ### Any LLM Provider
 
 Admiral supports frontier cloud providers (Anthropic, OpenAI, Google, Groq, xAI, Mistral, MiniMax, OpenRouter, NVIDIA), local models (Ollama, LM Studio), and any OpenAI-compatible endpoint via the custom provider. Configure API keys and endpoint URLs from the settings panel -- local providers are auto-detected on your network.
 
-**Claude MAX** is supported natively via OAuth integration. Admiral reads Claude Code credentials from `~/.claude/.credentials.json` and handles automatic token refresh.
+**Claude MAX** is supported natively via OAuth integration. Admiral reads Claude Code credentials from `~/.claude/.credentials.json` and handles automatic token refresh -- tokens are re-resolved every turn so agents survive the 8-hour expiry window without interruption.
 
 ### Dual-Model Planning
 
-Assign a separate **planner model** and **executor model** to each agent. The planner (typically a larger, more capable model like Claude Opus) runs periodically to analyze the game state and write a strategic plan to the agent's TODO list. The executor (a faster, cheaper model like Claude Haiku) runs the remaining turns, following the plan step-by-step.
+Assign a separate **planner model** and **executor model** to each agent. The planner (typically a larger, more capable model like Claude Opus) runs periodically to analyze the game state and write a strategic plan to the agent's TODO list. The executor (a faster, cheaper model like Claude Sonnet) runs the remaining turns, following the plan step-by-step.
 
-- Configurable planning interval (e.g. every 5 turns)
+- Configurable planning interval (e.g. every 10 turns)
 - System prompt automatically switches between `[Planning]` and `[Executing]` phases
 - Planning phase is read-only analysis; execution phase carries out actions
 - Reduces cost while maintaining strategic coherence
+
+### Analytics Dashboard
+
+A collapsible analytics panel accessible from the top bar provides five specialized tabs for fleet-wide visibility:
+
+- **Timeline** -- Cross-agent unified activity log with live SSE streaming. All agents' actions (LLM calls, tool executions, game responses) are interleaved chronologically and color-coded by agent. Filter by agent with toggle chips. Virtualized scrolling handles thousands of entries.
+
+- **Comms** -- Aggregated notification and chat feed across all agents. Filter by agent and channel type. Useful for monitoring inter-agent communication, trade fills, combat alerts, and faction messages in one view.
+
+- **Financial** -- Fleet-wide financial overview. Per-agent wallet and storage credit balances displayed as horizontal bars. Cargo inventory table showing items held across the fleet. Wealth-over-time sparkline chart built from periodic snapshots. Fleet total at a glance.
+
+- **Token Economics** -- API cost tracking and ROI analysis. Per-agent token usage (input/output), cost, and call count. Per-model cost breakdown. Cumulative cost chart over time. Credits-earned-per-API-dollar ROI metric per agent and fleet-wide.
+
+- **Automation** -- Manage cron schedules, event triggers, and fleet orders (see Automation section below).
 
 ### Full Activity Inspection
 
@@ -75,7 +89,7 @@ One-click buttons for common queries (status, cargo, system, ship, POI, market, 
 
 ### Player Status Dashboard
 
-View your agent's live game state -- empire, location, credits, ship class, faction membership -- pulled directly from the server. Ship health metrics (hull, shield, fuel, cargo, CPU, power) are displayed as progress bars. Fitted modules show wear levels and ammo counts. Faction name and tag are enriched automatically via background lookups. Player colors are rendered from in-game customization. Per-agent wallet and storage totals are visible at a glance.
+View your agent's live game state -- empire, location, credits, ship class, faction membership -- pulled directly from the server. Ship health metrics (hull, shield, fuel, cargo, CPU, power) are displayed as progress bars. Fitted modules show wear levels and ammo counts. Faction name and tag are enriched automatically via background lookups. Player colors are rendered from in-game customization. Per-agent wallet and storage credit totals are visible at a glance in the header bar.
 
 ### 3D Galaxy Map
 
@@ -98,6 +112,26 @@ All agents passively contribute to a shared intelligence database:
 - **Briefing** -- Aggregated intel is injected into every agent's system prompt so they make informed decisions
 
 Intel is extracted automatically from game responses (`view_market`, `get_system`, `scan`, etc.) with no manual configuration needed.
+
+### Automation
+
+#### Cron Schedules
+
+Schedule agents to connect and disconnect on a recurring basis using standard cron expressions. Create schedules from the Automation tab with presets (every hour, daily at 8am, weekdays only) or custom cron strings. Optional session duration limits auto-disconnect agents after N hours. The scheduler evaluates every 30 seconds.
+
+#### Event Triggers
+
+Define event-driven rules that react to game notifications in real-time. When an agent receives a matching notification (trade fill, combat alert, chat message, etc.), the trigger fires an action:
+
+- **Wake** -- Connect and start an offline agent
+- **Nudge** -- Send a message into a running agent's conversation
+- **Disconnect** -- Stop an agent
+
+Triggers support event type filtering (trade, combat, chat, faction, or wildcard) and optional content-based matching.
+
+#### Fleet Orders (Convoy System)
+
+Agents can delegate tasks to each other via typed orders (deliver, buy, craft, travel, mine, custom). The target agent receives a nudge when an order arrives. Orders have status tracking (pending, executing, completed) and support chaining for multi-step workflows. The Automation tab shows all fleet orders with status badges.
 
 ### Directives
 
@@ -138,13 +172,17 @@ Agents automatically compact their conversation context when it approaches the m
 - Recent messages are always kept intact
 - Graceful fallback if summarization fails
 
+### Auto-Restart with Backoff
+
+If an agent disconnects unexpectedly (network error, server restart, token expiry), Admiral automatically attempts to reconnect with exponential backoff (5 seconds to 5 minutes). The backoff resets after one minute of stable operation.
+
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────┐
 │                   Browser UI                     │
 │  React 19 + Vite 6 + Tailwind v4 + Three.js    │
-│  Dashboard / Logs / Commands / Galaxy Map        │
+│  Dashboard / Analytics / Galaxy Map / Commands   │
 └──────────────────────┬──────────────────────────┘
                        │ REST + SSE
 ┌──────────────────────┴──────────────────────────┐
@@ -157,10 +195,15 @@ Agents automatically compact their conversation context when it approaches the m
 │  │   LLM loop) │  │              │  │         │ │
 │  └──────┬──────┘  └──────────────┘  └─────────┘ │
 │         │                                         │
-│  ┌──────┴──────────────────────────────────────┐ │
-│  │           Game Connections                    │ │
-│  │  HTTP v1 │ HTTP v2 │ WebSocket │ MCP v1/v2  │ │
-│  └──────────────────────┬───────────────────────┘ │
+│  ┌──────┴────────┐  ┌────────────┐  ┌──────────┐│
+│  │  Scheduler    │  │  Event     │  │ Financial ││
+│  │  (cron jobs)  │  │  Watcher   │  │ Snapshots ││
+│  └───────────────┘  └────────────┘  └──────────┘│
+│                                                   │
+│  ┌───────────────────────────────────────────────┐│
+│  │           Game Connections                     ││
+│  │  HTTP v1 │ HTTP v2 │ WebSocket │ MCP v1/v2   ││
+│  └──────────────────────┬────────────────────────┘│
 └─────────────────────────┼─────────────────────────┘
                           │
               ┌───────────┴───────────┐
@@ -185,7 +228,7 @@ Agents automatically compact their conversation context when it approaches the m
 
 ### Database
 
-SQLite with 9 tables:
+SQLite with 12 tables:
 
 - **providers** -- LLM provider configs (API keys, base URLs, status)
 - **profiles** -- Agent configurations (credentials, provider, model, directive, connection mode, planner settings)
@@ -195,10 +238,16 @@ SQLite with 9 tables:
 - **fleet_intel_market** -- Market price intel per station/item
 - **fleet_intel_systems** -- System discovery intel (resources, services, empire)
 - **fleet_intel_threats** -- Combat/threat reports with expiration
+- **schedules** -- Cron-based automation rules (agent, cron expression, action, duration)
+- **event_triggers** -- Event-driven wake/nudge/disconnect rules
+- **fleet_orders** -- Cross-agent task delegation with status tracking and chaining
+- **financial_snapshots** -- Periodic wealth snapshots for portfolio tracking and ROI charts
 
 Schema auto-migrates on startup -- new columns are added automatically.
 
 ### API Endpoints
+
+#### Profiles
 
 | Route | Description |
 |-------|-------------|
@@ -206,10 +255,43 @@ Schema auto-migrates on startup -- new columns are added automatically.
 | `POST /api/profiles` | Create new agent profile |
 | `PUT /api/profiles/:id` | Update profile settings |
 | `DELETE /api/profiles/:id` | Delete profile |
+| `PUT /api/profiles/reorder` | Reorder profiles (drag-and-drop) |
+| `POST /api/profiles/batch` | Batch connect/disconnect by IDs or group |
 | `POST /api/profiles/:id/connect` | Connect, disconnect, or start LLM loop |
 | `POST /api/profiles/:id/command` | Execute a game command manually |
 | `POST /api/profiles/:id/nudge` | Inject guidance into running agent |
-| `GET /api/profiles/:id/logs?stream=true` | Stream logs via SSE |
+| `GET /api/profiles/:id/logs` | Fetch logs (supports `?stream=true` for SSE) |
+| `DELETE /api/profiles/:id/logs` | Clear all logs for a profile |
+
+#### Analytics
+
+| Route | Description |
+|-------|-------------|
+| `GET /api/analytics/timeline` | Cross-agent log stream (supports SSE, type/profile filtering) |
+| `GET /api/analytics/tokens` | Token usage and cost aggregations by profile and model |
+| `GET /api/analytics/financial` | Per-profile wallet, storage, and cargo summaries |
+| `GET /api/analytics/roi` | Credits earned vs API dollars spent per agent |
+| `GET /api/analytics/snapshots` | Historical wealth snapshots for charts |
+
+#### Automation
+
+| Route | Description |
+|-------|-------------|
+| `GET /api/schedules` | List cron schedules |
+| `POST /api/schedules` | Create cron schedule |
+| `PUT /api/schedules/:id` | Update schedule (cron, action, enabled) |
+| `DELETE /api/schedules/:id` | Delete schedule |
+| `GET /api/schedules/triggers` | List event triggers |
+| `POST /api/schedules/triggers` | Create event trigger |
+| `DELETE /api/schedules/triggers/:id` | Delete trigger |
+| `GET /api/schedules/orders/all` | List all fleet orders |
+| `GET /api/schedules/orders` | Get orders for a profile |
+| `DELETE /api/schedules/orders/:id` | Delete order |
+
+#### Other
+
+| Route | Description |
+|-------|-------------|
 | `GET /api/providers` | List LLM providers with status |
 | `PUT /api/providers` | Configure provider (API key, URL) |
 | `POST /api/providers/detect` | Auto-detect local providers |
@@ -232,8 +314,9 @@ Each agent profile supports:
 |---------|-------------|---------|
 | Provider | LLM provider to use | -- |
 | Model | Executor model ID | -- |
-| Planner Model | Optional strategic planner model | (none) |
-| Planning Interval | Turns between planner runs | 5 |
+| Planner Provider | Provider for the planner model | (same as executor) |
+| Planner Model | Strategic planner model ID | (none) |
+| Planning Interval | Turns between planner runs | 10 |
 | Connection Mode | Game API connection type | `http_v2` |
 | Directive | High-level mission text | "Play the game..." |
 | Context Budget Ratio | % of context window before compaction | 0.55 |

@@ -2,6 +2,16 @@
 
 All notable changes to Admiral are documented here.
 
+## [0.3.1] - 2026-03-09
+
+### Fixed
+- **OAuth Token Refresh** -- Tokens are now re-resolved every turn instead of being cached at session start. Agents survive the 8-hour token expiry window without 401 errors. Concurrent refresh requests are deduplicated to avoid consuming single-use refresh tokens.
+- **Disconnect Button UI** -- `refreshProfiles()` now syncs the `statuses` state map immediately after a disconnect, so the button updates without waiting for the next 5-second poll cycle.
+- **Storage Credit Parser** -- Rewritten to handle all agents' memory formats: `###` sub-headings no longer reset section tracking, 3+ column tables are accepted, and new heading patterns (wallet/credits, asset inventory) are recognized. Bare `N credits` list items are now parsed.
+- **Timeline Invalid Date** -- Fixed `formatTime()` double-appending `Z` to ISO timestamps from live SSE entries, causing "Invalid Date" display on all live timeline rows.
+- **Scheduler JSDoc** -- Fixed `*/5` in a JSDoc comment prematurely closing the comment block.
+- **Analytics Operator Precedence** -- Fixed `??` vs `&&` precedence issue in cargo state extraction.
+
 ## [0.3.0] - 2026-03-06
 
 ### Added
