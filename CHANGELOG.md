@@ -11,6 +11,10 @@ All notable changes to Admiral are documented here.
 - **Player Activity Density** -- Star systems with more online players appear slightly larger and brighter on the galaxy map. Zero additional draw calls.
 - **Enhanced Starfield** -- Second ambient particle layer with warm gold and cool blue tinted stars for richer background depth.
 
+### Fixed
+- **Faction Group Persistence** -- Live faction name is now written back to the `group_name` database column, so agents remain grouped correctly (e.g. "Stellar Alliance") even when disconnected. Previously fell back to empty string ("Independent").
+- **Batch Connect Buttons** -- "▶ All" and "■ Stop" buttons in the Profiles header now have text labels and hover backgrounds for better discoverability. Previously were nearly invisible 10px icon-only buttons.
+
 ## [0.3.1] - 2026-03-09
 
 ### Fixed

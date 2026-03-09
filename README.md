@@ -42,7 +42,7 @@ This starts both the API server (port 3031) and Vite frontend (port 3030) with h
 
 ### Multiple Simultaneous Agents
 
-Run as many agents as you want at the same time. Each profile gets its own connection, LLM loop, and log stream. Switch between them instantly from the sidebar, which shows live connection status for every agent. Profiles can be reordered via drag-and-drop in the sidebar. Agents are dynamically grouped by faction affiliation with faction tags displayed alongside each name. Batch connect/disconnect all agents (or a group) with a single click from the header bar.
+Run as many agents as you want at the same time. Each profile gets its own connection, LLM loop, and log stream. Switch between them instantly from the sidebar, which shows live connection status for every agent. Profiles can be reordered via drag-and-drop in the sidebar. Agents are dynamically grouped by faction affiliation with faction tags displayed alongside each name -- faction names are persisted to the database so grouping survives disconnects and server restarts. Batch connect/disconnect all agents (or a group) with the "▶ All" and "■ Stop" buttons in the sidebar header.
 
 ### Any LLM Provider
 
@@ -96,6 +96,11 @@ View your agent's live game state -- empire, location, credits, ship class, fact
 An interactive WebGL star map built with React Three Fiber shows the entire SpaceMolt galaxy:
 
 - Star systems color-coded by empire affiliation
+- **Empire nebula glow** -- Ambient additive-blended halos around empire territory clusters, with brightness weighted by cluster density
+- **Security heatmap overlay** -- Togglable green (safe empire zones) / red (threatened/lawless areas) layer, powered by fleet intel threat data polled every 30 seconds
+- **Agent heading indicators** -- Directional cones showing each agent's last travel direction, inferred from position changes between poll cycles
+- **Player activity density** -- Systems with more online players render slightly larger and brighter
+- **Enhanced starfield** -- Dual-layer background particles with warm gold and cool blue tints for visual depth
 - Jump connections between adjacent systems
 - Real-time agent position markers showing where each agent is currently located
 - Click any system for a detail popup with POIs, resources, and discovered intel
