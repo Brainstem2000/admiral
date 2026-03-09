@@ -394,12 +394,13 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
  * section and per-station detail sections.
  *
  * Supported formats:
- *   - "- **Station:** 577,067cr"        (CyberSapper summary)
- *   - "- Station storage: 50,000cr"     (Bob Credits & Assets)
- *   - "- **Credits:** 1,268,440"        (CyberSpock per-station)
- *   - "- Credits: 2,202,999"            (Nova per-station detail)
- *   - "- **Station:** 0 credits, ..."   (Morg'Thar station storage)
- *   - "| CCC (Sol) | 2,202,999 |"      (Nova verified ledger table)
+ *   - "| Station | 577,067 |"             (2-col table)
+ *   - "| Station | 1,629,629 | items |"   (3-col table, credits in col 2)
+ *   - "- Credits: 813,947cr"              (list item under ### station heading)
+ *   - "- **Station:** 577,067cr"          (labeled list item)
+ *   - "- Station storage: 50,000cr"       (labeled list item)
+ *   - "- **Credits:** 1,268,440"          (list item)
+ *   - "- **Station:** 0 credits, ..."     (credits with word suffix)
  */
 function parseStorageCreditsFromMemory(memory: string): number {
   const lines = memory.split('\n')
@@ -409,15 +410,15 @@ function parseStorageCreditsFromMemory(memory: string): number {
   let sectionType: 'summary' | 'individual' | 'none' = 'none'
 
   for (const line of lines) {
-    // Track section headers (## or ###)
-    if (/^#{2,3}\s/.test(line)) {
+    // Track ## section headers (top-level sections)
+    if (/^##\s/.test(line) && !/^###/.test(line)) {
       const heading = line.replace(/^#+\s*/, '').trim().toLowerCase()
-      // Summary: heading starts with "credits" or has "storage credits" as a phrase
-      if (/^credits\b/i.test(heading) || /storage\s+credits/i.test(heading)) {
+      // Summary: "credits ledger", "wallet / credits", "storage credits" — compact credit tables
+      if (/^credits\b/i.test(heading) || /storage\s+credits/i.test(heading) || (/wallet/i.test(heading) && /credits/i.test(heading))) {
         sectionType = 'summary'
         summaryFound = true
-      // Individual: heading has "storage" but not market/resource noise
-      } else if (/storage/i.test(heading) && !/market|palladium|resource|sales log/i.test(heading)) {
+      // Individual: heading has "storage", "inventory", or "asset" but not noise
+      } else if (/storage|inventor|asset/i.test(heading) && !/market|palladium|resource|sales log|faction/i.test(heading)) {
         sectionType = 'individual'
       } else {
         sectionType = 'none'
@@ -425,10 +426,13 @@ function parseStorageCreditsFromMemory(memory: string): number {
       continue
     }
 
+    // ### sub-headings do NOT reset sectionType — they're sub-sections
+    if (/^###\s/.test(line)) continue
+
     if (sectionType === 'none') continue
 
     const trimmed = line.trim()
-    if (!trimmed || trimmed === '|---|---|') continue
+    if (!trimmed || /^\|[-\s|]+\|$/.test(trimmed)) continue
 
     const credits = extractStorageCredits(trimmed)
     if (credits > 0) {
@@ -437,17 +441,18 @@ function parseStorageCreditsFromMemory(memory: string): number {
     }
   }
 
-  return summaryFound ? summaryTotal : individualTotal
+  // Prefer summary if it has data; fall back to individual
+  return (summaryFound && summaryTotal > 0) ? summaryTotal : individualTotal
 }
 
 function extractStorageCredits(trimmed: string): number {
-  // Table row: | Name | Number |
+  // Table row: | Name | Number | (2+ columns)
   if (trimmed.startsWith('|')) {
     const cells = trimmed.split('|').filter(c => c.trim())
-    if (cells.length !== 2) return 0
+    if (cells.length < 2) return 0
     const label = cells[0].trim().toLowerCase().replace(/\*/g, '')
-    if (/wallet|total|location|credits|^-+$/.test(label)) return 0
-    const value = cells[1].trim().replace(/\*/g, '')
+    if (/^(wallet|total|location|credits|station|verified|-+)$/i.test(label)) return 0
+    const value = cells[1].trim().replace(/\*/g, '').replace(/~/, '')
     const num = parseInt(value.replace(/,/g, ''), 10)
     return (num > 0 && !isNaN(num)) ? num : 0
   }
@@ -468,6 +473,10 @@ function extractStorageCredits(trimmed: string): number {
   // "**Station:** N credits" (e.g., "**Ironhearth:** 0 credits, items...")
   const nCreditsMatch = content.match(/^\*\*[^*]+\*\*:?\s*([\d,]+)\s+credits?\b/i)
   if (nCreditsMatch) return parseInt(nCreditsMatch[1].replace(/,/g, ''), 10) || 0
+
+  // Bare "N,NNN credits" or "N,NNNcr" (e.g., Nova: "- 7,233,237 credits")
+  const bareMatch = clean.match(/^([\d,]+)\s*(?:credits?|cr)\b/)
+  if (bareMatch) return parseInt(bareMatch[1].replace(/,/g, ''), 10) || 0
 
   return 0
 }
