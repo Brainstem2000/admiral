@@ -2,6 +2,13 @@
 
 All notable changes to Admiral are documented here.
 
+## [0.3.3] - 2026-03-10
+
+### Changed
+- **Synced with upstream v0.3.0** -- Merged SpaceMolt/admiral v0.3.0 into fork. Picked up: server-rendered v2 text (structuredContent kept separate from result), poll no longer overwrites full player data, model picker placeholder, select theme fix, OpenAPI spec docs, and connection protocol alignment. Resolved 22 merge conflicts preserving our features (gameState refresh sync, memory prop, v1Fallback, HTTP log fetch, session expiry guard, drag-and-drop, faction grouping, improved batch buttons).
+- **Adopted upstream structuredContent fix** -- v2 API result text now goes to the LLM unchanged; structured JSON kept separately for game state caching and display. Previously our code overwrote result with structuredContent JSON.
+- **Closed mega-PR #8** -- Core bug fixes were backported by upstream into v0.3.0 (credited as "Brainstem2000 PR"). Remaining features (galaxy map, analytics, fleet automation) kept in fork. Will submit smaller focused PRs for universally useful features.
+
 ## [0.3.2] - 2026-03-09
 
 ### Added
