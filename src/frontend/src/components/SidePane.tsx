@@ -67,6 +67,7 @@ export function SidePane({ profileId, todo: initialTodo, memory: initialMemory, 
       const result = data.result || data
 
       if (!result.total_count || result.total_count === 0) {
+        captainsLogCache.set(profileId, [])
         setLogEntries([])
         return
       }

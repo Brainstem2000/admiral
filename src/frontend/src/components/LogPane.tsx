@@ -16,6 +16,9 @@ const FILTER_GROUPS: { key: string; label: string; types: LogType[] }[] = [
 
 const ALL_FILTER_KEYS = FILTER_GROUPS.map(g => g.key)
 
+// Per-profile cache survives component remounts — instant data on switch
+const logCache = new Map<string, LogEntry[]>()
+
 const BADGE_CLASS: Record<string, string> = {
   connection: 'log-badge-connection',
   error: 'log-badge-error',
@@ -39,9 +42,6 @@ const TYPE_LABELS: Record<string, string> = {
   notification: 'NOTIFY',
   system: 'SYSTEM',
 }
-
-// Per-profile cache survives component remounts — instant data on switch
-const logCache = new Map<string, LogEntry[]>()
 
 interface Props {
   profileId: string
