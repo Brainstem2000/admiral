@@ -4,6 +4,9 @@ All notable changes to Admiral are documented here.
 
 ## [0.3.3] - 2026-03-10
 
+### Fixed
+- **Player stats missing for inactive profiles** -- The 5-second poll loop only synced connection statuses but not gameState, so only the actively-selected profile showed player stats (credits, location, faction). Now all profiles sync gameState on every poll cycle.
+
 ### Changed
 - **Synced with upstream v0.3.0** -- Merged SpaceMolt/admiral v0.3.0 into fork. Picked up: server-rendered v2 text (structuredContent kept separate from result), poll no longer overwrites full player data, model picker placeholder, select theme fix, OpenAPI spec docs, and connection protocol alignment. Resolved 22 merge conflicts preserving our features (gameState refresh sync, memory prop, v1Fallback, HTTP log fetch, session expiry guard, drag-and-drop, faction grouping, improved batch buttons).
 - **Adopted upstream structuredContent fix** -- v2 API result text now goes to the LLM unchanged; structured JSON kept separately for game state caching and display. Previously our code overwrote result with structuredContent JSON.
