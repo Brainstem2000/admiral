@@ -138,5 +138,12 @@ export async function resolveApiKey(provider: string): Promise<string | undefine
   if (provider === 'claude-max') {
     return await getClaudeMaxToken()
   }
-  return getApiKeyFromDb(provider)
+  const dbKey = getApiKeyFromDb(provider)
+  if (dbKey) return dbKey
+  // Local/custom providers don't need real API keys — return a placeholder
+  // so pi-ai doesn't fall back to OPENAI_API_KEY env var
+  if (provider in CUSTOM_BASE_URLS) return 'local'
+  const dbProvider = getProvider(provider)
+  if (dbProvider?.base_url) return 'local'
+  return undefined
 }

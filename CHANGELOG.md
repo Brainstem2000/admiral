@@ -2,6 +2,12 @@
 
 All notable changes to Admiral are documented here.
 
+## [0.3.4] - 2026-03-13
+
+### Fixed
+- **Local provider API key resolution** -- `resolveApiKey()` returned `undefined` for Ollama and other local/custom providers (lmstudio, vllm, etc.), causing pi-ai to fall through to `process.env.OPENAI_API_KEY` and throw "OpenAI API key is required". The per-turn key resolver now returns `'local'` for providers in `CUSTOM_BASE_URLS` or with a custom `base_url` in the DB, matching the behavior `resolveModel()` already had.
+- **OpenAPI spec 429 rate-limiting on multi-agent startup** -- `fetchOpenApiSpec()` always hit the server first, then fell back to cache on failure. When multiple agents started simultaneously they all hammered the endpoint and got rate-limited. Now checks the fresh cache first (1h TTL) and only fetches from the server when the cache is stale or missing.
+
 ## [0.3.3] - 2026-03-10
 
 ### Fixed
