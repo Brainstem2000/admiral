@@ -7,6 +7,8 @@ All notable changes to Admiral are documented here.
 ### Fixed
 - **Local provider API key resolution** -- `resolveApiKey()` returned `undefined` for Ollama and other local/custom providers (lmstudio, vllm, etc.), causing pi-ai to fall through to `process.env.OPENAI_API_KEY` and throw "OpenAI API key is required". The per-turn key resolver now returns `'local'` for providers in `CUSTOM_BASE_URLS` or with a custom `base_url` in the DB, matching the behavior `resolveModel()` already had.
 - **OpenAPI spec 429 rate-limiting on multi-agent startup** -- `fetchOpenApiSpec()` always hit the server first, then fell back to cache on failure. When multiple agents started simultaneously they all hammered the endpoint and got rate-limited. Now checks the fresh cache first (1h TTL) and only fetches from the server when the cache is stale or missing.
+- **Captain's log not displaying in SidePane** -- MCP v2 now returns `structuredContent` (JSON) separately from `result` (text summary). SidePane was reading `data.result` which is now a string like `"Captain's log entry 0 of 20:"`, not the actual log data. Fixed to prefer `data.structuredContent` for parsing.
+- **Captain's log spam in activity logs** -- Every captain's log fetch (20 per profile) was logged as `manual: captains_log_list()` / `RESULT Captain's log entry 0 of 20:` in the LogPane. Added `silent` option to `executeCommand()` so UI-initiated queries no longer pollute the activity log.
 
 ## [0.3.3] - 2026-03-10
 

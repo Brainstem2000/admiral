@@ -352,23 +352,27 @@ export class Agent {
     this.log('system', 'Agent loop stopped')
   }
 
-  async executeCommand(command: string, args?: Record<string, unknown>): Promise<CommandResult> {
+  async executeCommand(command: string, args?: Record<string, unknown>, options?: { silent?: boolean }): Promise<CommandResult> {
     if (!this.connection) {
       return { error: { code: 'not_connected', message: 'Not connected' } }
     }
 
-    this.log('tool_call', `manual: ${command}(${args ? JSON.stringify(args) : ''})`)
+    if (!options?.silent) {
+      this.log('tool_call', `manual: ${command}(${args ? JSON.stringify(args) : ''})`)
+    }
     const result = await this.connection.execute(command, args)
 
     if (command === 'get_status') this.cacheGameState(result)
 
-    if (result.error) {
-      this.log('tool_result', `Error: ${result.error.message}`, JSON.stringify(result, null, 2))
-    } else {
-      const summary = typeof result.result === 'string'
-        ? result.result.slice(0, 200)
-        : JSON.stringify(result.result).slice(0, 200)
-      this.log('tool_result', summary, JSON.stringify(result, null, 2))
+    if (!options?.silent) {
+      if (result.error) {
+        this.log('tool_result', `Error: ${result.error.message}`, JSON.stringify(result, null, 2))
+      } else {
+        const summary = typeof result.result === 'string'
+          ? result.result.slice(0, 200)
+          : JSON.stringify(result.result).slice(0, 200)
+        this.log('tool_result', summary, JSON.stringify(result, null, 2))
+      }
     }
 
     return result
