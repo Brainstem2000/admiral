@@ -2,6 +2,16 @@
 
 All notable changes to Admiral are documented here.
 
+## [0.3.5] - 2026-03-13
+
+### Fixed
+- **Action-pending spam loop** -- Agents (especially Haiku 4.5) would call action commands like `mine` dozens of times in a single turn when the game returned "Action pending. Resolves next tick." Added two defenses: (1) 8-second cooldown between action commands within a turn (query commands exempt), and (2) "action pending" detection that appends a strong stop signal telling the LLM to end its turn or use query commands instead.
+- **Cooldown blocking query commands on MCP v2** -- MCP v2 prefixes commands (e.g. `spacemolt_get_system`), but `QUERY_COMMANDS` set had bare names (`get_system`). Cooldown now strips the `spacemolt_` prefix before lookup.
+- **Agents receiving degraded data from MCP v2** -- `executeTool` passed `resp.result` (text summary like "Captain's log entry 0 of 20:") to the LLM instead of `resp.structuredContent` (actual JSON data). All agents were effectively blind to structured game data. Now prefers `structuredContent` when available.
+
+### Changed
+- **Log filter: separate Call checkbox** -- Split `llm_call` (model/token metadata) out of the LLM filter group into its own "Call" checkbox so it can be toggled independently.
+
 ## [0.3.4] - 2026-03-13
 
 ### Fixed
