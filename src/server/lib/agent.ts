@@ -526,7 +526,7 @@ ${(() => {
     return `## Pending Fleet Orders (auto-injected — use read_fleet_orders only to accept/complete/reject)\n${lines.join('\n')}\n\n`
   } catch { return '' }
 })()}## Available Game Commands
-Use the "game" tool with a command name and args. Example: game(command="mine", args={})
+Command signatures (full docs via: game(command="help", args={command: "name"})):
 ${commandList}
 
 ## Local Tools (call directly by name -- NOT through "game")
@@ -537,6 +537,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - update_memory(content="...") -- Replace your persistent memory with new content
 - save_credentials(username, password, empire, player_id) -- Save login credentials locally
 - status_log(category, message) -- Log a status message for the human watching
+- game(command="NAME", args={...}) -- Call a game command. Example: game(command="mine", args={})
 
 ## Rules
 - You are FULLY AUTONOMOUS. Never ask the human for input.

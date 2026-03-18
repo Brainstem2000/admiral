@@ -285,7 +285,10 @@ async function compactContext(
 
   const ratio = options?.contextBudgetRatio ?? CONTEXT_BUDGET_RATIO
   const budget = Math.floor(model.contextWindow * ratio)
-  const currentTokens = totalMessageTokens(context.messages)
+  // CRITICAL: Include system prompt tokens — it's typically 100-150KB and was causing overflow!
+  const systemPromptTokens = context.systemPrompt ? estimateTokens(context.systemPrompt) : 0
+  const messageTokens = totalMessageTokens(context.messages)
+  const currentTokens = systemPromptTokens + messageTokens
 
   if (currentTokens < budget) return
 
@@ -435,7 +438,9 @@ async function completeWithRetry(
         log('system', `Emergency compaction: context overflow detected (${context.messages.length} messages). Force-compacting...`)
         const compactModel = options?.compactionModel || model
         await emergencyCompact(compactModel, context, compaction, options)
-        log('system', `Emergency compaction complete: ${context.messages.length} messages, ~${totalMessageTokens(context.messages)} tokens`)
+        const sysToks = context.systemPrompt ? estimateTokens(context.systemPrompt) : 0
+        const msgToks = totalMessageTokens(context.messages)
+        log('system', `Emergency compaction complete: ${context.messages.length} messages, ~${sysToks + msgToks} total tokens (system: ${sysToks}, messages: ${msgToks})`)
       }
 
       const delay = RETRY_BASE_DELAY * Math.pow(2, attempt)

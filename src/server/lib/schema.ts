@@ -173,7 +173,9 @@ function formatCommandSignature(cmd: GameCommandInfo): string {
     const paramList = cmd.params.map(p => p.required ? p.name : `${p.name}?`).join(', ')
     sig += `(${paramList})`
   }
-  return `  ${sig} -- ${cmd.description}`
+  // OPTIMIZATION: Omit full descriptions from system prompt (saves ~60KB).
+  // Agents can call game(command="help", args={command: "name"}) for details.
+  return `  ${sig}`
 }
 
 /**
