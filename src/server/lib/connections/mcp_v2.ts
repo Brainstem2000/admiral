@@ -1,6 +1,8 @@
 import type { GameConnection, LoginResult, RegisterResult, CommandResult, NotificationHandler } from './interface'
 import { USER_AGENT } from './interface'
 
+const NOTIFICATION_POLL_MIN_INTERVAL_MS = 2000
+
 interface V2ToolDef {
   name: string
   description: string
@@ -20,6 +22,7 @@ export class McpV2Connection implements GameConnection {
   private notificationHandlers: NotificationHandler[] = []
   private connected = false
   private jsonRpcId = 0
+  private lastNotificationPollAt = 0
   /** Map from action name to v2 tool name */
   private actionToTool: Map<string, string> = new Map()
   /** Discovered v2 tool definitions */
@@ -46,6 +49,7 @@ export class McpV2Connection implements GameConnection {
     await this.discoverTools()
 
     this.connected = true
+    this.lastNotificationPollAt = 0
   }
 
   private async discoverTools(): Promise<void> {
@@ -129,11 +133,16 @@ export class McpV2Connection implements GameConnection {
       toolName = command
       toolArgs = { ...(args || {}) }
     } else {
-      // Unknown command -- pass through to the main tool and let the server
-      // handle it, matching how other protocols (HTTP, WS, MCP v1) behave.
-      // The server will return a proper error with suggestions if invalid.
-      toolName = this.actionToTool.get('get_state') ? (this.actionToTool.get('get_state')!) : 'spacemolt'
-      toolArgs = { action: command, ...(args || {}) }
+      const suggestions = this.getCommandSuggestions(command)
+      const suffix = suggestions.length > 0
+        ? ` Did you mean: ${suggestions.join(', ')}?`
+        : ''
+      return {
+        error: {
+          code: 'unknown_command',
+          message: `Unknown MCP v2 command "${command}".${suffix}`,
+        },
+      }
     }
 
     const resp = await this.callTool(toolName, toolArgs)
@@ -153,9 +162,11 @@ export class McpV2Connection implements GameConnection {
       return this.execute(command, args)
     }
 
-    // Poll notifications
+    // Poll notifications at a bounded cadence to avoid an extra RPC per command.
+    // Skip if the current command is itself get_notifications.
     const notifTool = this.actionToTool.get('get_notifications')
-    if (notifTool) {
+    if (notifTool && command !== 'get_notifications' && Date.now() - this.lastNotificationPollAt >= NOTIFICATION_POLL_MIN_INTERVAL_MS) {
+      this.lastNotificationPollAt = Date.now()
       try {
         const notifResp = await this.callTool(notifTool, { action: 'get_notifications' })
         const { parsed: notifResult } = this.parseToolResult(notifResp.result)
@@ -205,6 +216,28 @@ export class McpV2Connection implements GameConnection {
     return this.actionToTool.size
   }
 
+  private getCommandSuggestions(command: string): string[] {
+    const q = command.toLowerCase()
+    const allActions = [...this.actionToTool.keys()].filter(k => !k.startsWith('spacemolt'))
+
+    const scored = allActions
+      .map(name => {
+        const n = name.toLowerCase()
+        if (n === q) return { name, score: 1000 }
+        if (n.startsWith(q)) return { name, score: 900 - (n.length - q.length) }
+        if (n.includes(q)) return { name, score: 700 - (n.length - q.length) }
+        const qParts = q.split('_').filter(Boolean)
+        const nParts = n.split('_').filter(Boolean)
+        const overlap = qParts.filter(part => nParts.includes(part)).length
+        if (overlap > 0) return { name, score: 400 + overlap * 25 }
+        return { name, score: 0 }
+      })
+      .filter(x => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+
+    return scored.slice(0, 5).map(x => x.name)
+  }
+
   onNotification(handler: NotificationHandler): void {
     this.notificationHandlers.push(handler)
   }
@@ -212,10 +245,15 @@ export class McpV2Connection implements GameConnection {
   async disconnect(): Promise<void> {
     this.sessionId = null
     this.connected = false
+    this.lastNotificationPollAt = 0
   }
 
   isConnected(): boolean {
     return this.connected
+  }
+
+  supportsNotifications(): boolean {
+    return true
   }
 
   private async callTool(name: string, args: Record<string, unknown>): Promise<{

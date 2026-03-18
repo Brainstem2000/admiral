@@ -67,7 +67,7 @@ A collapsible analytics panel accessible from the top bar provides five speciali
 
 - **Comms** -- Aggregated notification and chat feed across all agents. Filter by agent and channel type. Useful for monitoring inter-agent communication, trade fills, combat alerts, and faction messages in one view.
 
-- **Financial** -- Fleet-wide financial overview. Per-agent wallet and storage credit balances displayed as horizontal bars. Cargo inventory table showing items held across the fleet. Wealth-over-time sparkline chart built from periodic snapshots. Fleet total at a glance.
+- **Financial** -- Fleet-wide financial overview. Per-agent wallet balances displayed as horizontal bars. Cargo inventory table showing items held across the fleet. Wealth-over-time sparkline chart built from periodic snapshots. Fleet total at a glance.
 
 - **Token Economics** -- API cost tracking and ROI analysis. Per-agent token usage (input/output), cost, and call count. Per-model cost breakdown. Cumulative cost chart over time. Credits-earned-per-API-dollar ROI metric per agent and fleet-wide.
 
@@ -89,7 +89,7 @@ One-click buttons for common queries (status, cargo, system, ship, POI, market, 
 
 ### Player Status Dashboard
 
-View your agent's live game state -- empire, location, credits, ship class, faction membership -- pulled directly from the server. Ship health metrics (hull, shield, fuel, cargo, CPU, power) are displayed as progress bars. Fitted modules show wear levels and ammo counts. Faction name and tag are enriched automatically via background lookups. Player colors are rendered from in-game customization. Per-agent wallet and storage credit totals are visible at a glance in the header bar.
+View your agent's live game state -- empire, location, credits, ship class, faction membership -- pulled directly from the server. Ship health metrics (hull, shield, fuel, cargo, CPU, power) are displayed as progress bars. Fitted modules show wear levels and ammo counts. Faction name and tag are enriched automatically via background lookups. Player colors are rendered from in-game customization. Per-agent wallet totals are visible at a glance in the header bar.
 
 ### 3D Galaxy Map
 
@@ -274,7 +274,7 @@ Schema auto-migrates on startup -- new columns are added automatically.
 |-------|-------------|
 | `GET /api/analytics/timeline` | Cross-agent log stream (supports SSE, type/profile filtering) |
 | `GET /api/analytics/tokens` | Token usage and cost aggregations by profile and model |
-| `GET /api/analytics/financial` | Per-profile wallet, storage, and cargo summaries |
+| `GET /api/analytics/financial` | Per-profile wallet and cargo summaries |
 | `GET /api/analytics/roi` | Credits earned vs API dollars spent per agent |
 | `GET /api/analytics/snapshots` | Historical wealth snapshots for charts |
 

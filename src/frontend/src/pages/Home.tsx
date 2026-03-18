@@ -14,6 +14,7 @@ export function Home() {
   const [llmTimeout, setLlmTimeout] = useState(300)
   const [defaultProvider, setDefaultProvider] = useState('')
   const [defaultModel, setDefaultModel] = useState('')
+  const [situationalBriefing, setSituationalBriefing] = useState(true)
 
   useEffect(() => {
     loadData()
@@ -47,6 +48,7 @@ export function Home() {
       }
       if (prefs.default_provider) setDefaultProvider(prefs.default_provider)
       if (prefs.default_model) setDefaultModel(prefs.default_model)
+      setSituationalBriefing(prefs.situational_briefing !== 'off')
 
       // Show settings if no profiles and no configured providers
       if (profs.length === 0 && !provs.some(p => p.status === 'valid')) {
@@ -137,6 +139,19 @@ export function Home() {
     }
   }, [])
 
+  const handleSetSituationalBriefing = useCallback(async (enabled: boolean) => {
+    setSituationalBriefing(enabled)
+    try {
+      await fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: 'situational_briefing', value: enabled ? 'on' : 'off' }),
+      })
+    } catch {
+      // ignore
+    }
+  }, [])
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-screen">
@@ -172,6 +187,8 @@ export function Home() {
           onDefaultProviderChange={handleSetDefaultProvider}
           defaultModel={defaultModel}
           onDefaultModelChange={handleSetDefaultModel}
+          situationalBriefing={situationalBriefing}
+          onSituationalBriefingChange={handleSetSituationalBriefing}
           onClose={() => {
             setShowSettings(false)
             loadData()

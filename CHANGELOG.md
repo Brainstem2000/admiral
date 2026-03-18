@@ -2,6 +2,33 @@
 
 All notable changes to Admiral are documented here.
 
+## [0.3.8] - 2026-03-17
+
+### Added
+- **Situational Briefing System** -- Background data collector queries game state (status, cargo, nearby, system, missions, market) every 60s using direct connection calls (zero LLM tokens). Builds a compact text briefing injected into the agent's system prompt so planners/executors already know their situation without spending turns on query commands. Estimated 40-60% reduction in planning token usage. Kill switch: Settings > "Sit. briefing" checkbox, or `PUT /api/preferences` with `{"key": "situational_briefing", "value": "off"}`. Enabled by default.
+
+## [0.3.7] - 2026-03-13
+
+### Added
+- **New agent: Ledger Voss** -- Fleet CFO and financial adviser for STLR faction. Solarian Confederacy empire. Dual-model (Opus planner / Haiku executor). Tracks fleet finances, analyzes arbitrage, advises Nova Reyes, and trades for profit when idle. Promoted to officer with manage_treasury permissions.
+
+### Fixed
+- **Query commands wrongly hitting action cooldown on MCP v2** -- `QUERY_COMMANDS` had v1 bare names (`view_market`, `view_storage`, `captains_log_get`) but MCP v2 sends grouped names (`market_view_market`, `storage_view`, `social_captains_log_get`). The `spacemolt_` prefix strip wasn't enough. Added all v2 grouped names to the set, plus a deep-strip of v2 tool group prefixes, plus a heuristic fallback (`get_*`, `view_*`, `list_*`, etc. = query). Eliminated ~40 false cooldown blocks per session across fleet.
+- **Auto-correct common parameter mistakes** -- Agents frequently use wrong param names (`destination` or `target_system` for `travel`, `destination` for `jump`). Now auto-remaps before sending to the game server, preventing wasted API calls and error responses.
+- **Fleet Wealth Over Time graph never updating** -- `takeFinancialSnapshots()` read `gameState.player.credits` but gameState stores credits at the top level (`gameState.credits`). Wallet was always 0, so no snapshots were ever recorded. Frontend now also refreshes snapshot data every 5 minutes instead of only on page load.
+
+### Changed
+- **Financial dashboard: removed storage credits** -- SpaceMolt v0.222.0 moved all credits to the wallet (per-station storage credits abolished). Fleet Net Worth now equals sum of wallets. Removed `parseStorageCreditsFromMemory()`, "Storage: X" display, and storage column from snapshots. Historical snapshots with storage data still render correctly (included in `total`).
+
+## [0.3.6] - 2026-03-13
+
+### Changed
+- **Adaptive action cooldown** -- Replaced fixed 8s cooldown with context-aware timing: 4s after successful actions (faster successive actions), 10s after "action pending" responses (matches game tick cadence). Agents now act as soon as the game allows.
+- **Early turn exit on action pending** -- When the game returns "action pending", the agent's turn now ends immediately instead of burning up to 29 more tool rounds. Saves tokens and prevents Haiku from making redundant calls.
+- **System prompt caching** -- System prompt is no longer rebuilt from scratch every turn. Cached and only regenerated when memory, phase, or directive actually changes (~80% of turns skip the rebuild, saving ~2-3k tokens/turn).
+- **Reduced maxTokens for executor** -- Executor turns now use `maxTokens: 2048` (down from 4096). Planning turns keep 4096. Halves worst-case generation time for the common case.
+- **Skip redundant inter-turn polling** -- Push-capable connections (WebSocket, MCP, MCP v2) no longer call `get_status` between turns since notifications already arrive via push. HTTP connections still poll. Saves ~500-1k tokens/turn and ~200ms per cycle.
+
 ## [0.3.5] - 2026-03-13
 
 ### Fixed

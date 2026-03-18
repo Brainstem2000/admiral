@@ -58,3 +58,17 @@ export interface AgentStatus {
   playerData?: Record<string, unknown>
   gameState?: Record<string, unknown> | null
 }
+
+export interface GameCommandParam {
+  name: string
+  type: string
+  required: boolean
+  description: string
+}
+
+export interface GameCommandInfo {
+  name: string
+  description: string
+  isMutation: boolean
+  params: GameCommandParam[]
+}

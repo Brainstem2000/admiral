@@ -9,10 +9,11 @@ import { McpConnection } from './connections/mcp'
 import { McpV2Connection } from './connections/mcp_v2'
 import { resolveModel, resolveApiKey } from './model'
 import { fetchGameCommands, formatCommandList } from './schema'
-import { allTools } from './tools'
+import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
-import { addLogEntry, getProfile, updateProfile, getPreference } from './db'
+import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
 import { FleetIntelCollector } from './fleet-intel'
+import { startBriefingCollector, stopBriefingCollector, clearBriefingCache, buildSituationalBriefing } from './briefing'
 import { checkEventTriggers } from './event-watcher'
 import { EventEmitter } from 'events'
 import fs from 'fs'
@@ -163,6 +164,9 @@ export class Agent {
       const statusResp = await this.connection.execute('get_status')
       this.cacheGameState(statusResp)
     } catch { /* ignore */ }
+
+    // Start background briefing data collector (zero-token game state caching)
+    startBriefingCollector(this.profileId, this.connection)
   }
 
   async startLLMLoop(): Promise<void> {
@@ -206,7 +210,7 @@ export class Agent {
 
     // Build initial context
     const initialPhase = hasDualModel ? 'planning' as const : undefined
-    const systemPrompt = buildSystemPrompt(profile, commandList, initialPhase)
+    const systemPrompt = buildSystemPrompt(profile, commandList, initialPhase, this.profileId)
     const context: Context = {
       systemPrompt,
       messages: [{
@@ -223,6 +227,12 @@ export class Agent {
     const planningInterval = profile.planning_interval ?? 5
     let turnCounter = 0
     const sessionStartedAt = Date.now()
+
+    // System prompt cache — avoid rebuilding every turn when inputs haven't changed
+    let cachedPrompt = systemPrompt
+    let cachedPromptPhase: 'planning' | 'executing' | undefined = initialPhase
+    let cachedPromptDirective = profile.directive || ''
+    let cachedPromptMemory = profile.memory || ''
 
     while (this.running) {
       // Check session duration limit
@@ -247,7 +257,7 @@ export class Agent {
 
         const freshProfile = getProfile(this.profileId)
         if (freshProfile) {
-          context.systemPrompt = buildSystemPrompt(freshProfile, commandList)
+          context.systemPrompt = buildSystemPrompt(freshProfile, commandList, undefined, this.profileId)
           const directive = freshProfile.directive || 'Play the game. Mine ore, sell it, and grow stronger.'
           context.messages.push({
             role: 'user' as const,
@@ -274,12 +284,19 @@ export class Agent {
         const turnApiKey = await resolveApiKey(turnProvider!)
         const phasePrefix = isPlanningTurn ? '[Planning] ' : (hasDualModel ? '[Executing] ' : '')
 
+        // Planning turns get fewer tool rounds — Opus should set strategy, not do exhaustive research
+        const PLANNING_MAX_TOOL_ROUNDS = 10
+        const turnMaxToolRounds = isPlanningTurn
+          ? Math.min(maxToolRounds ?? PLANNING_MAX_TOOL_ROUNDS, PLANNING_MAX_TOOL_ROUNDS)
+          : maxToolRounds
+
         this.setActivity(`${phasePrefix}Waiting for LLM response...`)
         await runAgentTurn(
           turnModel, context, this.connection, this.profileId, profile.name,
           this.log, todo, memory,
           {
-            signal: this.abortController.signal, apiKey: turnApiKey, maxToolRounds, llmTimeoutMs,
+            signal: this.abortController.signal, apiKey: turnApiKey, maxToolRounds: turnMaxToolRounds, llmTimeoutMs,
+            maxTokens: isPlanningTurn ? 4096 : 2048,
             contextBudgetRatio,
             onActivity: (a) => this.setActivity(`${phasePrefix}${a}`),
             compactionModel: hasDualModel ? model : undefined,  // Always use executor for compaction
@@ -300,22 +317,24 @@ export class Agent {
       if (!this.running) break
       if (this.restartRequested) continue
 
-      this.setActivity('Polling for events...')
-      // Poll for events between turns
+      // Poll for events between turns (skip for push-capable connections — they get notifications via onNotification)
       let pendingEvents = ''
-      try {
-        const pollResp = await this.connection.execute('get_status')
-        this.cacheGameState(pollResp)
-        if (pollResp.notifications && Array.isArray(pollResp.notifications) && pollResp.notifications.length > 0) {
-          pendingEvents = pollResp.notifications
-            .map(n => {
-              const s = formatNotificationSummary(n)
-              return `  > ${s}`
-            })
-            .join('\n')
+      if (!this.connection.supportsNotifications()) {
+        this.setActivity('Polling for events...')
+        try {
+          const pollResp = await this.connection.execute('get_status')
+          this.cacheGameState(pollResp)
+          if (pollResp.notifications && Array.isArray(pollResp.notifications) && pollResp.notifications.length > 0) {
+            pendingEvents = pollResp.notifications
+              .map(n => {
+                const s = formatNotificationSummary(n)
+                return `  > ${s}`
+              })
+              .join('\n')
+          }
+        } catch {
+          // Best-effort
         }
-      } catch {
-        // Best-effort
       }
 
       const nudgeParts: string[] = []
@@ -338,12 +357,24 @@ export class Agent {
         timestamp: Date.now(),
       })
 
-      // Refresh system prompt with latest credentials and phase
+      // Refresh system prompt only when inputs have changed (memory, phase, directive)
       const freshProfile = getProfile(this.profileId)
       if (freshProfile) {
         const nextIsPlanningTurn = hasDualModel && plannerResolved && (turnCounter % planningInterval === 0)
         const phase = hasDualModel ? (nextIsPlanningTurn ? 'planning' as const : 'executing' as const) : undefined
-        context.systemPrompt = buildSystemPrompt(freshProfile, commandList, phase)
+        const currentDirective = freshProfile.directive || ''
+        const currentMemory = freshProfile.memory || ''
+        const memoryDirty = memoryDirtyFlags.get(this.profileId) ?? false
+
+        const briefingEnabled = getPreference('situational_briefing') !== 'off'
+        if (briefingEnabled || phase !== cachedPromptPhase || currentDirective !== cachedPromptDirective || memoryDirty || currentMemory !== cachedPromptMemory) {
+          cachedPrompt = buildSystemPrompt(freshProfile, commandList, phase, this.profileId)
+          cachedPromptPhase = phase
+          cachedPromptDirective = currentDirective
+          cachedPromptMemory = currentMemory
+          memoryDirtyFlags.delete(this.profileId)
+        }
+        context.systemPrompt = cachedPrompt
       }
     }
 
@@ -395,6 +426,7 @@ export class Agent {
   async stop(): Promise<void> {
     this.running = false
     this.abortController?.abort()
+    clearBriefingCache(this.profileId)
     if (this.connection) {
       this.log('connection', 'Disconnecting...')
       await this.connection.disconnect()
@@ -420,9 +452,15 @@ function createConnection(profile: Profile): GameConnection {
   }
 }
 
-function buildSystemPrompt(profile: Profile, commandList: string, phase?: 'planning' | 'executing'): string {
+function buildSystemPrompt(profile: Profile, commandList: string, phase?: 'planning' | 'executing', profileId?: string): string {
   const promptMd = getPromptMd()
   const directive = profile.directive || 'Play the game. Mine ore, sell it, and grow stronger.'
+  const connectionMode = profile.connection_mode
+  const apiVersion = connectionMode === 'http_v2' || connectionMode === 'mcp_v2' ? 'v2'
+    : connectionMode === 'http' ? 'v1'
+    : connectionMode === 'websocket' ? 'ws'
+    : connectionMode === 'mcp' ? 'mcp-v1'
+    : 'unknown'
 
   let credentials: string
   if (profile.username && profile.password) {
@@ -451,6 +489,11 @@ ${promptMd}
 ## Your Credentials
 ${credentials}
 
+## Active Connection
+- Mode: ${connectionMode}
+- API/Protocol: ${apiVersion}
+- Use command names exactly as shown in "Available Game Commands" for this profile.
+
 ## Agent Memory
 ${profile.memory || '(No memory stored yet. Use update_memory to save important information.)'}
 
@@ -458,6 +501,29 @@ ${(() => {
   try {
     const briefing = FleetIntelCollector.buildBriefing(profile.username || undefined)
     return briefing ? `## Fleet Intelligence Briefing\nShared intel from all Admiral agents:\n${briefing}\n` : ''
+  } catch { return '' }
+})()}${(() => {
+  if (getPreference('situational_briefing') === 'off' || !profileId) return ''
+  const sitBriefing = buildSituationalBriefing(profileId)
+  return sitBriefing ? `## Current Situation (auto-collected, refreshed every 60s — DO NOT re-query this data)\n${sitBriefing}\n\n` : ''
+})()}${(() => {
+  if (getPreference('situational_briefing') === 'off') return ''
+  // Inject TODO inline to save read_todo round-trips
+  const todo = profile.todo || ''
+  return todo ? `## Your TODO List (auto-injected — no need to call read_todo)\n${todo}\n\n` : '## Your TODO List\n(Empty — use update_todo to set tasks)\n\n'
+})()}${(() => {
+  if (getPreference('situational_briefing') === 'off' || !profileId) return ''
+  // Inject pending fleet orders to save read_fleet_orders round-trips
+  try {
+    const profiles = listProfiles()
+    const nameOf = (id: string) => profiles.find(p => p.id === id)?.name || id.slice(0, 8)
+    const inbox = getFleetOrders({ toProfileId: profileId })
+    const pending = inbox.filter(o => o.status === 'pending' || o.status === 'accepted')
+    if (pending.length === 0) return ''
+    const lines = pending.map(o =>
+      `- [${o.id.slice(0, 8)}] ${o.status.toUpperCase()} from ${nameOf(o.from_profile_id)}: [${o.type}] ${o.description}${o.progress ? ' | Progress: ' + o.progress : ''}`
+    )
+    return `## Pending Fleet Orders (auto-injected — use read_fleet_orders only to accept/complete/reject)\n${lines.join('\n')}\n\n`
   } catch { return '' }
 })()}## Available Game Commands
 Use the "game" tool with a command name and args. Example: game(command="mine", args={})
@@ -479,7 +545,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - After registering, IMMEDIATELY save credentials with save_credentials.
 - Read and update your TODO list regularly to track goals and progress.
 - Update your memory regularly with important discoveries, routes, market intel, and lessons learned.
-- Query commands are free and unlimited -- use them often.
+- Query commands are free but waste time — prefer the auto-injected briefing data above. Only query for data NOT already shown (e.g. analyze_market, get_skills, view_orders).
 - Action commands cost 1 tick (10 seconds).
 - Always check fuel before traveling and cargo space before mining.
 - Be social -- chat with players you meet.
@@ -487,15 +553,19 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 ${phase === 'planning' ? `
 ## Current Phase: Strategic Planning
 You are in PLANNING MODE using a high-capability model. A faster executor model will carry out your plan.
-1. Assess the situation — use query commands freely (get_status, get_cargo, view_market, get_system, analyze_market, read_memory, read_todo)
-2. Think deeply about your mission directive and long-term strategy
-3. Write a PRIORITIZED action plan to your TODO (update_todo) as a numbered checklist the executor can follow step-by-step
-4. Update your memory with strategic observations (update_memory)
-5. Do NOT execute action commands (mine, travel, sell, buy, dock, undock, jump, craft, attack) — save those for execution turns
+1. Assess the situation — Current Situation, TODO, Memory, and Fleet Orders are ALL shown above. Do NOT call read_todo, read_memory, read_fleet_orders, get_status, get_cargo, get_system, get_nearby, get_active_missions, or get_location — that data is already injected.
+2. Only query for data NOT in the briefing (e.g. analyze_market for trade routes, get_skills, view_orders, forum_list)
+3. Think deeply about your mission directive and long-term strategy
+4. Write a PRIORITIZED action plan to your TODO (update_todo) as a numbered checklist the executor can follow step-by-step
+5. Update your memory with strategic observations (update_memory)
+6. Do NOT execute action commands (mine, travel, sell, buy, dock, undock, jump, craft, attack) — save those for execution turns
 ` : phase === 'executing' ? `
 ## Current Phase: Execution
 You are in EXECUTION MODE — act quickly and decisively. A strategic planner periodically updates your TODO with the plan.
-- Read your TODO (read_todo) and follow the plan step-by-step
+- Your TODO is shown above — follow it step-by-step. Do NOT call read_todo (it's already injected).
+- Your memory is shown above — do NOT call read_memory (it's already injected).
+- Your situation (location, wallet, cargo, missions) is shown above — do NOT call get_status, get_cargo, get_system, get_nearby, get_active_missions, or get_location (already injected, refreshed every 60s).
+- Fleet orders are shown above if any — use read_fleet_orders ONLY to accept/complete/reject, not to check inbox.
 - Execute the next unchecked action, then update the TODO to mark it done (update_todo)
 - If the TODO is empty or fully complete, take sensible default actions aligned with your directive
 - Don't overthink — the planner will handle strategy next cycle

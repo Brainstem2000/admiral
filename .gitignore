@@ -11,3 +11,6 @@ tsconfig.tsbuildinfo
 dist/
 src/frontend/dist/
 admiral
+admiral.exe
+*.bun-build
+.*.bun-build

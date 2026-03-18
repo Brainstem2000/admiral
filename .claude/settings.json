@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bun *)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(git *)",
+      "Bash(curl *)",
+      "Bash(python *)",
+      "Bash(netstat *)",
+      "Bash(tasklist *)",
+      "Bash(taskkill *)",
+      "Bash(head *)",
+      "Bash(ls *)",
+      "Bash(mkdir *)",
+      "Bash(cat *)",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:spacemolt.com)",
+      "mcp__33fd6d7e-efef-4e9f-b162-5d3c38a97161__*"
+    ]
+  }
+}

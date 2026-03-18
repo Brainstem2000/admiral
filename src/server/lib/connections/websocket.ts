@@ -148,6 +148,10 @@ export class WebSocketConnection implements GameConnection {
     return this.connected
   }
 
+  supportsNotifications(): boolean {
+    return true
+  }
+
   private async sendCommand(command: string, args?: Record<string, unknown>): Promise<CommandResult> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return { error: { code: 'not_connected', message: 'WebSocket not connected' } }

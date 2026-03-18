@@ -2,7 +2,7 @@ import { complete } from '@mariozechner/pi-ai'
 import type { Model, Context, AssistantMessage, ToolCall, Message } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import type { LogFn } from './tools'
-import { executeTool } from './tools'
+import { executeTool, ACTION_PENDING_SENTINEL } from './tools'
 
 const DEFAULT_MAX_TOOL_ROUNDS = 30
 const MAX_RETRIES = 3
@@ -18,6 +18,7 @@ export interface LoopOptions {
   signal?: AbortSignal
   apiKey?: string
   maxToolRounds?: number
+  maxTokens?: number  // Override LLM maxTokens (default: 4096)
   llmTimeoutMs?: number
   contextBudgetRatio?: number
   onActivity?: (activity: string) => void
@@ -158,6 +159,7 @@ export async function runAgentTurn(
     const toolCtx = { connection, profileId, profileName, log, todo: todo.value, memory: memory.value }
 
     let showedReason = false
+    let actionPending = false
     for (const toolCall of toolCalls) {
       if (options?.signal?.aborted) return
 
@@ -170,6 +172,7 @@ export async function runAgentTurn(
       todo.value = toolCtx.todo
       memory.value = toolCtx.memory
 
+      if (result.startsWith(ACTION_PENDING_SENTINEL)) actionPending = true
       const isError = result.startsWith('Error')
       const toolResultMessage: Message = {
         role: 'toolResult',
@@ -180,6 +183,12 @@ export async function runAgentTurn(
         timestamp: Date.now(),
       }
       context.messages.push(toolResultMessage)
+    }
+
+    // Early exit: if an action is pending, end the turn immediately instead of burning more rounds
+    if (actionPending) {
+      log('system', 'Action pending — ending turn early')
+      return
     }
 
     rounds++
@@ -395,7 +404,7 @@ async function completeWithRetry(
         const result = await complete(model, context, {
           signal,
           apiKey: options?.apiKey,
-          maxTokens: 4096,
+          maxTokens: options?.maxTokens ?? 4096,
         })
         clearTimeout(timeout)
 

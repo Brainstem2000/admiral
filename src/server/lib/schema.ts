@@ -1,18 +1,7 @@
 import { getPreference, setPreference } from './db'
+import type { GameCommandInfo, GameCommandParam } from '@shared/types'
 
-export interface GameCommandParam {
-  name: string
-  type: string
-  required: boolean
-  description: string
-}
-
-export interface GameCommandInfo {
-  name: string
-  description: string
-  isMutation: boolean
-  params: GameCommandParam[]
-}
+export type { GameCommandInfo, GameCommandParam }
 
 // Cache TTL: 1 hour
 const SPEC_CACHE_TTL_MS = 60 * 60 * 1000
@@ -97,6 +86,7 @@ export async function fetchGameCommands(baseUrl: string, log?: SpecLogFn): Promi
   // Try versioned spec first (e.g. /api/v2/openapi.json), then unversioned fallback
   const specUrl = `${baseUrl}/openapi.json`
   const fallbackUrl = baseUrl.replace(/\/api\/v\d+\/?$/, '/api/openapi.json')
+  const isV2Api = /\/api\/v2\/?$/.test(baseUrl)
 
   let spec = await fetchOpenApiSpec(specUrl, log)
   if (!spec && fallbackUrl !== specUrl) {
@@ -115,7 +105,10 @@ export async function fetchGameCommands(baseUrl: string, log?: SpecLogFn): Promi
     if (!name) continue
     if (name === 'createSession' || path === '/session') continue
 
-    const isMutation = !!op['x-is-mutation']
+    const isMutationMeta = op['x-is-mutation']
+    const isMutation = typeof isMutationMeta === 'boolean'
+      ? isMutationMeta
+      : inferMutationFallback(name, isV2Api)
     const description = (op.summary as string) || name
 
     const params: GameCommandParam[] = []
@@ -141,6 +134,30 @@ export async function fetchGameCommands(baseUrl: string, log?: SpecLogFn): Promi
   }
 
   return commands
+}
+
+function inferMutationFallback(operationId: string, isV2Api: boolean): boolean {
+  const normalized = operationId.toLowerCase()
+  const action = normalized.split('_').pop() || normalized
+
+  // v2 OpenAPI often lacks x-is-mutation metadata. Use a conservative fallback:
+  // query-like verbs are treated as non-mutations; everything else defaults to mutation.
+  const queryPrefixes = [
+    'get_', 'view_', 'list_', 'query_', 'scan', 'analyze_', 'estimate_',
+    'browse_', 'search_', 'read_', 'help', 'catalog',
+  ]
+  if (queryPrefixes.some(prefix => action.startsWith(prefix))) return false
+
+  const queryExact = new Set([
+    'get', 'view', 'list', 'query', 'scan', 'help', 'catalog',
+    'status', 'info', 'quote', 'nearby', 'commands', 'notifications',
+  ])
+  if (queryExact.has(action)) return false
+
+  // If this is clearly v1 and metadata is missing, keep current behavior compatible.
+  if (!isV2Api) return false
+
+  return true
 }
 
 /**

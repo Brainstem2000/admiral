@@ -42,10 +42,12 @@ interface Props {
   onDefaultProviderChange: (provider: string) => void
   defaultModel: string
   onDefaultModelChange: (model: string) => void
+  situationalBriefing: boolean
+  onSituationalBriefingChange: (enabled: boolean) => void
   onClose: () => void
 }
 
-export function ProviderSetup({ providers: initialProviders, registrationCode, onRegistrationCodeChange, gameserverUrl, onGameserverUrlChange, maxTurns, onMaxTurnsChange, llmTimeout, onLlmTimeoutChange, defaultProvider, onDefaultProviderChange, defaultModel, onDefaultModelChange, onClose }: Props) {
+export function ProviderSetup({ providers: initialProviders, registrationCode, onRegistrationCodeChange, gameserverUrl, onGameserverUrlChange, maxTurns, onMaxTurnsChange, llmTimeout, onLlmTimeoutChange, defaultProvider, onDefaultProviderChange, defaultModel, onDefaultModelChange, situationalBriefing, onSituationalBriefingChange, onClose }: Props) {
   const [providers, setProviders] = useState(initialProviders)
   const [keys, setKeys] = useState<Record<string, string>>(() => {
     const m: Record<string, string> = {}
@@ -369,6 +371,18 @@ export function ProviderSetup({ providers: initialProviders, registrationCode, o
                   className="w-20 h-7 text-xs"
                 />
                 <span className="text-[11px] text-muted-foreground">seconds per LLM call</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground w-28 shrink-0">Sit. briefing</span>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={situationalBriefing}
+                    onChange={e => onSituationalBriefingChange(e.target.checked)}
+                    className="accent-[hsl(var(--smui-primary))]"
+                  />
+                  <span className="text-[11px] text-muted-foreground">inject game state into prompt (saves tokens)</span>
+                </label>
               </div>
             </div>
           </div>

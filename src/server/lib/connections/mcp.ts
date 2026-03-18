@@ -1,6 +1,8 @@
 import type { GameConnection, LoginResult, RegisterResult, CommandResult, NotificationHandler } from './interface'
 import { USER_AGENT } from './interface'
 
+const NOTIFICATION_POLL_MIN_INTERVAL_MS = 2000
+
 export class McpConnection implements GameConnection {
   readonly mode = 'mcp' as const
   private baseUrl: string
@@ -8,6 +10,7 @@ export class McpConnection implements GameConnection {
   private notificationHandlers: NotificationHandler[] = []
   private connected = false
   private jsonRpcId = 0
+  private lastNotificationPollAt = 0
 
   constructor(serverUrl: string) {
     this.baseUrl = serverUrl.replace(/\/$/, '') + '/mcp'
@@ -28,6 +31,7 @@ export class McpConnection implements GameConnection {
     // Send initialized notification
     await this.sendNotification('notifications/initialized', {})
     this.connected = true
+    this.lastNotificationPollAt = 0
   }
 
   async login(username: string, password: string): Promise<LoginResult> {
@@ -76,20 +80,24 @@ export class McpConnection implements GameConnection {
       return this.execute(command, args)
     }
 
-    // Poll notifications
-    try {
-      const notifResp = await this.callTool('get_notifications', {})
-      const notifResult = this.parseToolResult(notifResp.result)
-      if (notifResult?.notifications && Array.isArray(notifResult.notifications)) {
-        for (const n of notifResult.notifications) {
-          for (const handler of this.notificationHandlers) {
-            handler(n)
+    // Poll notifications at a bounded cadence to avoid an extra RPC per command.
+    // Skip if this command already is get_notifications.
+    if (command !== 'get_notifications' && Date.now() - this.lastNotificationPollAt >= NOTIFICATION_POLL_MIN_INTERVAL_MS) {
+      this.lastNotificationPollAt = Date.now()
+      try {
+        const notifResp = await this.callTool('get_notifications', {})
+        const notifResult = this.parseToolResult(notifResp.result)
+        if (notifResult?.notifications && Array.isArray(notifResult.notifications)) {
+          for (const n of notifResult.notifications) {
+            for (const handler of this.notificationHandlers) {
+              handler(n)
+            }
           }
+          return { result, notifications: notifResult.notifications }
         }
-        return { result, notifications: notifResult.notifications }
+      } catch {
+        // Notification polling is best-effort
       }
-    } catch {
-      // Notification polling is best-effort
     }
 
     return { result }
@@ -102,10 +110,15 @@ export class McpConnection implements GameConnection {
   async disconnect(): Promise<void> {
     this.sessionId = null
     this.connected = false
+    this.lastNotificationPollAt = 0
   }
 
   isConnected(): boolean {
     return this.connected
+  }
+
+  supportsNotifications(): boolean {
+    return true
   }
 
   private async callTool(name: string, args: Record<string, unknown>): Promise<{

@@ -35,4 +35,6 @@ export interface GameConnection {
   onNotification(handler: NotificationHandler): void
   disconnect(): Promise<void>
   isConnected(): boolean
+  /** Whether this connection receives push notifications (WebSocket/MCP), avoiding redundant polling */
+  supportsNotifications(): boolean
 }

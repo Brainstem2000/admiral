@@ -2,20 +2,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { Send, Zap, Search as SearchIcon } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
-
-interface GameCommandParam {
-  name: string
-  type: string
-  required: boolean
-  description: string
-}
-
-interface GameCommandInfo {
-  name: string
-  description: string
-  isMutation: boolean
-  params: GameCommandParam[]
-}
+import type { GameCommandInfo } from '@shared/types'
 
 interface HistoryEntry {
   command: string

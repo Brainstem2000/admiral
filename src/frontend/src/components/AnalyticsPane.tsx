@@ -490,7 +490,7 @@ function CommsTab({ profiles, statuses }: { profiles: Profile[]; statuses: Recor
 // ---- Financial Tab ----
 
 interface FinancialData {
-  profiles: Array<{ id: string; name: string; wallet: number; storage: number; total: number; cargo: Array<{ item: string; quantity: number }> }>
+  profiles: Array<{ id: string; name: string; wallet: number; total: number; cargo: Array<{ item: string; quantity: number }> }>
   fleetTotal: number
   fleetCargo: Record<string, number>
 }
@@ -527,12 +527,18 @@ function FinancialTab({ profiles }: { profiles: Profile[] }) {
     return () => clearInterval(interval)
   }, [])
 
-  // Fetch historical snapshots
+  // Fetch historical snapshots — last 24 hours only for a clean chart
   useEffect(() => {
-    fetch('/api/analytics/snapshots')
-      .then(r => r.json())
-      .then(setSnapshots)
-      .catch(() => {})
+    const fetchSnapshots = () => {
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ')
+      fetch(`/api/analytics/snapshots?since=${encodeURIComponent(since)}`)
+        .then(r => r.json())
+        .then(setSnapshots)
+        .catch(() => {})
+    }
+    fetchSnapshots()
+    const interval = setInterval(fetchSnapshots, 5 * 60 * 1000)
+    return () => clearInterval(interval)
   }, [])
 
   if (!data) return <div className="flex items-center justify-center h-full text-muted-foreground text-xs">Loading...</div>
@@ -564,9 +570,8 @@ function FinancialTab({ profiles }: { profiles: Profile[] }) {
                   className="absolute inset-y-0 left-0 flex items-center"
                   style={{ width: `${pct}%`, background: color, opacity: 0.3 }}
                 />
-                <div className="absolute inset-0 flex items-center justify-between px-2 text-[10px]">
+                <div className="absolute inset-0 flex items-center px-2 text-[10px]">
                   <span className="text-muted-foreground">Wallet: {p.wallet.toLocaleString()}</span>
-                  <span className="text-muted-foreground">Storage: {p.storage.toLocaleString()}</span>
                 </div>
               </div>
             </div>

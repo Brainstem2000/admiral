@@ -1,9 +1,10 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { agentManager } from './agent-manager'
+import { buildSituationalBriefing } from './briefing'
 
 // --- Tool Definitions ---
 
@@ -93,14 +94,23 @@ const LOCAL_TOOLS = new Set(['save_credentials', 'update_todo', 'read_todo', 'up
 const MAX_RESULT_CHARS = 4000
 
 // Cooldown tracking for action commands to prevent spam loops (e.g. mine → "Action pending" → mine → ...)
-// Maps profileId → last action command timestamp
-const actionCooldowns = new Map<string, number>()
-const ACTION_COOLDOWN_MS = 8000  // 8 seconds between action commands within a turn
+// Maps profileId → last action timestamp + whether it was pending
+const actionCooldowns = new Map<string, { timestamp: number; wasPending: boolean }>()
+const COOLDOWN_AFTER_SUCCESS = 4000   // 4s between actions when last succeeded (allows fast successive actions)
+const COOLDOWN_AFTER_PENDING = 10000  // 10s when last action was pending (match game tick cadence)
 
-// Commands that are free queries (no tick cost) — exempt from cooldown
+// Track when memory is updated so system prompt caching can skip rebuilds
+export const memoryDirtyFlags = new Map<string, boolean>()
+
+// Sentinel prefix for action pending results — loop.ts detects this to exit the turn early
+export const ACTION_PENDING_SENTINEL = '⚠️ ACTION_PENDING: '
+
+// Commands that are free queries (no tick cost) — exempt from cooldown.
+// Includes both v1 bare names AND v2 grouped names (e.g. market_view_market, storage_view).
 const QUERY_COMMANDS = new Set([
-  'get_status', 'get_ship', 'get_cargo', 'get_system', 'get_poi', 'get_base',
-  'get_map', 'get_skills', 'get_nearby', 'get_wrecks', 'get_trades',
+  // v1 bare names
+  'get_status', 'get_location', 'get_ship', 'get_cargo', 'get_system', 'get_poi', 'get_base',
+  'get_map', 'get_skills', 'get_nearby', 'get_wrecks', 'get_trades', 'get_player', 'get_queue',
   'get_missions', 'get_active_missions', 'get_notifications', 'get_chat_history',
   'get_battle_status', 'get_commands', 'get_guide', 'get_version', 'get_notes',
   'get_insurance_quote', 'get_action_log', 'view_market', 'view_orders',
@@ -112,6 +122,19 @@ const QUERY_COMMANDS = new Set([
   'faction_visit_room', 'faction_intel_status', 'faction_query_intel',
   'faction_query_trade_intel', 'faction_trade_intel_status', 'faction_list_missions',
   'forum_list', 'forum_get_thread', 'read_fleet_orders', 'claim_insurance',
+  // v2 grouped names (tool_action format from MCP v2 / HTTP v2)
+  'market_view_market', 'market_view_orders', 'market_analyze_market', 'market_estimate_purchase',
+  'storage_view', 'storage_view_faction',
+  'social_captains_log_list', 'social_captains_log_get', 'social_get_notes', 'social_read_note',
+  'social_get_chat_history', 'social_forum_list', 'social_forum_get_thread',
+  'intel_query_intel', 'intel_query_trade_intel', 'intel_intel_status', 'intel_trade_intel_status',
+  'faction_info', 'faction_list', 'faction_get_invites', 'faction_rooms', 'faction_visit_room',
+  'faction_list_missions',
+  'faction_admin_list_roles',
+  'salvage_wrecks', 'salvage_policies',
+  'catalog_catalog', 'catalog_browse_ships',
+  'ship_get_ship', 'ship_get_cargo',
+  'battle_get_battle_status',
 ])
 
 export type LogFn = (type: string, summary: string, detail?: string) => void
@@ -147,22 +170,58 @@ export async function executeTool(
     commandArgs = Object.keys(args).length > 0 ? args : undefined
   }
 
+  // Auto-correct common parameter mistakes to reduce wasted API calls
+  if (commandArgs) {
+    const bare = command.replace(/^spacemolt_/, '')
+    // travel uses target_poi, not destination/target_system
+    if ((bare === 'travel' || bare.endsWith('_travel')) && !commandArgs.target_poi) {
+      if (commandArgs.destination) { commandArgs.target_poi = commandArgs.destination; delete commandArgs.destination }
+      else if (commandArgs.target_system) { commandArgs.target_poi = commandArgs.target_system; delete commandArgs.target_system }
+    }
+    // jump uses target_system, not destination/target_poi
+    if ((bare === 'jump' || bare.endsWith('_jump')) && !commandArgs.target_system) {
+      if (commandArgs.destination) { commandArgs.target_system = commandArgs.destination; delete commandArgs.destination }
+    }
+  }
+
   const fmtArgs = commandArgs ? formatArgs(commandArgs) : ''
   ctx.log('tool_call', `game(${command}${fmtArgs ? ', ' + fmtArgs : ''})`)
 
   // Cooldown check for action commands to prevent spam loops
   // Strip MCP v2 prefix (e.g. "spacemolt_get_system" → "get_system") for lookup
   const bareCommand = command.replace(/^spacemolt_/, '')
-  const isQuery = QUERY_COMMANDS.has(command) || QUERY_COMMANDS.has(bareCommand)
+  // Also strip v2 tool group prefix (e.g. "market_view_market" → "view_market")
+  const deepBare = bareCommand.replace(/^(?:market|storage|social|intel|faction|faction_admin|salvage|catalog|ship|battle|transfer|facility|auth)_/, '')
+  const isQuery = QUERY_COMMANDS.has(command) || QUERY_COMMANDS.has(bareCommand) || QUERY_COMMANDS.has(deepBare)
+    // Heuristic: commands starting with get_/view_/list_/query_/browse_/search_/find_/estimate_ are queries
+    || /^(?:get_|view_|list_|query_|browse_|search_|find_|estimate_|help|scan|catalog)/.test(deepBare)
   if (!isQuery) {
-    const lastAction = actionCooldowns.get(ctx.profileId) ?? 0
-    const elapsed = Date.now() - lastAction
-    if (elapsed < ACTION_COOLDOWN_MS) {
-      const waitSec = Math.ceil((ACTION_COOLDOWN_MS - elapsed) / 1000)
-      ctx.log('tool_result', `Cooldown: ${command} blocked (${waitSec}s remaining)`)
-      return `⏳ ACTION BLOCKED — cooldown active (${waitSec}s remaining). Game actions cost 1 tick (~10s). You just performed an action. Use query commands (get_status, get_cargo, view_market, read_todo, etc.) while waiting, or STOP calling tools and end your turn.`
+    const lastAction = actionCooldowns.get(ctx.profileId)
+    if (lastAction) {
+      const cooldownMs = lastAction.wasPending ? COOLDOWN_AFTER_PENDING : COOLDOWN_AFTER_SUCCESS
+      const elapsed = Date.now() - lastAction.timestamp
+      if (elapsed < cooldownMs) {
+        const waitSec = Math.ceil((cooldownMs - elapsed) / 1000)
+        ctx.log('tool_result', `Cooldown: ${command} blocked (${waitSec}s remaining)`)
+        return `⏳ ACTION BLOCKED — cooldown active (${waitSec}s remaining). Game actions cost 1 tick (~10s). You just performed an action. Use query commands (get_status, get_cargo, view_market, read_todo, etc.) while waiting, or STOP calling tools and end your turn.`
+      }
     }
-    actionCooldowns.set(ctx.profileId, Date.now())
+    actionCooldowns.set(ctx.profileId, { timestamp: Date.now(), wasPending: false })
+  }
+
+  // Cache intercept: if briefing is enabled and this is a query already covered by the briefing,
+  // return cached data instead of hitting the game server. Saves network round-trip + output tokens.
+  // Feature flag: disabled when situational_briefing = 'off'
+  if (isQuery && getPreference('situational_briefing') !== 'off') {
+    const BRIEFING_COVERED_QUERIES = new Set(['get_status', 'get_cargo', 'get_nearby', 'get_system', 'get_active_missions', 'get_ship', 'get_location'])
+    if (BRIEFING_COVERED_QUERIES.has(deepBare)) {
+      const briefing = buildSituationalBriefing(ctx.profileId)
+      if (briefing) {
+        const hint = `[Served from cache — this data is already in your "Current Situation" section above. Avoid re-querying.]\n${briefing}`
+        ctx.log('tool_result', `(cached) ${truncate(briefing, 150)}`)
+        return hint
+      }
+    }
   }
 
   try {
@@ -180,11 +239,14 @@ export async function executeTool(
     const result = formatToolResult(command, resultData, resp.notifications)
     ctx.log('tool_result', truncate(result, 200), result)
 
-    // Detect "action pending" responses and append a strong stop signal
+    // Detect "action pending" responses — enforce extended cooldown and signal turn exit
     const resultLower = result.toLowerCase()
     if (resultLower.includes('action pending') || resultLower.includes('resolves next tick') || resultLower.includes('already pending')) {
-      ctx.log('tool_result', `Action pending detected for ${command} — cooldown enforced`)
-      const pendingResult = result + '\n\n⚠️ STOP — Your action is QUEUED and will resolve on the next game tick (~10 seconds). Do NOT call this command again. Either use query commands (get_status, get_cargo, read_todo, view_market) to check on things, or end your turn and wait.'
+      ctx.log('tool_result', `Action pending detected for ${command} — extended cooldown enforced`)
+      // Mark cooldown as pending so next action waits full tick duration
+      actionCooldowns.set(ctx.profileId, { timestamp: Date.now(), wasPending: true })
+      // Sentinel prefix triggers early turn exit in loop.ts
+      const pendingResult = ACTION_PENDING_SENTINEL + result + '\n\n⚠️ STOP — Your action is QUEUED and will resolve on the next game tick (~10 seconds). Do NOT call this command again. Either use query commands (get_status, get_cargo, read_todo, view_market) to check on things, or end your turn and wait.'
       // Passively collect fleet intel
       try {
         FleetIntelCollector.processCommandResult(command, resp.result, ctx.profileName)
@@ -238,6 +300,7 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
     case 'update_memory': {
       ctx.memory = String(args.content)
       updateProfile(ctx.profileId, { memory: ctx.memory })
+      memoryDirtyFlags.set(ctx.profileId, true)
       ctx.log('system', 'Memory updated')
       return 'Memory updated.'
     }

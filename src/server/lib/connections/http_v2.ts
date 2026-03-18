@@ -211,6 +211,10 @@ export class HttpV2Connection implements GameConnection {
     return this.connected
   }
 
+  supportsNotifications(): boolean {
+    return false
+  }
+
   private get v1BaseUrl(): string {
     return this.baseUrl.replace(/\/api\/v2$/, '/api/v1')
   }

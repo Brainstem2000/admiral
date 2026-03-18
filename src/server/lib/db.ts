@@ -693,8 +693,8 @@ export function getFinancialSnapshots(opts: {
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
-  const limit = opts.limit || 500
+  const limit = opts.limit || 2000
   return getDb().query(
-    `SELECT profile_id, timestamp, wallet, storage, total FROM financial_snapshots ${where} ORDER BY timestamp ASC LIMIT ?`
-  ).all(...params, limit) as Array<{ profile_id: string; timestamp: string; wallet: number; storage: number; total: number }>
+    `SELECT profile_id, timestamp, wallet, storage, total FROM financial_snapshots ${where} ORDER BY timestamp DESC LIMIT ?`
+  ).all(...params, limit).reverse() as Array<{ profile_id: string; timestamp: string; wallet: number; storage: number; total: number }>
 }
