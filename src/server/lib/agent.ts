@@ -44,6 +44,7 @@ export class Agent {
   private _activity: string = 'idle'
   private _gameState: Record<string, unknown> | null = null
   private _sessionExpired = false
+  pendingSafeDock = false
 
   constructor(profileId: string) {
     this.profileId = profileId
@@ -304,6 +305,13 @@ export class Agent {
           compaction,
         )
         turnCounter++
+
+        // Safe dock check: if pending and agent is now docked, auto-disconnect
+        if (this.pendingSafeDock && this.isDocked()) {
+          this.log('system', 'Safe dock complete — disconnecting.')
+          await this.stop()
+          return
+        }
       } catch (err) {
         if (!this.running) break
         if (this.restartRequested) continue
@@ -335,6 +343,13 @@ export class Agent {
         } catch {
           // Best-effort
         }
+      }
+
+      // Second safe dock check after status poll refreshes gameState
+      if (this.pendingSafeDock && this.isDocked()) {
+        this.log('system', 'Safe dock complete — disconnecting.')
+        await this.stop()
+        return
       }
 
       const nudgeParts: string[] = []
@@ -421,6 +436,18 @@ export class Agent {
     this.pendingNudges.push(message)
     // Wake the agent from sleep so it picks up the nudge quickly
     this.abortController?.abort()
+  }
+
+  /** Check if the agent is currently docked at a station. */
+  private isDocked(): boolean {
+    const gs = this._gameState
+    if (!gs) return false
+    // structuredContent has location.docked_at (station name or null)
+    const location = gs.location as Record<string, unknown> | undefined
+    if (location?.docked_at) return true
+    // Fallback checks for different response formats
+    const player = gs.player as Record<string, unknown> | undefined
+    return player?.docked === true || player?.is_docked === true || gs.docked === true
   }
 
   async stop(): Promise<void> {
@@ -520,10 +547,13 @@ ${(() => {
     const inbox = getFleetOrders({ toProfileId: profileId })
     const pending = inbox.filter(o => o.status === 'pending' || o.status === 'accepted')
     if (pending.length === 0) return ''
-    const lines = pending.map(o =>
-      `- [${o.id.slice(0, 8)}] ${o.status.toUpperCase()} from ${nameOf(o.from_profile_id)}: [${o.type}] ${o.description}${o.progress ? ' | Progress: ' + o.progress : ''}`
+    // Cap at 10 most recent orders to prevent prompt overflow (was causing 213k+ token prompts)
+    const capped = pending.slice(-10)
+    const lines = capped.map(o =>
+      `- [${o.id.slice(0, 8)}] ${o.status.toUpperCase()} from ${nameOf(o.from_profile_id)}: [${o.type}] ${o.description.slice(0, 200)}${o.progress ? ' | Progress: ' + o.progress : ''}`
     )
-    return `## Pending Fleet Orders (auto-injected — use read_fleet_orders only to accept/complete/reject)\n${lines.join('\n')}\n\n`
+    const overflow = pending.length > 10 ? `\n(${pending.length - 10} older orders not shown — use read_fleet_orders to see all)` : ''
+    return `## Pending Fleet Orders (auto-injected — use read_fleet_orders only to accept/complete/reject)\n${lines.join('\n')}${overflow}\n\n`
   } catch { return '' }
 })()}## Available Game Commands
 Command signatures (full docs via: game(command="help", args={command: "name"})):

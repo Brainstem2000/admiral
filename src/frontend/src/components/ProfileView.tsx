@@ -1,6 +1,6 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { Square, Plug, PlugZap, Trash2, Pencil, Check, X, PanelLeft, PanelLeftClose, PanelRightClose, MessageSquare } from 'lucide-react'
+import { Square, Plug, PlugZap, Trash2, Pencil, Check, X, PanelLeft, PanelLeftClose, PanelRightClose, MessageSquare, Anchor } from 'lucide-react'
 import type { Profile, Provider } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -106,6 +106,10 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   })
   const [sidePaneWidth, setSidePaneWidth] = useState(288)
   const [connecting, setConnecting] = useState(false)
+  const [safeDocking, setSafeDocking] = useState(false)
+
+  // Clear safeDocking state when agent disconnects
+  if (safeDocking && !status.connected) setSafeDocking(false)
   const [showDirectiveModal, setShowDirectiveModal] = useState(false)
   const [directiveValue, setDirectiveValue] = useState(profile.directive || '')
   const [showNudgeModal, setShowNudgeModal] = useState(false)
@@ -499,7 +503,13 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'disconnect' }),
     })
+    setSafeDocking(false)
     onRefresh()
+  }
+
+  async function handleSafeDock() {
+    setSafeDocking(true)
+    await fetch(`/api/profiles/${profile.id}/safe-dock`, { method: 'POST' })
   }
 
   const handleSendCommand = useCallback(async (command: string, args?: Record<string, unknown>) => {
@@ -893,15 +903,27 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
             {connecting ? 'Connecting...' : (isManual ? 'Connect' : 'Connect + Start')}
           </Button>
         ) : (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleDisconnect}
-            className="gap-1.5 font-semibold text-destructive border-destructive/40 hover:bg-destructive/10"
-          >
-            <Square size={12} />
-            Disconnect
-          </Button>
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleSafeDock}
+              disabled={safeDocking}
+              className="gap-1.5 font-semibold text-[hsl(var(--smui-orange))] border-[hsl(var(--smui-orange)/0.4)] hover:bg-[hsl(var(--smui-orange)/0.1)]"
+            >
+              <Anchor size={12} className={safeDocking ? 'animate-pulse' : ''} />
+              {safeDocking ? 'Docking...' : 'Safe Dock'}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleDisconnect}
+              className="gap-1.5 font-semibold text-destructive border-destructive/40 hover:bg-destructive/10"
+            >
+              <Square size={12} />
+              Disconnect
+            </Button>
+          </>
         )}
 
         <Button variant="ghost" size="icon" onClick={() => { if (window.confirm('Delete this profile and all its logs?')) onDelete() }} className="h-7 w-7 text-muted-foreground hover:text-destructive ml-1">

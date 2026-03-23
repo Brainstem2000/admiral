@@ -170,6 +170,15 @@ profiles.post('/batch', async (c) => {
   return c.json({ action, count: results.length, results })
 })
 
+// POST /api/profiles/:id/safe-dock — nudge agent to dock then auto-disconnect
+profiles.post('/:id/safe-dock', async (c) => {
+  const id = c.req.param('id')
+  const status = agentManager.getStatus(id)
+  if (!status.running) return c.json({ error: 'Agent is not running' }, 400)
+  const ok = agentManager.safeDock(id)
+  return c.json({ ok, status: 'docking' })
+})
+
 // POST /api/profiles/:id/nudge
 profiles.post('/:id/nudge', async (c) => {
   const id = c.req.param('id')

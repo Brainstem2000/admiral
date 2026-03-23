@@ -2,6 +2,15 @@
 
 All notable changes to Admiral are documented here.
 
+## [0.3.9] - 2026-03-23
+
+### Added
+- **Safe Dock & Disconnect button** -- New per-agent "Safe Dock" button (orange anchor icon) in the dashboard. One click sends an urgent dock nudge, then auto-disconnects the agent after it docks. No more racing to manually disconnect before the loop resumes. Detects docked state via `location.docked_at` from structured game state. Sets `stopRequested` to prevent auto-restart.
+
+### Fixed
+- **Fleet orders capping** -- Pending fleet orders injected into system prompts are now capped at 10 (most recent) with descriptions truncated to 200 chars. Prevents prompt overflow that was causing 213k+ token prompts when orders accumulated.
+- **Removed debug snapshot logging** -- Cleaned up `[Snapshot]` console.log statements from `takeFinancialSnapshots()`.
+
 ## [0.3.8] - 2026-03-17
 
 ### Added
