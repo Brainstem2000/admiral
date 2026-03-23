@@ -284,15 +284,15 @@ async function compactContext(
   }
 
   const ratio = options?.contextBudgetRatio ?? CONTEXT_BUDGET_RATIO
-  const budget = Math.floor(model.contextWindow * ratio)
-  // CRITICAL: Include system prompt tokens — it's typically 100-150KB and was causing overflow!
   const systemPromptTokens = context.systemPrompt ? estimateTokens(context.systemPrompt) : 0
+  // Budget = fraction of the space REMAINING after the system prompt, not the full window.
+  // The system prompt is large (~30-50k tokens) and fixed — only messages can be compacted.
+  const messageBudget = Math.floor((model.contextWindow - systemPromptTokens) * ratio)
   const messageTokens = totalMessageTokens(context.messages)
-  const currentTokens = systemPromptTokens + messageTokens
 
-  if (currentTokens < budget) return
+  if (messageTokens < messageBudget) return
 
-  const recentBudget = Math.floor(budget * 0.6)
+  const recentBudget = Math.floor(messageBudget * 0.6)
   let recentTokens = 0
   let splitIdx = context.messages.length
 

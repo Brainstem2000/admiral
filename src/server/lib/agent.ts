@@ -234,6 +234,7 @@ export class Agent {
     let cachedPromptPhase: 'planning' | 'executing' | undefined = initialPhase
     let cachedPromptDirective = profile.directive || ''
     let cachedPromptMemory = profile.memory || ''
+    let cachedPromptBriefing = buildSituationalBriefing(this.profileId)
 
     while (this.running) {
       // Check session duration limit
@@ -381,12 +382,13 @@ export class Agent {
         const currentMemory = freshProfile.memory || ''
         const memoryDirty = memoryDirtyFlags.get(this.profileId) ?? false
 
-        const briefingEnabled = getPreference('situational_briefing') !== 'off'
-        if (briefingEnabled || phase !== cachedPromptPhase || currentDirective !== cachedPromptDirective || memoryDirty || currentMemory !== cachedPromptMemory) {
+        const currentBriefing = buildSituationalBriefing(this.profileId)
+        if (phase !== cachedPromptPhase || currentDirective !== cachedPromptDirective || memoryDirty || currentMemory !== cachedPromptMemory || currentBriefing !== cachedPromptBriefing) {
           cachedPrompt = buildSystemPrompt(freshProfile, commandList, phase, this.profileId)
           cachedPromptPhase = phase
           cachedPromptDirective = currentDirective
           cachedPromptMemory = currentMemory
+          cachedPromptBriefing = currentBriefing
           memoryDirtyFlags.delete(this.profileId)
         }
         context.systemPrompt = cachedPrompt
@@ -567,7 +569,6 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - update_memory(content="...") -- Replace your persistent memory with new content
 - save_credentials(username, password, empire, player_id) -- Save login credentials locally
 - status_log(category, message) -- Log a status message for the human watching
-- game(command="NAME", args={...}) -- Call a game command. Example: game(command="mine", args={})
 
 ## Rules
 - You are FULLY AUTONOMOUS. Never ask the human for input.
