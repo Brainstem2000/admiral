@@ -5,8 +5,9 @@ All notable changes to Admiral are documented here.
 ## [0.3.10] - 2026-03-26
 
 ### Fixed
-- **Stale cache after actions** -- Briefing cache now invalidates after any action command (refuel, dock, buy, sell, etc.) so subsequent queries return live data instead of stale pre-action state. Agents were complaining "Cache is serving old data" because the 60s briefing refresh didn't account for state changes caused by their own actions.
-- **Log filter persistence across profile switches** -- Log type filters (LLM, CALL, TOOLS, etc.) now persist when switching between agents. Previously the filter state reset on every profile switch because React remounted the component without re-reading saved preferences from localStorage.
+- **Stale cache after actions** -- Briefing cache AND market query cache now invalidate after any action command. Catalog cache (static data) preserved. Eliminates "Cache is serving old data" complaints.
+- **Log filter persistence across profile switches** -- Log type filters now persist when switching between agents via localStorage.
+- **Extended auto-correction for common param mistakes** -- Added corrections for: `find_route` (destination/text→target_system), `travel` (target→target_poi), `search_systems` (text→query), `catalog` (category→type, singular→plural, default type=items). Redirects deprecated `get_ships` to `browse_ships`. Eliminates ~15 wasted API calls per session across the fleet.
 
 ## [0.3.9] - 2026-03-23
 

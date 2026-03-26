@@ -176,15 +176,38 @@ export async function executeTool(
   // Auto-correct common parameter mistakes to reduce wasted API calls
   if (commandArgs) {
     const bare = command.replace(/^spacemolt_/, '')
-    // travel uses target_poi, not destination/target_system
+    // travel uses target_poi, not destination/target_system/target
     if ((bare === 'travel' || bare.endsWith('_travel')) && !commandArgs.target_poi) {
       if (commandArgs.destination) { commandArgs.target_poi = commandArgs.destination; delete commandArgs.destination }
+      else if (commandArgs.target) { commandArgs.target_poi = commandArgs.target; delete commandArgs.target }
       else if (commandArgs.target_system) { commandArgs.target_poi = commandArgs.target_system; delete commandArgs.target_system }
     }
     // jump uses target_system, not destination/target_poi
     if ((bare === 'jump' || bare.endsWith('_jump')) && !commandArgs.target_system) {
       if (commandArgs.destination) { commandArgs.target_system = commandArgs.destination; delete commandArgs.destination }
     }
+    // find_route uses target_system, not destination/text
+    if ((bare === 'find_route' || bare.endsWith('_find_route')) && !commandArgs.target_system) {
+      if (commandArgs.destination) { commandArgs.target_system = commandArgs.destination; delete commandArgs.destination }
+      else if (commandArgs.text) { commandArgs.target_system = commandArgs.text; delete commandArgs.text }
+    }
+    // search_systems uses query, not text
+    if ((bare === 'search_systems' || bare.endsWith('_search_systems')) && !commandArgs.query && commandArgs.text) {
+      commandArgs.query = commandArgs.text; delete commandArgs.text
+    }
+    // catalog uses type, not category; also fix singular→plural and default to 'items' if missing
+    if (bare === 'catalog' || bare.endsWith('_catalog')) {
+      if (!commandArgs.type && commandArgs.category) { commandArgs.type = commandArgs.category; delete commandArgs.category }
+      if (!commandArgs.type && commandArgs.search) { commandArgs.type = 'items' } // default to items search
+      const SINGULAR_FIX: Record<string, string> = { recipe: 'recipes', skill: 'skills', ship: 'ships', item: 'items' }
+      if (commandArgs.type && SINGULAR_FIX[commandArgs.type]) { commandArgs.type = SINGULAR_FIX[commandArgs.type] }
+    }
+  }
+
+  // Redirect deprecated commands
+  const bareFinal = command.replace(/^spacemolt_/, '')
+  if (bareFinal === 'get_ships' || bareFinal.endsWith('_get_ships')) {
+    command = command.replace('get_ships', 'browse_ships')
   }
 
   const fmtArgs = commandArgs ? formatArgs(commandArgs) : ''
@@ -281,10 +304,16 @@ export async function executeTool(
       if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
     } catch { /* never break game execution */ }
 
-    // After a successful action, invalidate the briefing cache so the next
+    // After a successful action, invalidate caches so the next
     // query fetches live data instead of returning stale pre-action state.
     if (!isQuery) {
       invalidateBriefingCache(ctx.profileId)
+      // Also purge market query cache entries for this profile (catalog stays — it's static)
+      for (const [key] of queryCache) {
+        if (key.startsWith(ctx.profileId + ':') && !key.includes(':catalog:') && !key.includes(':browse_ships:') && !key.includes(':commission_quote:')) {
+          queryCache.delete(key)
+        }
+      }
     }
 
     // Store cacheable query results for future intercept
