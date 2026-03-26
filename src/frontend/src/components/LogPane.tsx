@@ -92,9 +92,12 @@ export function LogPane({ profileId, connected }: Props) {
     setSseKey(k => k + 1)
   }, [connected])
 
-  // Restore cached entries on profile switch, then HTTP + SSE refresh
+  // Restore cached entries and filter state on profile switch
   useEffect(() => {
     setEntries(logCache.get(profileId) || [])
+    // Re-apply saved filters on profile switch (component may not fully remount)
+    const saved = loadSavedFilters()
+    if (saved) _setEnabledFilters(saved)
   }, [profileId])
 
   // HTTP fetch for reliable initial data (SSE _init can be unreliable)

@@ -110,6 +110,15 @@ export function clearBriefingCache(profileId: string): void {
   stopBriefingCollector(profileId)
 }
 
+/** Invalidate cached data without stopping the collector.
+ *  Sets updatedAt to 0 so buildSituationalBriefing returns '' and
+ *  cache intercept falls through to the live server.
+ *  Called after action commands to ensure the next query gets fresh data. */
+export function invalidateBriefingCache(profileId: string): void {
+  const cache = agentCaches.get(profileId)
+  if (cache) cache.updatedAt = 0
+}
+
 // ─── Briefing Builder ─────────────────────────────────────────────
 
 function fmtNum(n: number): string {
@@ -121,7 +130,7 @@ function fmtNum(n: number): string {
 /** Build a compact text briefing from cached data. Returns empty string if no data. */
 export function buildSituationalBriefing(profileId: string): string {
   const cache = agentCaches.get(profileId)
-  if (!cache || !cache.status) return ''
+  if (!cache || !cache.status || cache.updatedAt === 0) return ''
 
   const lines: string[] = []
   const gs = cache.status

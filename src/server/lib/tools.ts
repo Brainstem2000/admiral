@@ -4,7 +4,7 @@ import type { GameConnection } from './connections/interface'
 import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { agentManager } from './agent-manager'
-import { buildSituationalBriefing } from './briefing'
+import { buildSituationalBriefing, invalidateBriefingCache } from './briefing'
 
 // Extended query result cache: keyed by "profileId:command:argsJSON"
 const queryCache = new Map<string, { result: string; timestamp: number }>()
@@ -220,9 +220,8 @@ export async function executeTool(
     if (BRIEFING_COVERED_QUERIES.has(deepBare)) {
       const briefing = buildSituationalBriefing(ctx.profileId)
       if (briefing) {
-        const hint = `[Served from cache — this data is already in your "Current Situation" section above. Avoid re-querying.]\n${briefing}`
         ctx.log('tool_result', `(cached) ${truncate(briefing, 150)}`)
-        return hint
+        return `(cached) ${briefing}`
       }
     }
 
@@ -271,6 +270,8 @@ export async function executeTool(
         FleetIntelCollector.processCommandResult(command, resp.result, ctx.profileName)
         if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
       } catch { /* never break game execution */ }
+      // Invalidate briefing cache — action changed game state
+      invalidateBriefingCache(ctx.profileId)
       return truncateResult(pendingResult)
     }
 
@@ -279,6 +280,12 @@ export async function executeTool(
       FleetIntelCollector.processCommandResult(command, resp.result, ctx.profileName)
       if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
     } catch { /* never break game execution */ }
+
+    // After a successful action, invalidate the briefing cache so the next
+    // query fetches live data instead of returning stale pre-action state.
+    if (!isQuery) {
+      invalidateBriefingCache(ctx.profileId)
+    }
 
     // Store cacheable query results for future intercept
     if (isQuery && getPreference('situational_briefing') !== 'off') {
