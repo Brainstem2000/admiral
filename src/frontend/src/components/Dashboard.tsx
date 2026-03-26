@@ -30,7 +30,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     setSearchParams(params)
   }
   const [autoEditName, setAutoEditName] = useState(false)
-  const [statuses, setStatuses] = useState<Record<string, { connected: boolean; running: boolean }>>({})
+  const [statuses, setStatuses] = useState<Record<string, { connected: boolean; running: boolean; safeDocking?: boolean }>>({})
   const [playerDataMap, setPlayerDataMap] = useState<Record<string, Record<string, unknown>>>({})
   const [showWizard, setShowWizard] = useState(false)
   const [showTour, setShowTour] = useState(false)
@@ -58,11 +58,11 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
       try {
         const resp = await fetch('/api/profiles')
         const data: Array<Record<string, unknown>> = await resp.json()
-        const newStatuses: Record<string, { connected: boolean; running: boolean }> = {}
+        const newStatuses: Record<string, { connected: boolean; running: boolean; safeDocking?: boolean }> = {}
         const newGameStates: Record<string, Record<string, unknown>> = {}
         for (const p of data) {
           const id = p.id as string
-          newStatuses[id] = { connected: !!p.connected, running: !!p.running }
+          newStatuses[id] = { connected: !!p.connected, running: !!p.running, safeDocking: !!p.safeDocking }
           if (p.gameState && typeof p.gameState === 'object') {
             newGameStates[id] = p.gameState as Record<string, unknown>
           }
@@ -81,11 +81,11 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     try {
       const resp = await fetch('/api/profiles')
       const data: Array<Record<string, unknown>> = await resp.json()
-      const newStatuses: Record<string, { connected: boolean; running: boolean }> = {}
+      const newStatuses: Record<string, { connected: boolean; running: boolean; safeDocking?: boolean }> = {}
       const newGameStates: Record<string, Record<string, unknown>> = {}
       for (const p of data) {
         const id = p.id as string
-        newStatuses[id] = { connected: !!p.connected, running: !!p.running }
+        newStatuses[id] = { connected: !!p.connected, running: !!p.running, safeDocking: !!p.safeDocking }
         if (p.gameState && typeof p.gameState === 'object') {
           newGameStates[id] = p.gameState as Record<string, unknown>
         }
@@ -288,6 +288,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             />
           ) : activeProfile ? (
             <ProfileView
+              key={activeProfile.id}
               profile={activeProfile}
               providers={providers}
               status={statuses[activeProfile.id] || { connected: false, running: false }}

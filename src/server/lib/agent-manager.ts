@@ -202,19 +202,21 @@ class AgentManager {
     const agent = this.agents.get(profileId)
     if (!agent?.isRunning) return false
     agent.pendingSafeDock = true
+    agent.safeDockTurnsRemaining = 15
     this.stopRequested.add(profileId)  // Prevent auto-restart after loop exits
     this.resetBackoff(profileId)
     agent.injectNudge('URGENT: Dock at the nearest safe station immediately. This is a shutdown order from your human operator. Dock and do nothing else after docking.')
     return true
   }
 
-  getStatus(profileId: string): { connected: boolean; running: boolean; activity: string; gameState: SlimGameState } {
+  getStatus(profileId: string): { connected: boolean; running: boolean; activity: string; gameState: SlimGameState; safeDocking: boolean } {
     const agent = this.agents.get(profileId)
     return {
       connected: agent?.isConnected ?? false,
       running: agent?.isRunning ?? false,
       activity: agent?.activity ?? 'idle',
       gameState: slimGameState(agent?.gameState ?? null),
+      safeDocking: agent?.pendingSafeDock ?? false,
     }
   }
 

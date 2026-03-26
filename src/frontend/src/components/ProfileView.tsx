@@ -88,7 +88,7 @@ type EditingField = 'name' | 'mode' | 'provider' | 'credentials' | null
 interface Props {
   profile: Profile
   providers: Provider[]
-  status: { connected: boolean; running: boolean }
+  status: { connected: boolean; running: boolean; safeDocking?: boolean }
   registrationCode?: string
   playerData: Record<string, unknown> | null
   onPlayerData: (data: Record<string, unknown>) => void
@@ -106,10 +106,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   })
   const [sidePaneWidth, setSidePaneWidth] = useState(288)
   const [connecting, setConnecting] = useState(false)
-  const [safeDocking, setSafeDocking] = useState(false)
-
-  // Clear safeDocking state when agent disconnects
-  if (safeDocking && !status.connected) setSafeDocking(false)
+  const safeDocking = status.safeDocking ?? false
   const [showDirectiveModal, setShowDirectiveModal] = useState(false)
   const [directiveValue, setDirectiveValue] = useState(profile.directive || '')
   const [showNudgeModal, setShowNudgeModal] = useState(false)
@@ -503,13 +500,12 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'disconnect' }),
     })
-    setSafeDocking(false)
     onRefresh()
   }
 
   async function handleSafeDock() {
-    setSafeDocking(true)
     await fetch(`/api/profiles/${profile.id}/safe-dock`, { method: 'POST' })
+    onRefresh()
   }
 
   const handleSendCommand = useCallback(async (command: string, args?: Record<string, unknown>) => {

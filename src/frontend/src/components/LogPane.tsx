@@ -20,6 +20,22 @@ const ALL_FILTER_KEYS = FILTER_GROUPS.map(g => g.key)
 // Per-profile cache survives component remounts — instant data on switch
 const logCache = new Map<string, LogEntry[]>()
 
+// Persist filter selections across profile switches via localStorage
+const FILTER_STORAGE_KEY = 'admiral-log-filters'
+function loadSavedFilters(): Set<string> | null {
+  try {
+    const stored = localStorage.getItem(FILTER_STORAGE_KEY)
+    if (stored) {
+      const arr = JSON.parse(stored)
+      if (Array.isArray(arr)) return new Set(arr as string[])
+    }
+  } catch { /* ignore */ }
+  return null
+}
+function persistFilters(filters: Set<string>) {
+  try { localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify([...filters])) } catch { /* ignore */ }
+}
+
 const BADGE_CLASS: Record<string, string> = {
   connection: 'log-badge-connection',
   error: 'log-badge-error',
@@ -51,7 +67,14 @@ interface Props {
 
 export function LogPane({ profileId, connected }: Props) {
   const [entries, setEntries] = useState<LogEntry[]>(() => logCache.get(profileId) || [])
-  const [enabledFilters, setEnabledFilters] = useState<Set<string>>(() => new Set(ALL_FILTER_KEYS))
+  const [enabledFilters, _setEnabledFilters] = useState<Set<string>>(() => loadSavedFilters() ?? new Set(ALL_FILTER_KEYS))
+  const setEnabledFilters = useCallback((updater: Set<string> | ((prev: Set<string>) => Set<string>)) => {
+    _setEnabledFilters(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater
+      persistFilters(next)
+      return next
+    })
+  }, [])
   const [searchParams, setSearchParams] = useSearchParams()
   const selectedLogId = searchParams.get('log') ? parseInt(searchParams.get('log')!) : null
   const setSelectedLogId = (id: number | null) => {

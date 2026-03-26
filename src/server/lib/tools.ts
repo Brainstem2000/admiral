@@ -6,6 +6,9 @@ import { FleetIntelCollector } from './fleet-intel'
 import { agentManager } from './agent-manager'
 import { buildSituationalBriefing } from './briefing'
 
+// Extended query result cache: keyed by "profileId:command:argsJSON"
+const queryCache = new Map<string, { result: string; timestamp: number }>()
+
 // --- Tool Definitions ---
 
 export const allTools: Tool[] = [
@@ -222,6 +225,22 @@ export async function executeTool(
         return hint
       }
     }
+
+    // Extended query cache: catalog (static, 1h TTL) and market queries (60s TTL)
+    const cacheKey = `${ctx.profileId}:${deepBare}:${JSON.stringify(commandArgs ?? {})}`
+    const cached = queryCache.get(cacheKey)
+    const CATALOG_COMMANDS = new Set(['catalog', 'browse_ships', 'commission_quote'])
+    const MARKET_COMMANDS = new Set(['view_market', 'analyze_market', 'view_orders', 'estimate_purchase'])
+    const isCatalog = CATALOG_COMMANDS.has(deepBare)
+    const isMarket = MARKET_COMMANDS.has(deepBare)
+    if (cached && (isCatalog || isMarket)) {
+      const ttl = isCatalog ? 3600_000 : 60_000 // 1h for catalog, 60s for market
+      if (Date.now() - cached.timestamp < ttl) {
+        const hint = `[Cached ${isCatalog ? 'catalog' : 'market'} data, ${Math.round((Date.now() - cached.timestamp) / 1000)}s old]\n${cached.result}`
+        ctx.log('tool_result', `(cached) ${truncate(cached.result, 150)}`)
+        return hint
+      }
+    }
   }
 
   try {
@@ -260,6 +279,20 @@ export async function executeTool(
       FleetIntelCollector.processCommandResult(command, resp.result, ctx.profileName)
       if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
     } catch { /* never break game execution */ }
+
+    // Store cacheable query results for future intercept
+    if (isQuery && getPreference('situational_briefing') !== 'off') {
+      const CACHEABLE = new Set(['catalog', 'browse_ships', 'commission_quote', 'view_market', 'analyze_market', 'view_orders', 'estimate_purchase'])
+      if (CACHEABLE.has(deepBare)) {
+        const cacheKey = `${ctx.profileId}:${deepBare}:${JSON.stringify(commandArgs ?? {})}`
+        queryCache.set(cacheKey, { result, timestamp: Date.now() })
+        // Prune cache if it grows too large (max 200 entries)
+        if (queryCache.size > 200) {
+          const oldest = [...queryCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)
+          for (let i = 0; i < 50; i++) queryCache.delete(oldest[i][0])
+        }
+      }
+    }
 
     return truncateResult(result)
   } catch (err) {

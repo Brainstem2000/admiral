@@ -45,6 +45,7 @@ export class Agent {
   private _gameState: Record<string, unknown> | null = null
   private _sessionExpired = false
   pendingSafeDock = false
+  safeDockTurnsRemaining = 0
 
   constructor(profileId: string) {
     this.profileId = profileId
@@ -288,9 +289,12 @@ export class Agent {
 
         // Planning turns get fewer tool rounds — Opus should set strategy, not do exhaustive research
         const PLANNING_MAX_TOOL_ROUNDS = 10
-        const turnMaxToolRounds = isPlanningTurn
-          ? Math.min(maxToolRounds ?? PLANNING_MAX_TOOL_ROUNDS, PLANNING_MAX_TOOL_ROUNDS)
-          : maxToolRounds
+        const SAFE_DOCK_MAX_TOOL_ROUNDS = 5
+        const turnMaxToolRounds = this.pendingSafeDock
+          ? SAFE_DOCK_MAX_TOOL_ROUNDS
+          : isPlanningTurn
+            ? Math.min(maxToolRounds ?? PLANNING_MAX_TOOL_ROUNDS, PLANNING_MAX_TOOL_ROUNDS)
+            : maxToolRounds
 
         this.setActivity(`${phasePrefix}Waiting for LLM response...`)
         await runAgentTurn(
@@ -307,16 +311,33 @@ export class Agent {
         )
         turnCounter++
 
-        // Safe dock check: if pending and agent is now docked, auto-disconnect
-        if (this.pendingSafeDock && this.isDocked()) {
-          this.log('system', 'Safe dock complete — disconnecting.')
-          await this.stop()
-          return
+        // Safe dock check: if pending and agent is now docked (or timeout), auto-disconnect
+        if (this.pendingSafeDock) {
+          if (this.isDocked()) {
+            this.log('system', 'Safe dock complete — disconnecting.')
+            await this.stop()
+            return
+          }
+          this.safeDockTurnsRemaining--
+          if (this.safeDockTurnsRemaining <= 0) {
+            this.log('system', 'Safe dock timeout — force disconnecting after max turns.')
+            await this.stop()
+            return
+          }
         }
       } catch (err) {
         if (!this.running) break
         if (this.restartRequested) continue
         this.log('error', `Turn error: ${err instanceof Error ? err.message : String(err)}`)
+        // Still count down safe dock on errors so timeout isn't bypassed
+        if (this.pendingSafeDock) {
+          this.safeDockTurnsRemaining--
+          if (this.safeDockTurnsRemaining <= 0) {
+            this.log('system', 'Safe dock timeout (during error) — force disconnecting.')
+            await this.stop()
+            return
+          }
+        }
       }
 
       if (!this.running) break
@@ -365,7 +386,12 @@ export class Agent {
         }
       }
 
-      nudgeParts.push('Continue your mission.')
+      // Re-inject dock instruction every turn while safe-docking so the LLM doesn't lose track
+      if (this.pendingSafeDock) {
+        nudgeParts.push('## PRIORITY: DOCK IMMEDIATELY\nYour human operator has issued a shutdown order. Dock at the nearest safe station NOW. Do not do anything else — just dock. You have ' + this.safeDockTurnsRemaining + ' turns remaining before forced disconnect.')
+      } else {
+        nudgeParts.push('Continue your mission.')
+      }
 
       context.messages.push({
         role: 'user' as const,
@@ -454,6 +480,8 @@ export class Agent {
 
   async stop(): Promise<void> {
     this.running = false
+    this.pendingSafeDock = false
+    this.safeDockTurnsRemaining = 0
     this.abortController?.abort()
     clearBriefingCache(this.profileId)
     if (this.connection) {
