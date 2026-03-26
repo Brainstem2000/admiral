@@ -668,7 +668,8 @@ function TokensTab({ profiles }: { profiles: Profile[] }) {
   const [roi, setRoi] = useState<RoiData | null>(null)
 
   useEffect(() => {
-    fetch('/api/analytics/tokens').then(r => r.json()).then(setData).catch(() => {})
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ')
+    fetch(`/api/analytics/tokens?since=${encodeURIComponent(since)}`).then(r => r.json()).then(setData).catch(() => {})
     fetch('/api/analytics/roi').then(r => r.json()).then(setRoi).catch(() => {})
   }, [])
 

@@ -444,9 +444,15 @@ export function getTokenAnalytics(opts: {
     params.push(since)
   }
 
+  // Default to last 24 hours if no since filter — prevents loading 70k+ rows into memory
+  if (!since) {
+    conditions.push('timestamp >= ?')
+    params.push(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' '))
+  }
+
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
   const rows = getDb().query(
-    `SELECT profile_id, timestamp, detail FROM log_entries ${where} ORDER BY id`
+    `SELECT profile_id, timestamp, detail FROM log_entries ${where} ORDER BY id LIMIT 10000`
   ).all(...params) as { profile_id: string; timestamp: string; detail: string | null }[]
 
   const byProfile: Record<string, { calls: number; inputTokens: number; outputTokens: number; cost: number }> = {}

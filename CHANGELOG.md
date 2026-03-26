@@ -5,6 +5,8 @@ All notable changes to Admiral are documented here.
 ## [0.3.10] - 2026-03-26
 
 ### Fixed
+- **Server hang / 23GB memory leak** -- `getTokenAnalytics()` loaded ALL 73,900+ llm_call log entries (with JSON detail blobs) into memory on every `/tokens` and `/roi` request. With a 15GB database this consumed 23GB RAM and deadlocked the event loop. Now defaults to last 24h with a 10,000 row cap. Analytics tabs load instantly.
+- **ROI endpoint crash** -- `/api/analytics/roi` referenced removed `parseStorageCreditsFromMemory()` function (deleted in v0.3.7). Now uses wallet-only totals matching v0.222.0 credit model.
 - **Stale cache after actions** -- Briefing cache AND market query cache now invalidate after any action command. Catalog cache (static data) preserved. Eliminates "Cache is serving old data" complaints.
 - **Log filter persistence across profile switches** -- Log type filters now persist when switching between agents via localStorage.
 - **Extended auto-correction for common param mistakes** -- Added corrections for: `find_route` (destination/text→target_system), `travel` (target→target_poi), `search_systems` (text→query), `catalog` (category→type, singular→plural, default type=items). Redirects deprecated `get_ships` to `browse_ships`. Eliminates ~15 wasted API calls per session across the fleet.

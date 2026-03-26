@@ -170,8 +170,7 @@ analytics.get('/roi', (c) => {
     const gameState = agent?.gameState as Record<string, unknown> | null | undefined
     const player = (gameState?.player ?? {}) as Record<string, unknown>
     const wallet = typeof player.credits === 'number' ? player.credits : 0
-    const storage = parseStorageCreditsFromMemory(profile.memory || '')
-    const totalCredits = wallet + storage
+    const totalCredits = wallet
 
     const tokenStats = tokenData.byProfile[profile.id]
     const apiCost = tokenStats?.cost ?? 0
