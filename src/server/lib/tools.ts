@@ -182,13 +182,16 @@ export async function executeTool(
       else if (commandArgs.target) { commandArgs.target_poi = commandArgs.target; delete commandArgs.target }
       else if (commandArgs.target_system) { commandArgs.target_poi = commandArgs.target_system; delete commandArgs.target_system }
     }
-    // jump uses target_system, not destination/target_poi
+    // jump uses target_system, not destination/target/target_poi
     if ((bare === 'jump' || bare.endsWith('_jump')) && !commandArgs.target_system) {
       if (commandArgs.destination) { commandArgs.target_system = commandArgs.destination; delete commandArgs.destination }
+      else if (commandArgs.target) { commandArgs.target_system = commandArgs.target; delete commandArgs.target }
+      else if (commandArgs.target_poi) { commandArgs.target_system = commandArgs.target_poi; delete commandArgs.target_poi }
     }
-    // find_route uses target_system, not destination/text
+    // find_route uses target_system, not destination/text/target
     if ((bare === 'find_route' || bare.endsWith('_find_route')) && !commandArgs.target_system) {
       if (commandArgs.destination) { commandArgs.target_system = commandArgs.destination; delete commandArgs.destination }
+      else if (commandArgs.target) { commandArgs.target_system = commandArgs.target; delete commandArgs.target }
       else if (commandArgs.text) { commandArgs.target_system = commandArgs.text; delete commandArgs.text }
     }
     // search_systems uses query, not text
@@ -201,6 +204,22 @@ export async function executeTool(
       if (!commandArgs.type && commandArgs.search) { commandArgs.type = 'items' } // default to items search
       const SINGULAR_FIX: Record<string, string> = { recipe: 'recipes', skill: 'skills', ship: 'ships', item: 'items' }
       if (commandArgs.type && SINGULAR_FIX[commandArgs.type]) { commandArgs.type = SINGULAR_FIX[commandArgs.type] }
+    }
+    // view_market: strip unknown params — only item_id and category are valid
+    if (bare === 'view_market' || bare === 'market_view_market' || bare.endsWith('_view_market')) {
+      if (commandArgs.search && !commandArgs.item_id) { commandArgs.item_id = commandArgs.search; delete commandArgs.search }
+      if (commandArgs.item && !commandArgs.item_id) { commandArgs.item_id = commandArgs.item; delete commandArgs.item }
+    }
+    // analyze_market: needs search param, not item_id
+    if (bare === 'analyze_market' || bare === 'market_analyze_market' || bare.endsWith('_analyze_market')) {
+      if (commandArgs.item_id && !commandArgs.search) { commandArgs.search = commandArgs.item_id; delete commandArgs.item_id }
+      if (commandArgs.item && !commandArgs.search) { commandArgs.search = commandArgs.item; delete commandArgs.item }
+    }
+    // send_chat: fix common channel names
+    if (bare === 'send_chat' || bare === 'social_send_chat' || bare.endsWith('_send_chat')) {
+      const ch = String(commandArgs.channel || '').toLowerCase()
+      const CHANNEL_FIX: Record<string, string> = { 'global': 'system', 'general': 'system', 'local': 'system', 'faction': 'faction', 'trade': 'trading', 'help': 'system' }
+      if (ch && CHANNEL_FIX[ch]) { commandArgs.channel = CHANNEL_FIX[ch] }
     }
   }
 
@@ -293,8 +312,8 @@ export async function executeTool(
         FleetIntelCollector.processCommandResult(command, resp.result, ctx.profileName)
         if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
       } catch { /* never break game execution */ }
-      // Invalidate briefing cache — action changed game state
-      invalidateBriefingCache(ctx.profileId)
+      // Invalidate briefing cache — action changed game state; trigger async refresh
+      invalidateBriefingCache(ctx.profileId, ctx.connection)
       return truncateResult(pendingResult)
     }
 
@@ -307,7 +326,7 @@ export async function executeTool(
     // After a successful action, invalidate caches so the next
     // query fetches live data instead of returning stale pre-action state.
     if (!isQuery) {
-      invalidateBriefingCache(ctx.profileId)
+      invalidateBriefingCache(ctx.profileId, ctx.connection)
       // Also purge market query cache entries for this profile (catalog stays — it's static)
       for (const [key] of queryCache) {
         if (key.startsWith(ctx.profileId + ':') && !key.includes(':catalog:') && !key.includes(':browse_ships:') && !key.includes(':commission_quote:')) {

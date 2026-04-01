@@ -113,10 +113,15 @@ export function clearBriefingCache(profileId: string): void {
 /** Invalidate cached data without stopping the collector.
  *  Sets updatedAt to 0 so buildSituationalBriefing returns '' and
  *  cache intercept falls through to the live server.
- *  Called after action commands to ensure the next query gets fresh data. */
-export function invalidateBriefingCache(profileId: string): void {
+ *  Called after action commands to ensure the next query gets fresh data.
+ *  Optionally pass connection to trigger an immediate background refresh. */
+export function invalidateBriefingCache(profileId: string, conn?: GameConnection): void {
   const cache = agentCaches.get(profileId)
   if (cache) cache.updatedAt = 0
+  // Trigger immediate background refresh so next briefing has fresh data
+  if (conn) {
+    refreshBriefingData(profileId, conn).catch(() => {})
+  }
 }
 
 // ─── Briefing Builder ─────────────────────────────────────────────
@@ -149,7 +154,8 @@ export function buildSituationalBriefing(profileId: string): string {
   const credits = player?.credits ?? gs.credits ?? 0
   const isDocked = player?.docked === true || player?.is_docked === true || gs.docked === true
 
-  lines.push(`Location: ${systemName}${poiName ? ' > ' + poiName : ''} | ${isDocked ? 'Docked' : 'In space'}`)
+  lines.push(`** STATUS: ${isDocked ? 'DOCKED at ' + (poiName || systemName) : 'IN SPACE (not docked — cannot trade/market/storage/missions)'} **`)
+  lines.push(`Location: ${systemName}${poiName ? ' > ' + poiName : ''}`)
   lines.push(`Wallet: ${fmtNum(Number(credits))}cr | Fuel: ${fuel}/${maxFuel} | Hull: ${hull}/${maxHull}${shield !== undefined ? ' | Shield: ' + shield : ''}`)
 
   // Ship info

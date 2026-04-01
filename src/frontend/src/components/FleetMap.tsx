@@ -17,6 +17,7 @@ import { AgentHeadings, type AgentHeading } from './fleet-map/AgentHeadings'
 import { EmpireNebula } from './fleet-map/EmpireNebula'
 import { SecurityOverlay } from './fleet-map/SecurityOverlay'
 import { SystemPopup } from './fleet-map/SystemPopup'
+import { SystemLabels } from './fleet-map/SystemLabels'
 
 interface Props {
   profiles: Profile[]
@@ -65,7 +66,21 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
       if (!sysName) return
       const sys = systemByName.get(sysName)
       if (!sys) return
-      result.push({ profile: p, index: i, system: sys, running: statuses[p.id]?.running ?? false })
+      // Extract status data from slimGameState (flat shape: ship.hull="200/200", poi="Grand Exchange")
+      const ship = (pd.ship || {}) as Record<string, unknown>
+      const poi = String(pd.poi || '')
+      result.push({
+        profile: p,
+        index: i,
+        system: sys,
+        running: statuses[p.id]?.running ?? false,
+        docked: Boolean(poi),
+        hull: String(ship.hull ?? ''),
+        shield: String(ship.shield ?? ''),
+        fuel: String(ship.fuel ?? ''),
+        cargo: String(ship.cargo ?? ''),
+        credits: Number(pd.credits ?? 0),
+      })
     })
     return result
   }, [profiles, playerDataMap, statuses, systemByName])
@@ -219,6 +234,7 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
             onHover={handleHover}
             onSelect={handleSelect}
           />
+          <SystemLabels systems={galaxyData.systems} agents={agentPositions} hoveredId={hoveredId} colors={colors} />
           <AgentMarkers agents={agentPositions} colors={colors} />
           <AgentHeadings agents={agentPositions} headings={agentHeadings} colors={colors} />
           {selectedSystem && (

@@ -2,6 +2,19 @@
 
 All notable changes to Admiral are documented here.
 
+## [0.3.11] - 2026-04-01
+
+### Fixed
+- **Immediate briefing refresh after actions** -- After action commands (dock, jump, buy, etc.), the briefing cache now triggers an async background refresh immediately instead of waiting up to 60s. Eliminates "cache is stale" / "cache is serving old data" complaints from agents who just changed state.
+- **Prominent docked state in briefing** -- Briefing now leads with `** STATUS: DOCKED at <poi> **` or `** STATUS: IN SPACE (not docked — cannot trade/market/storage/missions) **`. Reduces planners queuing docked-only actions while in space (was causing 6+ `no_base` errors per 30min for Nova Reyes).
+- **Extended parameter auto-correction** -- Added `target`→`target_system` for jump/find_route, `target_poi`→`target_system` for jump, `search`/`item`→`item_id` for view_market, `item_id`/`item`→`search` for analyze_market. Eliminates ~10 more wasted API calls per session.
+- **Chat channel name correction** -- Auto-remaps invalid channel names (`global`/`general`/`local`→`system`, `trade`→`trading`) to eliminate `invalid_channel` errors across 3 agents.
+
+### Added
+- **Fleet map improvements** -- System name labels (always-on for hubs and agent locations, hover for others). Agent status indicators with docked anchor icon, mini hull/fuel/cargo health bars, and OFF badge. Movement heading cones showing travel direction.
+- **Log analysis script** -- `scripts/analyze-logs.ts` for quick fleet diagnostics (agent activity, tool call frequency, error patterns, cache complaints, token usage).
+- **GitHub Copilot instructions** -- `.github/copilot-instructions.md` with full project architecture, conventions, and common patterns for AI-assisted development.
+
 ## [0.3.10] - 2026-03-26
 
 ### Fixed
