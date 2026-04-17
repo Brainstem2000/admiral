@@ -182,6 +182,13 @@ export async function executeTool(
       else if (commandArgs.target) { commandArgs.target_poi = commandArgs.target; delete commandArgs.target }
       else if (commandArgs.target_system) { commandArgs.target_poi = commandArgs.target_system; delete commandArgs.target_system }
     }
+    // travel/dock: auto-fix POI names to snake_case (e.g. "Cargo Station" → "cargo_station")
+    if (bare === 'travel' || bare.endsWith('_travel') || bare === 'dock' || bare.endsWith('_dock')) {
+      const poi = String(commandArgs.target_poi || '')
+      if (poi && poi !== poi.toLowerCase().replace(/\s+/g, '_')) {
+        commandArgs.target_poi = poi.toLowerCase().replace(/\s+/g, '_')
+      }
+    }
     // jump uses target_system, not destination/target/target_poi
     if ((bare === 'jump' || bare.endsWith('_jump')) && !commandArgs.target_system) {
       if (commandArgs.destination) { commandArgs.target_system = commandArgs.destination; delete commandArgs.destination }
@@ -193,6 +200,16 @@ export async function executeTool(
       if (commandArgs.destination) { commandArgs.target_system = commandArgs.destination; delete commandArgs.destination }
       else if (commandArgs.target) { commandArgs.target_system = commandArgs.target; delete commandArgs.target }
       else if (commandArgs.text) { commandArgs.target_system = commandArgs.text; delete commandArgs.text }
+    }
+    // find_route / jump: auto-fix station names passed as system names
+    // e.g. "Grand Exchange Station" → "haven", "Starfall Salvage Station" → "starfall"
+    if (bare === 'find_route' || bare.endsWith('_find_route') || bare === 'jump' || bare.endsWith('_jump')) {
+      const ts = String(commandArgs.target_system || '')
+      if (ts && /station|exchange|colony|outpost|hub|depot|citadel|nexus|resort/i.test(ts)) {
+        // Strip common station suffixes to extract likely system name
+        const cleaned = ts.replace(/\s*(station|exchange|colony|outpost|hub|depot|citadel|nexus|resort|salvage|mining|industrial|colonial|processing|freight|research)\s*/gi, ' ').trim().replace(/\s+/g, '_').toLowerCase()
+        commandArgs.target_system = cleaned
+      }
     }
     // search_systems uses query, not text
     if ((bare === 'search_systems' || bare.endsWith('_search_systems')) && !commandArgs.query && commandArgs.text) {
@@ -221,10 +238,34 @@ export async function executeTool(
       const CHANNEL_FIX: Record<string, string> = { 'global': 'system', 'general': 'system', 'local': 'system', 'faction': 'faction', 'trade': 'trading', 'help': 'system' }
       if (ch && CHANNEL_FIX[ch]) { commandArgs.channel = CHANNEL_FIX[ch] }
     }
+    // scan/attack: agents send target_id but v2 API expects id
+    if (bare === 'scan' || bare === 'attack') {
+      if (commandArgs.target_id && !commandArgs.id) { commandArgs.id = commandArgs.target_id; delete commandArgs.target_id }
+      if (commandArgs.target && !commandArgs.id) { commandArgs.id = commandArgs.target; delete commandArgs.target }
+    }
+    // Strip empty-string values from args — they cause invalid_target/invalid_payload errors
+    for (const key of Object.keys(commandArgs)) {
+      if (commandArgs[key] === '' || commandArgs[key] === null || commandArgs[key] === undefined) {
+        delete commandArgs[key]
+      }
+    }
+  }
+
+  // Normalize: strip spacemolt_ prefix from direct command names so http_v2 route map finds them.
+  // e.g. "spacemolt_browse_ships" → "browse_ships", "spacemolt_catalog" → "catalog"
+  // Grouped v2 names like "spacemolt_market_view_market" are already handled by the route map.
+  if (command.startsWith('spacemolt_')) {
+    command = command.slice('spacemolt_'.length)
+  }
+
+  // scan() with no target = agent wants to see nearby entities → redirect to get_nearby
+  // scan REQUIRES a target_id/id; there is no "area scan" mode
+  if ((command === 'scan' || command.endsWith('_scan')) && !commandArgs) {
+    command = 'get_nearby'
   }
 
   // Redirect deprecated commands
-  const bareFinal = command.replace(/^spacemolt_/, '')
+  const bareFinal = command
   if (bareFinal === 'get_ships' || bareFinal.endsWith('_get_ships')) {
     command = command.replace('get_ships', 'browse_ships')
   }
@@ -288,7 +329,51 @@ export async function executeTool(
     const resp = await ctx.connection.execute(command, commandArgs && Object.keys(commandArgs).length > 0 ? commandArgs : undefined)
 
     if (resp.error) {
-      const errMsg = `Error: [${resp.error.code}] ${resp.error.message}`
+      let errMsg = `Error: [${resp.error.code}] ${resp.error.message}`
+
+      // Augment common errors with actionable hints to reduce wasted turns
+      const errCode = resp.error.code
+      if (errCode === 'invalid_poi') {
+        const target = commandArgs?.target_poi || commandArgs?.target || ''
+        const snaked = String(target).toLowerCase().replace(/\s+/g, '_')
+        const snakeHint = target !== snaked ? ` POI names use snake_case format (e.g. "${snaked}").` : ''
+        errMsg += `\n\n💡 HINT: "${target}" was not found as a POI at your current location.${snakeHint} Use get_poi() to see available POIs here. If "${target}" is a star system (not a POI), use jump(target_system="${snaked}") instead of travel().`
+      }
+      if (errCode === 'not_connected') {
+        // Agent tried to jump to a non-adjacent system — suggest find_route
+        const target = commandArgs?.target_system || commandArgs?.target || ''
+        errMsg += `\n\n💡 HINT: "${target}" is not adjacent to your current system. Use find_route(target_system="${target}") first to get a step-by-step route, then jump along each hop.`
+      }
+      if (errCode === 'unknown_command') {
+        errMsg += `\n\n💡 HINT: Use help() to see all available commands, or catalog() to browse game data.`
+      }
+      if (errCode === 'not_docked') {
+        errMsg += `\n\n💡 HINT: You must be docked at a station for this action. Use get_poi() to check if your current location has a base, then dock() to dock. If there's no base here, travel(target_poi="...") to a station POI first.`
+      }
+      if (errCode === 'invalid_channel') {
+        errMsg += `\n\n💡 HINT: Valid chat channels are: "system" (all players in system), "local" (players at your POI), "faction" (faction members), "private" (DM — requires target_id). There is no "global", "general", or "trade" channel.`
+      }
+      if (errCode === 'system_not_found') {
+        const target = commandArgs?.target_system || commandArgs?.target || ''
+        errMsg += `\n\n💡 HINT: "${target}" was not found as a system name. If you used a station name (e.g. "Grand Exchange Station"), use the system name instead (e.g. "haven"). Use search_systems(query="...") to find the correct system name.`
+      }
+      if (errCode === 'invalid_target') {
+        const target = commandArgs?.target_id || commandArgs?.target || ''
+        if (!target && (deepBare === 'scan' || deepBare === 'attack')) {
+          errMsg += `\n\n💡 HINT: ${deepBare}() requires a target_id. Use get_nearby() first to see players/NPCs at your location, then ${deepBare}(target_id="their_id").`
+        } else {
+          errMsg += `\n\n💡 HINT: Target "${target}" is not at your current location. Use get_nearby() to see who is here. The target may have left or you may have the wrong ID.`
+        }
+      }
+      if (errCode === 'invalid_type') {
+        errMsg += `\n\n💡 HINT: Valid catalog types are: "ships", "skills", "recipes", "items". Use catalog(type="items") for materials/resources, catalog(type="recipes") for crafting recipes.`
+      }
+      if (errCode === 'invalid_payload') {
+        if (deepBare === 'view_market' || deepBare === 'market_view_market') {
+          errMsg += `\n\n💡 HINT: view_market accepts only "item_id" and "category" parameters. There is no "scope" or "search" parameter. Use catalog(search="...", type="items") to search items first, then view_market(item_id="exact_id") to see market data. For galaxy-wide trade intel, use intel_query_trade_intel(item_id="...").`
+        }
+      }
+
       ctx.log('tool_result', errMsg)
       return errMsg
     }

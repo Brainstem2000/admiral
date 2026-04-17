@@ -68,8 +68,10 @@ export async function refreshBriefingData(profileId: string, conn: GameConnectio
 
   // Fetch market only if docked
   const player = cache.status?.player as Record<string, unknown> | undefined
+  const location = cache.status?.location as Record<string, unknown> | undefined
   const isDocked = player?.docked === true || player?.is_docked === true
     || (cache.status as Record<string, unknown>)?.docked === true
+    || Boolean(location?.docked_at)
   if (isDocked) {
     const marketRaw = await safeQuery(conn, 'view_market')
     if (marketRaw && typeof marketRaw === 'object') {
@@ -153,6 +155,7 @@ export function buildSituationalBriefing(profileId: string): string {
   const shield = ship?.shield ?? gs.shield
   const credits = player?.credits ?? gs.credits ?? 0
   const isDocked = player?.docked === true || player?.is_docked === true || gs.docked === true
+    || Boolean(location?.docked_at)
 
   lines.push(`** STATUS: ${isDocked ? 'DOCKED at ' + (poiName || systemName) : 'IN SPACE (not docked — cannot trade/market/storage/missions)'} **`)
   lines.push(`Location: ${systemName}${poiName ? ' > ' + poiName : ''}`)
