@@ -50,9 +50,11 @@ export async function resolveModel(modelStr: string): Promise<{ model: Model<any
       // Fall through
     }
 
-    // Fallback: create model from first Anthropic model as template
+    // Fallback: newer Anthropic models (e.g. the latest Opus) may not be in the
+    // pinned pi-ai registry yet. Clone the most capable known model as a template
+    // (highest maxTokens) so the unknown id doesn't inherit a small output cap.
     if (anthropicModels.length > 0) {
-      const base = anthropicModels[0]
+      const base = anthropicModels.reduce((best, m) => (m.maxTokens > best.maxTokens ? m : best))
       const model: Model<any> = { ...base, id: rawModelId, name: rawModelId }
       return { model, apiKey }
     }

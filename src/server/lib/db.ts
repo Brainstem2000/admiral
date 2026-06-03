@@ -27,7 +27,15 @@ export function getDb(): Database {
     }
   }
 
-  fs.mkdirSync(DB_DIR, { recursive: true })
+  // Bun on Windows can throw EEXIST from mkdirSync even with { recursive: true }
+  // when the directory already exists (observed on OneDrive-backed paths), where
+  // Node/POSIX would treat it as a no-op. Tolerate that so boots after the first
+  // one don't crash; only a genuine creation failure should propagate.
+  try {
+    fs.mkdirSync(DB_DIR, { recursive: true })
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err
+  }
   db = new Database(DB_PATH)
   // The database holds plaintext secrets (SpaceMolt passwords, LLM API keys).
   // Restrict perms so other local users can't read it. Best-effort (no-op on

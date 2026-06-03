@@ -18,6 +18,25 @@ const LOCAL_DEFAULTS: Record<string, string> = {
   lmstudio: `http://${LOCALHOST}:1234`,
 }
 
+// Newest Anthropic models that may be missing from the pinned pi-ai registry.
+// pi-ai's registry version lags behind Anthropic's releases, so surface the
+// latest Opus IDs explicitly. resolveModel() in lib/model.ts resolves any id
+// not in the registry by cloning the most capable known model as a template,
+// so these stay usable even before pi-ai catches up. Newest first.
+const EXTRA_ANTHROPIC_MODEL_IDS = [
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+]
+
+// Anthropic has no live models endpoint — use the pi-ai registry plus the
+// hand-maintained list of newer IDs above. Shared by the claude-max and
+// anthropic provider paths.
+function anthropicModelIds(): string[] {
+  const ids = new Set(getModels('anthropic' as KnownProvider).map(m => m.id))
+  for (const id of EXTRA_ANTHROPIC_MODEL_IDS) ids.add(id)
+  return [...ids].sort()
+}
+
 const models = new Hono()
 
 models.get('/', async (c) => {
@@ -49,8 +68,7 @@ async function fetchModelsForProvider(providerId: string): Promise<string[]> {
 
   // claude-max uses Anthropic models via OAuth
   if (providerId === 'claude-max') {
-    const piModels = getModels('anthropic' as KnownProvider)
-    return piModels.map(m => m.id).sort()
+    return anthropicModelIds()
   }
 
   // Custom provider - try to fetch from configured base_url
@@ -70,7 +88,12 @@ async function fetchModelsForProvider(providerId: string): Promise<string[]> {
   }
 
   // Anthropic doesn't have a models list endpoint - use pi-ai registry
-  // Also fallback for any provider without live API results
+  // (augmented with the newest Opus IDs above).
+  if (providerId === 'anthropic') {
+    return anthropicModelIds()
+  }
+
+  // Fallback for any other known provider without live API results
   const knownProviders = getProviders()
   if (knownProviders.includes(providerId as KnownProvider)) {
     const piModels = getModels(providerId as KnownProvider)
