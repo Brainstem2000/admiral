@@ -81,12 +81,40 @@ export function AnalyticsPane({ profiles, statuses }: Props) {
   )
 }
 
+// ---- Profile filter (shared by Timeline + Comms) ----
+
+/**
+ * Selected-profiles filter that stays in sync as profiles load/are added.
+ * Profiles often arrive after first render (Dashboard polls async), so a filter
+ * snapshotted once at mount would permanently hide late-arriving agents' events.
+ * New profile ids default to selected; user deselections are preserved.
+ */
+function useProfileFilter(profiles: Profile[]) {
+  const [filterProfiles, setFilterProfiles] = useState<Set<string>>(() => new Set(profiles.map(p => p.id)))
+  const known = useRef<Set<string>>(new Set(profiles.map(p => p.id)))
+  useEffect(() => {
+    setFilterProfiles(prev => {
+      const next = new Set(prev)
+      let changed = false
+      for (const p of profiles) {
+        if (!known.current.has(p.id)) {
+          known.current.add(p.id)
+          next.add(p.id)
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [profiles])
+  return [filterProfiles, setFilterProfiles] as const
+}
+
 // ---- Timeline Tab ----
 
 function TimelineTab({ profiles, statuses }: { profiles: Profile[]; statuses: Record<string, { connected: boolean; running: boolean }> }) {
   const [entries, setEntries] = useState<LogEntry[]>([])
   const [autoScroll, setAutoScroll] = useState(true)
-  const [filterProfiles, setFilterProfiles] = useState<Set<string>>(() => new Set(profiles.map(p => p.id)))
+  const [filterProfiles, setFilterProfiles] = useProfileFilter(profiles)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const profileMap = useMemo(() => {
@@ -113,12 +141,12 @@ function TimelineTab({ profiles, statuses }: { profiles: Profile[]; statuses: Re
     return () => es.close()
   }, [])
 
-  const filtered = useMemo(() =>
-    filterProfiles.size === profiles.length
-      ? entries
-      : entries.filter(e => filterProfiles.has(e.profile_id)),
-    [entries, filterProfiles, profiles.length]
-  )
+  const filtered = useMemo(() => {
+    // "All selected" = every current profile is in the set (robust to stale ids
+    // left over from deleted profiles, unlike a size comparison).
+    const allSelected = profiles.every(p => filterProfiles.has(p.id))
+    return allSelected ? entries : entries.filter(e => filterProfiles.has(e.profile_id))
+  }, [entries, filterProfiles, profiles])
 
   const virtualizer = useVirtualizer({
     count: filtered.length,
@@ -311,7 +339,7 @@ const CHANNEL_COLORS: Record<string, string> = {
 function CommsTab({ profiles, statuses }: { profiles: Profile[]; statuses: Record<string, { connected: boolean; running: boolean }> }) {
   const [messages, setMessages] = useState<CommsMessage[]>([])
   const [autoScroll, setAutoScroll] = useState(true)
-  const [filterProfiles, setFilterProfiles] = useState<Set<string>>(() => new Set(profiles.map(p => p.id)))
+  const [filterProfiles, setFilterProfiles] = useProfileFilter(profiles)
   const [filterChannels, setFilterChannels] = useState<Set<string>>(new Set())
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -924,7 +952,7 @@ const CRON_PRESETS = [
   { label: 'Every hour', cron: '0 * * * *' },
   { label: 'Every 6 hours', cron: '0 */6 * * *' },
   { label: 'Daily 8am', cron: '0 8 * * *' },
-  { label: 'Daily 8am-11pm', cron: '0 8 * * *' },
+  { label: 'Hourly 8am-11pm', cron: '0 8-23 * * *' },
   { label: 'Weekdays 9am', cron: '0 9 * * 1-5' },
   { label: 'Custom', cron: '' },
 ]

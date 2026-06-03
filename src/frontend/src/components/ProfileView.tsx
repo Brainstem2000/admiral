@@ -175,7 +175,12 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
     }
   }, [editing])
 
-  // Sync directive when profile changes (but not if user has an unsaved draft)
+  // Restore state when SWITCHING profiles: reopen the editor on an unsaved draft,
+  // otherwise seed the value from the current directive. Deliberately keyed on
+  // profile.id only — keying on profile.directive too made the 5s status poll
+  // re-fire this and re-open the modal while the user was doing something else.
+  // (directiveValue is only read inside the modal, and the open button re-reads
+  // the draft/directive, so there's nothing to sync on directive change.)
   useEffect(() => {
     const draftKey = `admiral-directive-draft-${profile.id}`
     try {
@@ -187,7 +192,8 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       }
     } catch { /* ignore */ }
     setDirectiveValue(profile.directive || '')
-  }, [profile.id, profile.directive])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile.id])
 
   function clearDirectiveDraft() {
     try { localStorage.removeItem(`admiral-directive-draft-${profile.id}`) } catch { /* ignore */ }

@@ -4,6 +4,7 @@ import { getProfile, addLogEntry } from './db'
 const BACKOFF_BASE = 5_000      // 5 seconds
 const BACKOFF_MAX = 5 * 60_000  // 5 minutes
 const BACKOFF_RESET = 60_000    // Reset backoff after 1 min of successful running
+const MAX_RESTART_ATTEMPTS = 15 // Give up auto-restarting after this many consecutive failures
 
 type SlimGameState = {
   credits?: unknown
@@ -134,6 +135,19 @@ class AgentManager {
     }
 
     bo.attempts++
+
+    // Give up after too many consecutive failures so a permanently-broken
+    // profile (bad server URL, invalid credentials) doesn't retry forever,
+    // creating Agent objects every few minutes. The counter resets after a
+    // minute of stable running (see BACKOFF_RESET above).
+    if (bo.attempts > MAX_RESTART_ATTEMPTS) {
+      addLogEntry(profileId, 'error', `Auto-restart gave up after ${MAX_RESTART_ATTEMPTS} consecutive failures. Reconnect manually to resume.`)
+      this.resetBackoff(profileId)
+      void this.agents.get(profileId)?.stop()
+      this.agents.delete(profileId)
+      return
+    }
+
     const delay = Math.min(BACKOFF_BASE * Math.pow(2, bo.attempts - 1), BACKOFF_MAX)
     this.backoff.set(profileId, bo)
 
