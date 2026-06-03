@@ -102,7 +102,8 @@ class AgentManager {
     const loopStarted = Date.now()
     agent.startLLMLoop().then(() => {
       this.handleLoopExit(profileId, loopStarted)
-    }).catch(() => {
+    }).catch((err) => {
+      addLogEntry(profileId, 'error', `LLM loop error: ${err instanceof Error ? err.message : String(err)}`)
       this.handleLoopExit(profileId, loopStarted)
     })
   }
@@ -169,7 +170,8 @@ class AgentManager {
           const restartedAt = Date.now()
           agent.startLLMLoop().then(() => {
             this.handleLoopExit(profileId, restartedAt)
-          }).catch(() => {
+          }).catch((err) => {
+            addLogEntry(profileId, 'error', `LLM loop error: ${err instanceof Error ? err.message : String(err)}`)
             this.handleLoopExit(profileId, restartedAt)
           })
         }

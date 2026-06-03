@@ -184,7 +184,6 @@ export class Agent {
     if (!profile.provider || !profile.model) throw new Error('No LLM provider/model configured')
     if (!this.connection) throw new Error('Not connected')
 
-    this.running = true
     this._sessionExpired = false
     this.abortController = new AbortController()
 
@@ -243,6 +242,14 @@ export class Agent {
     let cachedPromptDirective = profile.directive || ''
     let cachedPromptMemory = profile.memory || ''
     let cachedPromptBriefing = buildSituationalBriefing(this.profileId)
+
+    // Only mark the loop running once startup (model resolution, command
+    // discovery) has succeeded. If that setup throws, `running` stays false so
+    // the loop isn't left a zombie — agent-manager's auto-restart guards on
+    // !isRunning and would otherwise skip the agent forever, stranding it
+    // silently "idle". The abort check covers a stop() during startup.
+    if (this.abortController.signal.aborted) { this.setActivity('idle'); return }
+    this.running = true
 
     while (this.running) {
       // Check session duration limit
