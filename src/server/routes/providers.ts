@@ -44,7 +44,7 @@ providers.put('/', async (c) => {
       status = resp.ok ? 'valid' : 'unreachable'
     } catch { status = 'unreachable' }
   } else if (effectiveKey) {
-    status = (await validateApiKey(id, effectiveKey)) ? 'valid' : 'invalid'
+    status = await validateApiKey(id, effectiveKey)
   }
 
   upsertProvider(id, effectiveKey, base_url || '', status)

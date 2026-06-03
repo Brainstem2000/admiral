@@ -11,6 +11,32 @@ function sanitizeProfile<T extends { password?: string | null }>(p: T): Omit<T, 
   return { ...rest, has_password: !!password }
 }
 
+const CONNECTION_MODES = new Set(['http', 'http_v2', 'websocket', 'mcp', 'mcp_v2'])
+
+/**
+ * Validate the numeric/enum fields that drive scheduler and LLM-loop logic.
+ * Returns an error message, or null if the (present) fields are well-formed.
+ * Absent fields are ignored so partial updates stay valid.
+ */
+function validateProfileInput(body: Record<string, unknown>): string | null {
+  if (body.planning_interval != null) {
+    const v = body.planning_interval
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
+      return 'planning_interval must be a positive integer'
+    }
+  }
+  if (body.context_budget != null) {
+    const v = body.context_budget
+    if (typeof v !== 'number' || !(v > 0 && v <= 1)) {
+      return 'context_budget must be a number between 0 and 1'
+    }
+  }
+  if (body.connection_mode != null && !CONNECTION_MODES.has(body.connection_mode as string)) {
+    return `connection_mode must be one of: ${[...CONNECTION_MODES].join(', ')}`
+  }
+  return null
+}
+
 // GET /api/profiles
 profiles.get('/', (c) => {
   const all = listProfiles()
@@ -31,6 +57,8 @@ profiles.post('/', async (c) => {
   const body = await c.req.json()
   const { name, username, password, empire, provider, model, planner_provider, planner_model, planning_interval, directive, connection_mode, server_url, context_budget } = body
   if (!name) return c.json({ error: 'Name is required' }, 400)
+  const inputError = validateProfileInput(body)
+  if (inputError) return c.json({ error: inputError }, 400)
   try {
     const profile = createProfile({
       id: crypto.randomUUID(),
@@ -84,6 +112,8 @@ profiles.get('/:id', (c) => {
 profiles.put('/:id', async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json()
+  const inputError = validateProfileInput(body)
+  if (inputError) return c.json({ error: inputError }, 400)
   // An empty/absent password means "keep the existing one" — the UI never
   // receives the stored password, so it cannot echo it back on save.
   if (body.password == null || body.password === '') delete body.password

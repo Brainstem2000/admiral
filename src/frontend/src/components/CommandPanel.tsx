@@ -126,10 +126,10 @@ export function CommandPanel({ profileId, onSend, disabled, commandInputRef, ser
     return scored.slice(0, 12).map(s => s.cmd)
   }, [command, commands])
 
-  // Selected command info (exact match)
+  // Selected command info (exact match, case-insensitive on both sides)
   const selectedCommand = useMemo(() => {
     const q = command.trim().toLowerCase()
-    return commands.find(c => c.name === q) ?? null
+    return commands.find(c => c.name.toLowerCase() === q) ?? null
   }, [command, commands])
 
   // Close autocomplete on outside click

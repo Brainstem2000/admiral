@@ -77,6 +77,7 @@ export class Agent {
   }
 
   private _cachedFactionId: string | null = null
+  private _factionFetchInFlight = false
 
   private cacheGameState(result: CommandResult): void {
     const data = result.structuredContent ?? result.result
@@ -96,20 +97,26 @@ export class Agent {
     }
     // Already enriched for this faction
     if (factionId === this._cachedFactionId && player._faction_name) return
+    // Don't stack concurrent lookups: get_status polls arrive faster than this
+    // request resolves, so without a guard we'd fire one per poll.
+    if (this._factionFetchInFlight) return
+    this._factionFetchInFlight = true
     // Fetch faction_info in background to get name/tag
     this.connection?.execute('faction_info').then(resp => {
       const info = resp.structuredContent ?? resp.result
       if (info && typeof info === 'object') {
         const fi = info as Record<string, unknown>
-        // Inject into cached player data
+        // Write onto the CURRENT player, but only if it's still the same faction.
+        // A newer get_status may have replaced _gameState while this was in
+        // flight; without the re-check we'd stamp stale faction data onto it.
         const p = this._gameState?.player as Record<string, unknown> | undefined
-        if (p) {
+        if (p && (p.faction_id as string | undefined) === factionId) {
           p._faction_name = fi.name || null
           p._faction_tag = fi.tag || null
           this._cachedFactionId = factionId
         }
       }
-    }).catch(() => {})
+    }).catch(() => {}).finally(() => { this._factionFetchInFlight = false })
   }
 
   private log: LogFn = (type, summary, detail?) => {
