@@ -3,6 +3,9 @@ export interface Provider {
   api_key: string
   base_url: string
   status: 'valid' | 'invalid' | 'unknown' | 'unreachable'
+  // Set on API responses instead of api_key: true when a key is stored.
+  // The raw key is never sent to the client.
+  has_key?: boolean
 }
 
 export interface Profile {
@@ -29,6 +32,9 @@ export interface Profile {
   group_name: string
   created_at: string
   updated_at: string
+  // Set on API responses instead of password: true when a password is stored.
+  // The raw password is never sent to the client.
+  has_password?: boolean
 }
 
 export interface LogEntry {

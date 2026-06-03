@@ -4,6 +4,39 @@ import { agentManager } from '../lib/agent-manager'
 
 const profiles = new Hono()
 
+// Never send the stored SpaceMolt password to the client. Expose has_password so
+// the UI can indicate a password is set without leaking it.
+function sanitizeProfile<T extends { password?: string | null }>(p: T): Omit<T, 'password'> & { has_password: boolean } {
+  const { password, ...rest } = p
+  return { ...rest, has_password: !!password }
+}
+
+const CONNECTION_MODES = new Set(['http', 'http_v2', 'websocket', 'mcp', 'mcp_v2'])
+
+/**
+ * Validate the numeric/enum fields that drive scheduler and LLM-loop logic.
+ * Returns an error message, or null if the (present) fields are well-formed.
+ * Absent fields are ignored so partial updates stay valid.
+ */
+function validateProfileInput(body: Record<string, unknown>): string | null {
+  if (body.planning_interval != null) {
+    const v = body.planning_interval
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
+      return 'planning_interval must be a positive integer'
+    }
+  }
+  if (body.context_budget != null) {
+    const v = body.context_budget
+    if (typeof v !== 'number' || !(v > 0 && v <= 1)) {
+      return 'context_budget must be a number between 0 and 1'
+    }
+  }
+  if (body.connection_mode != null && !CONNECTION_MODES.has(body.connection_mode as string)) {
+    return `connection_mode must be one of: ${[...CONNECTION_MODES].join(', ')}`
+  }
+  return null
+}
+
 // GET /api/profiles
 profiles.get('/', (c) => {
   const all = listProfiles()
@@ -15,7 +48,7 @@ profiles.get('/', (c) => {
       updateProfile(p.id, { group_name: liveFaction })
       p.group_name = liveFaction
     }
-    return { ...p, ...status }
+    return sanitizeProfile({ ...p, ...status })
   }))
 })
 
@@ -24,6 +57,8 @@ profiles.post('/', async (c) => {
   const body = await c.req.json()
   const { name, username, password, empire, provider, model, planner_provider, planner_model, planning_interval, directive, connection_mode, server_url, context_budget } = body
   if (!name) return c.json({ error: 'Name is required' }, 400)
+  const inputError = validateProfileInput(body)
+  if (inputError) return c.json({ error: inputError }, 400)
   try {
     const profile = createProfile({
       id: crypto.randomUUID(),
@@ -48,7 +83,7 @@ profiles.post('/', async (c) => {
       sort_order: body.sort_order ?? listProfiles().length,
       group_name: body.group_name || '',
     })
-    return c.json(profile, 201)
+    return c.json(sanitizeProfile(profile), 201)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('UNIQUE constraint')) return c.json({ error: 'A profile with that name already exists' }, 409)
@@ -70,17 +105,22 @@ profiles.get('/:id', (c) => {
   const profile = getProfile(c.req.param('id'))
   if (!profile) return c.json({ error: 'Not found' }, 404)
   const status = agentManager.getStatus(c.req.param('id'))
-  return c.json({ ...profile, ...status })
+  return c.json(sanitizeProfile({ ...profile, ...status }))
 })
 
 // PUT /api/profiles/:id
 profiles.put('/:id', async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json()
+  const inputError = validateProfileInput(body)
+  if (inputError) return c.json({ error: inputError }, 400)
+  // An empty/absent password means "keep the existing one" — the UI never
+  // receives the stored password, so it cannot echo it back on save.
+  if (body.password == null || body.password === '') delete body.password
   const profile = updateProfile(id, body)
   if (!profile) return c.json({ error: 'Not found' }, 404)
   if (body.directive !== undefined) agentManager.restartTurn(id)
-  return c.json(profile)
+  return c.json(sanitizeProfile(profile))
 })
 
 // DELETE /api/profiles/:id

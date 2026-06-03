@@ -134,7 +134,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   const popoverRef = useRef<HTMLDivElement>(null)
 
   const isManual = !profile.provider || profile.provider === 'manual' || !profile.model
-  const availableProviders = ['manual', ...providers.filter(p => p.status === 'valid' || p.api_key).map(p => p.id)]
+  const availableProviders = ['manual', ...providers.filter(p => p.status === 'valid' || p.has_key).map(p => p.id)]
 
   // Auto-open name edit for new profiles
   useEffect(() => {
@@ -175,7 +175,12 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
     }
   }, [editing])
 
-  // Sync directive when profile changes (but not if user has an unsaved draft)
+  // Restore state when SWITCHING profiles: reopen the editor on an unsaved draft,
+  // otherwise seed the value from the current directive. Deliberately keyed on
+  // profile.id only — keying on profile.directive too made the 5s status poll
+  // re-fire this and re-open the modal while the user was doing something else.
+  // (directiveValue is only read inside the modal, and the open button re-reads
+  // the draft/directive, so there's nothing to sync on directive change.)
   useEffect(() => {
     const draftKey = `admiral-directive-draft-${profile.id}`
     try {
@@ -187,7 +192,8 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       }
     } catch { /* ignore */ }
     setDirectiveValue(profile.directive || '')
-  }, [profile.id, profile.directive])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile.id])
 
   function clearDirectiveDraft() {
     try { localStorage.removeItem(`admiral-directive-draft-${profile.id}`) } catch { /* ignore */ }
@@ -600,7 +606,9 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
             onClick={() => {
               setEditing('credentials')
               setEditUsername(profile.username || '')
-              setEditPassword(profile.password || '')
+              // The stored password is never sent to the client; start blank and
+              // leave blank to keep the existing one.
+              setEditPassword('')
             }}
           >
             {profile.username ? `@${profile.username}` : '@credentials'}
@@ -628,7 +636,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
                     type="password"
                     value={editPassword}
                     onChange={e => setEditPassword(e.target.value)}
-                    placeholder="256-bit hex"
+                    placeholder={profile.has_password ? '•••••••• saved — leave blank to keep' : '256-bit hex'}
                     className="h-7 text-xs"
                     onKeyDown={e => {
                       if (e.key === 'Enter') handleSaveCredentials()

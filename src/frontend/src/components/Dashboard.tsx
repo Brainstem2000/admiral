@@ -177,7 +177,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     return { totalWallet: wallet, totalStorage: storage, activeWallet: aWallet, activeStorage: aStorage }
   }, [profiles, playerDataMap, activeId])
 
-  const hasValidProvider = providers.some(p => p.status === 'valid' || p.api_key)
+  const hasValidProvider = providers.some(p => p.status === 'valid' || p.has_key)
 
   return (
     <div className="flex flex-col h-screen">

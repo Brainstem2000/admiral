@@ -3,6 +3,7 @@ import { USER_AGENT } from './interface'
 
 const MAX_RECONNECT_ATTEMPTS = 6
 const RECONNECT_BASE_DELAY = 5_000
+const MAX_RATE_LIMIT_RETRIES = 5
 
 interface ApiSession {
   id: string
@@ -66,7 +67,7 @@ export class HttpConnection implements GameConnection {
     }
   }
 
-  async execute(command: string, args?: Record<string, unknown>): Promise<CommandResult> {
+  async execute(command: string, args?: Record<string, unknown>, attempt = 0): Promise<CommandResult> {
     try {
       await this.ensureSession()
     } catch {
@@ -89,9 +90,12 @@ export class HttpConnection implements GameConnection {
     if (resp.error) {
       const code = resp.error.code
       if (code === 'rate_limited') {
+        // Cap retries so a server stuck returning rate_limited can't hang the
+        // turn in unbounded recursion; surface the error instead.
+        if (attempt >= MAX_RATE_LIMIT_RETRIES) return resp
         const secs = resp.error.retry_after || 10
         await sleep(Math.ceil(secs * 1000))
-        return this.execute(command, args)
+        return this.execute(command, args, attempt + 1)
       }
       if (code === 'session_invalid' || code === 'session_expired' || code === 'not_authenticated') {
         this.session = null
@@ -119,6 +123,7 @@ export class HttpConnection implements GameConnection {
   async disconnect(): Promise<void> {
     this.session = null
     this.connected = false
+    this.notificationHandlers = []
   }
 
   isConnected(): boolean {

@@ -4,7 +4,7 @@ import {
   listEventTriggers, upsertEventTrigger, deleteEventTrigger,
   getFleetOrders, deleteFleetOrder,
 } from '../lib/db'
-import { nextCronTime } from '../lib/scheduler'
+import { nextCronTime, validateCronExpression } from '../lib/scheduler'
 
 const schedules = new Hono()
 
@@ -23,10 +23,11 @@ schedules.post('/', async (c) => {
     return c.json({ error: 'profile_id and cron are required' }, 400)
   }
 
-  // Validate cron
-  const parts = cron.trim().split(/\s+/)
-  if (parts.length !== 5) {
-    return c.json({ error: 'cron must be a 5-field expression (min hour dom mon dow)' }, 400)
+  // Validate cron — reject invalid expressions up front rather than silently
+  // storing a schedule that can never match and never fires.
+  const cronError = validateCronExpression(cron)
+  if (cronError) {
+    return c.json({ error: cronError }, 400)
   }
 
   const id = body.id || crypto.randomUUID()

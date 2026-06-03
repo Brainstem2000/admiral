@@ -38,6 +38,32 @@ function parseCronField(field: string, min: number, max: number): Set<number> {
   return values
 }
 
+// Field ranges for the 5 cron positions: minute, hour, day-of-month, month, day-of-week.
+const CRON_FIELD_RANGES: [number, number][] = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]]
+
+/**
+ * Validate a 5-field cron expression. Returns an error message, or null if valid.
+ * Catches the silent-failure case where a non-numeric field (e.g. "abc") parses
+ * to NaN, producing a set that never matches so the schedule never fires.
+ */
+export function validateCronExpression(cron: string): string | null {
+  const parts = cron.trim().split(/\s+/)
+  if (parts.length !== 5) {
+    return 'Cron must be a 5-field expression: minute hour day-of-month month day-of-week'
+  }
+  for (let i = 0; i < 5; i++) {
+    const [min, max] = CRON_FIELD_RANGES[i]
+    const set = parseCronField(parts[i], min, max)
+    if (set.size === 0) return `Invalid cron field: "${parts[i]}"`
+    for (const v of set) {
+      if (!Number.isInteger(v) || v < min || v > max) {
+        return `Cron field "${parts[i]}" has an out-of-range or invalid value`
+      }
+    }
+  }
+  return null
+}
+
 function cronMatches(cron: string, date: Date): boolean {
   const parts = cron.trim().split(/\s+/)
   if (parts.length !== 5) return false

@@ -45,7 +45,12 @@ function writeCredentialsFile(creds: ClaudeOAuthCredentials): void {
   try {
     const existing = readCredentialsFile() || { claudeAiOauth: {} }
     existing.claudeAiOauth = creds
-    fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(existing), 'utf-8')
+    // Write atomically (temp file + rename) with owner-only perms so a crash
+    // mid-write can't corrupt Claude Code's real credential file, and the
+    // refresh token isn't left world-readable.
+    const tmp = `${CREDENTIALS_PATH}.${process.pid}.tmp`
+    fs.writeFileSync(tmp, JSON.stringify(existing), { encoding: 'utf-8', mode: 0o600 })
+    fs.renameSync(tmp, CREDENTIALS_PATH)
   } catch {
     // Best-effort — don't crash if we can't write back
   }

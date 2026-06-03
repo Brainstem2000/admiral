@@ -59,6 +59,12 @@ export class McpV2Connection implements GameConnection {
     const result = resp.result as { tools?: unknown[] }
     if (!Array.isArray(result.tools)) return
 
+    // Reset first: connect() runs this again on session-expiry reconnect, and
+    // without clearing, v2Tools would accumulate duplicate entries (inflating
+    // the command list / tool count) on every reconnect.
+    this.v2Tools = []
+    this.actionToTool.clear()
+
     for (const tool of result.tools) {
       const t = tool as Record<string, unknown>
       const name = t.name as string
@@ -118,7 +124,7 @@ export class McpV2Connection implements GameConnection {
     }
   }
 
-  async execute(command: string, args?: Record<string, unknown>): Promise<CommandResult> {
+  async execute(command: string, args?: Record<string, unknown>, retried = false): Promise<CommandResult> {
     let toolName = this.actionToTool.get(command)
     let toolArgs: Record<string, unknown>
 
@@ -153,13 +159,15 @@ export class McpV2Connection implements GameConnection {
 
     const { parsed: result, structured: structuredContent } = this.parseToolResult(resp.result)
 
-    // Re-initialize on session expiry and retry once
+    // Re-initialize on session expiry and retry exactly once. The guard prevents
+    // unbounded recursion (and re-executing a game mutation more than twice) when
+    // the server keeps reporting the session invalid.
     const errCode = (result?.error as Record<string, unknown> | undefined)?.code
-    if (errCode === 'session_expired' || errCode === 'session_invalid') {
+    if ((errCode === 'session_expired' || errCode === 'session_invalid') && !retried) {
       this.sessionId = null
       this.connected = false
       await this.connect()
-      return this.execute(command, args)
+      return this.execute(command, args, true)
     }
 
     // Poll notifications at a bounded cadence to avoid an extra RPC per command.
@@ -246,6 +254,7 @@ export class McpV2Connection implements GameConnection {
     this.sessionId = null
     this.connected = false
     this.lastNotificationPollAt = 0
+    this.notificationHandlers = []
   }
 
   isConnected(): boolean {

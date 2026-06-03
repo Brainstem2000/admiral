@@ -65,10 +65,27 @@ export async function detectLocalProviders(customUrls?: Record<string, string>):
   return results
 }
 
+export type KeyValidationStatus = 'valid' | 'invalid' | 'unknown'
+
 /**
- * Validate a cloud API key by making a lightweight API call.
+ * Classify an HTTP response from a key-check call:
+ *  - 401/403  -> the key was rejected -> invalid
+ *  - 200/400  -> the request was authenticated and processed -> valid
+ *               (400 = our throwaway probe body was malformed, but auth passed)
+ *  - anything else (5xx, 429, etc.) -> the key wasn't actually judged -> unknown
  */
-export async function validateApiKey(provider: string, apiKey: string): Promise<boolean> {
+function classifyStatus(status: number): KeyValidationStatus {
+  if (status === 401 || status === 403) return 'invalid'
+  if (status === 200 || status === 400) return 'valid'
+  return 'unknown'
+}
+
+/**
+ * Validate a cloud API key by making a lightweight API call. Returns a
+ * tri-state: a server/network error (5xx, timeout, rate limit) yields 'unknown'
+ * rather than mislabeling the key as valid or invalid.
+ */
+export async function validateApiKey(provider: string, apiKey: string): Promise<KeyValidationStatus> {
   try {
     switch (provider) {
       case 'anthropic': {
@@ -86,29 +103,28 @@ export async function validateApiKey(provider: string, apiKey: string): Promise<
           }),
           signal: AbortSignal.timeout(10000),
         })
-        // 200 or 400 (bad request) both mean the key is valid
-        return resp.status !== 401 && resp.status !== 403
+        return classifyStatus(resp.status)
       }
       case 'openai': {
         const resp = await fetch('https://api.openai.com/v1/models', {
           headers: { Authorization: `Bearer ${apiKey}` },
           signal: AbortSignal.timeout(10000),
         })
-        return resp.ok
+        return resp.ok ? 'valid' : classifyStatus(resp.status)
       }
       case 'groq': {
         const resp = await fetch('https://api.groq.com/openai/v1/models', {
           headers: { Authorization: `Bearer ${apiKey}` },
           signal: AbortSignal.timeout(10000),
         })
-        return resp.ok
+        return resp.ok ? 'valid' : classifyStatus(resp.status)
       }
       case 'openrouter': {
         const resp = await fetch('https://openrouter.ai/api/v1/models', {
           headers: { Authorization: `Bearer ${apiKey}` },
           signal: AbortSignal.timeout(10000),
         })
-        return resp.ok
+        return resp.ok ? 'valid' : classifyStatus(resp.status)
       }
       case 'minimax': {
         const resp = await fetch('https://api.minimax.io/v1/chat/completions', {
@@ -124,23 +140,24 @@ export async function validateApiKey(provider: string, apiKey: string): Promise<
           }),
           signal: AbortSignal.timeout(10000),
         })
-        return resp.status !== 401 && resp.status !== 403
+        return classifyStatus(resp.status)
       }
       case 'nvidia': {
         const resp = await fetch('https://integrate.api.nvidia.com/v1/models', {
           headers: { Authorization: `Bearer ${apiKey}` },
           signal: AbortSignal.timeout(10000),
         })
-        return resp.ok
+        return resp.ok ? 'valid' : classifyStatus(resp.status)
       }
       case 'claude-max':
         // Claude MAX uses OAuth tokens from local Claude Code installation
-        return isClaudeMaxAvailable()
+        return isClaudeMaxAvailable() ? 'valid' : 'invalid'
       default:
-        // For unknown providers, assume valid if non-empty
-        return apiKey.length > 0
+        // For unknown providers, assume valid if non-empty (can't probe).
+        return apiKey.length > 0 ? 'valid' : 'invalid'
     }
   } catch {
-    return false
+    // Network error / timeout — we couldn't determine the key's validity.
+    return 'unknown'
   }
 }

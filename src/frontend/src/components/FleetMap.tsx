@@ -85,10 +85,14 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
     return result
   }, [profiles, playerDataMap, statuses, systemByName])
 
-  // Compute agent headings from position changes
-  const agentHeadings = useMemo(() => {
-    const headings = new Map<string, AgentHeading>()
+  // Compute agent headings from position changes. Done in an effect (not a memo)
+  // because it mutates the agentPrevSystems ref — doing that during render is
+  // unsafe under React 19 concurrent/StrictMode, where a render may run twice or
+  // be discarded, corrupting the "previous position" tracking.
+  const [agentHeadings, setAgentHeadings] = useState<Map<string, AgentHeading>>(new Map())
+  useEffect(() => {
     const prev = agentPrevSystems.current
+    const headings = new Map<string, AgentHeading>()
     for (const ap of agentPositions) {
       const prevSysId = prev.get(ap.profile.id)
       if (prevSysId && prevSysId !== ap.system.system_id) {
@@ -99,7 +103,7 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
       }
       prev.set(ap.profile.id, ap.system.system_id)
     }
-    return headings
+    setAgentHeadings(headings)
   }, [agentPositions, systemById])
 
   const agentsAtSelected = useMemo(() => {

@@ -287,7 +287,13 @@ async function compactContext(
   const systemPromptTokens = context.systemPrompt ? estimateTokens(context.systemPrompt) : 0
   // Budget = fraction of the space REMAINING after the system prompt, not the full window.
   // The system prompt is large (~30-50k tokens) and fixed — only messages can be compacted.
-  const messageBudget = Math.floor((model.contextWindow - systemPromptTokens) * ratio)
+  // Clamp the usable window to >= 0 and floor the budget: an oversized system
+  // prompt (approaching/exceeding the window) would otherwise yield a zero or
+  // negative budget, which makes the `messageTokens < messageBudget` guard below
+  // always false and compaction thrash (summarize every single turn).
+  const usableWindow = Math.max(0, model.contextWindow - systemPromptTokens)
+  const minMessageBudget = Math.min(8000, Math.floor(model.contextWindow * 0.15))
+  const messageBudget = Math.max(minMessageBudget, Math.floor(usableWindow * ratio))
   const messageTokens = totalMessageTokens(context.messages)
 
   if (messageTokens < messageBudget) return
