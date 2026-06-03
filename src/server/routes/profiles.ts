@@ -4,6 +4,13 @@ import { agentManager } from '../lib/agent-manager'
 
 const profiles = new Hono()
 
+// Never send the stored SpaceMolt password to the client. Expose has_password so
+// the UI can indicate a password is set without leaking it.
+function sanitizeProfile<T extends { password?: string | null }>(p: T): Omit<T, 'password'> & { has_password: boolean } {
+  const { password, ...rest } = p
+  return { ...rest, has_password: !!password }
+}
+
 // GET /api/profiles
 profiles.get('/', (c) => {
   const all = listProfiles()
@@ -15,7 +22,7 @@ profiles.get('/', (c) => {
       updateProfile(p.id, { group_name: liveFaction })
       p.group_name = liveFaction
     }
-    return { ...p, ...status }
+    return sanitizeProfile({ ...p, ...status })
   }))
 })
 
@@ -48,7 +55,7 @@ profiles.post('/', async (c) => {
       sort_order: body.sort_order ?? listProfiles().length,
       group_name: body.group_name || '',
     })
-    return c.json(profile, 201)
+    return c.json(sanitizeProfile(profile), 201)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('UNIQUE constraint')) return c.json({ error: 'A profile with that name already exists' }, 409)
@@ -70,17 +77,20 @@ profiles.get('/:id', (c) => {
   const profile = getProfile(c.req.param('id'))
   if (!profile) return c.json({ error: 'Not found' }, 404)
   const status = agentManager.getStatus(c.req.param('id'))
-  return c.json({ ...profile, ...status })
+  return c.json(sanitizeProfile({ ...profile, ...status }))
 })
 
 // PUT /api/profiles/:id
 profiles.put('/:id', async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json()
+  // An empty/absent password means "keep the existing one" — the UI never
+  // receives the stored password, so it cannot echo it back on save.
+  if (body.password == null || body.password === '') delete body.password
   const profile = updateProfile(id, body)
   if (!profile) return c.json({ error: 'Not found' }, 404)
   if (body.directive !== undefined) agentManager.restartTurn(id)
-  return c.json(profile)
+  return c.json(sanitizeProfile(profile))
 })
 
 // DELETE /api/profiles/:id

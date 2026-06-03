@@ -73,7 +73,7 @@ export function ProviderSetup({ providers: initialProviders, registrationCode, o
   const claudeMaxProvider = providers.find(p => p.id === 'claude-max')
   const cloudProviders = providers.filter(p => !PROVIDER_INFO[p.id]?.isLocal && p.id !== 'claude-max')
   const localProviders = providers.filter(p => PROVIDER_INFO[p.id]?.isLocal || p.id === 'custom')
-  const validProviders = providers.filter(p => p.status === 'valid' || p.api_key)
+  const validProviders = providers.filter(p => p.status === 'valid' || p.has_key)
 
   // Close on Escape
   useEffect(() => {
@@ -97,7 +97,8 @@ export function ProviderSetup({ providers: initialProviders, registrationCode, o
         body: JSON.stringify({ id, api_key: keys[id] || '' }),
       })
       const result = await resp.json()
-      setProviders(prev => prev.map(p => p.id === id ? { ...p, status: result.status, api_key: keys[id] || '' } : p))
+      setProviders(prev => prev.map(p => p.id === id ? { ...p, status: result.status, has_key: result.has_key } : p))
+      setKeys(k => ({ ...k, [id]: '' })) // clear input; key is stored server-side
     } finally {
       setSaving(s => ({ ...s, [id]: false }))
     }
@@ -130,7 +131,8 @@ export function ProviderSetup({ providers: initialProviders, registrationCode, o
         body: JSON.stringify({ id: 'custom', api_key: keys['custom'] || '', base_url: baseUrl }),
       })
       const result = await resp.json()
-      setProviders(prev => prev.map(p => p.id === 'custom' ? { ...p, status: result.status, api_key: keys['custom'] || '', base_url: baseUrl } : p))
+      setProviders(prev => prev.map(p => p.id === 'custom' ? { ...p, status: result.status, has_key: result.has_key, base_url: baseUrl } : p))
+      setKeys(k => ({ ...k, custom: '' })) // clear input; key is stored server-side
     } finally {
       setSaving(s => ({ ...s, custom: false }))
     }
@@ -188,7 +190,7 @@ export function ProviderSetup({ providers: initialProviders, registrationCode, o
             type="password"
             value={keys[p.id] || ''}
             onChange={e => setKeys(k => ({ ...k, [p.id]: e.target.value }))}
-            placeholder={info.keyPlaceholder || 'API key'}
+            placeholder={p.has_key ? '•••••••• saved — leave blank to keep' : (info.keyPlaceholder || 'API key')}
             className="flex-1 h-6 text-[11px]"
           />
           <Button
@@ -231,7 +233,7 @@ export function ProviderSetup({ providers: initialProviders, registrationCode, o
               type="password"
               value={keys['custom'] || ''}
               onChange={e => setKeys(k => ({ ...k, custom: e.target.value }))}
-              placeholder="API key (optional)"
+              placeholder={providers.find(p => p.id === 'custom')?.has_key ? '•••••••• saved — leave blank to keep' : 'API key (optional)'}
               className="flex-1 h-6 text-[11px]"
             />
             <Button

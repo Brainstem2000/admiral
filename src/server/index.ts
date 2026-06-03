@@ -16,7 +16,22 @@ import schedules from './routes/schedules'
 import { startScheduler } from './lib/scheduler'
 
 const app = new Hono()
-app.use('*', cors())
+
+// CORS is restricted to same-origin and localhost only. Admiral stores plaintext
+// secrets (SpaceMolt passwords, LLM API keys), so we must not let arbitrary
+// websites issue cross-origin requests to the local API. Same-origin requests
+// (the bundled UI) send no Origin header and are always allowed.
+app.use('*', cors({
+  origin: (origin) => {
+    if (!origin) return '*' // same-origin / non-browser clients
+    try {
+      const host = new URL(origin).hostname
+      return (host === 'localhost' || host === '127.0.0.1' || host === '::1') ? origin : null
+    } catch {
+      return null
+    }
+  },
+}))
 
 // API routes
 app.route('/api/profiles', profiles)
@@ -79,11 +94,17 @@ if (isDev) {
 startScheduler()
 
 const port = parseInt(process.env.PORT || '3031')
-console.log(`Admiral listening on http://0.0.0.0:${port}`)
+// Bind to loopback by default so the API (which serves plaintext secrets) is not
+// exposed to the LAN. Set ADMIRAL_HOST=0.0.0.0 to intentionally expose it.
+const hostname = process.env.ADMIRAL_HOST || '127.0.0.1'
+console.log(`Admiral listening on http://${hostname}:${port}`)
+if (hostname === '0.0.0.0') {
+  console.warn('WARNING: ADMIRAL_HOST=0.0.0.0 exposes Admiral (and stored credentials) to your network. Ensure the network is trusted.')
+}
 
 export default {
   port,
-  hostname: '0.0.0.0',
+  hostname,
   fetch: app.fetch,
   idleTimeout: 120, // seconds; must exceed SSE heartbeat interval for log streaming
 }

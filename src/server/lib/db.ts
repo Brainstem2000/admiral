@@ -29,6 +29,13 @@ export function getDb(): Database {
 
   fs.mkdirSync(DB_DIR, { recursive: true })
   db = new Database(DB_PATH)
+  // The database holds plaintext secrets (SpaceMolt passwords, LLM API keys).
+  // Restrict perms so other local users can't read it. Best-effort (no-op on
+  // platforms/filesystems that don't support POSIX modes, e.g. Windows).
+  try {
+    fs.chmodSync(DB_DIR, 0o700)
+    fs.chmodSync(DB_PATH, 0o600)
+  } catch { /* ignore */ }
   db.exec('PRAGMA journal_mode = WAL')
   db.exec('PRAGMA foreign_keys = ON')
 

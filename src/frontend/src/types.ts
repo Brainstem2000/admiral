@@ -3,6 +3,8 @@ export interface Provider {
   api_key: string
   base_url: string
   status: 'valid' | 'invalid' | 'unknown' | 'unreachable'
+  // Sent by the API instead of the raw key: true when a key is stored.
+  has_key?: boolean
 }
 
 export interface Profile {
@@ -26,6 +28,8 @@ export interface Profile {
   enabled: boolean
   created_at: string
   updated_at: string
+  // Sent by the API instead of the raw password: true when a password is stored.
+  has_password?: boolean
 }
 
 export interface LogEntry {

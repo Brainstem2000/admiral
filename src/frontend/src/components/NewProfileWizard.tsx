@@ -41,7 +41,7 @@ export function NewProfileWizard({ providers, registrationCode, gameserverUrl, d
   const [plannerModel, setPlannerModel] = useState('')
   const [planningInterval, setPlanningInterval] = useState(5)
 
-  const validProviders = providers.filter(p => p.status === 'valid' || p.api_key)
+  const validProviders = providers.filter(p => p.status === 'valid' || p.has_key)
   const hasValidProvider = validProviders.length > 0
   const availableProviders = ['manual', ...validProviders.map(p => p.id)]
 

@@ -134,7 +134,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   const popoverRef = useRef<HTMLDivElement>(null)
 
   const isManual = !profile.provider || profile.provider === 'manual' || !profile.model
-  const availableProviders = ['manual', ...providers.filter(p => p.status === 'valid' || p.api_key).map(p => p.id)]
+  const availableProviders = ['manual', ...providers.filter(p => p.status === 'valid' || p.has_key).map(p => p.id)]
 
   // Auto-open name edit for new profiles
   useEffect(() => {
@@ -600,7 +600,9 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
             onClick={() => {
               setEditing('credentials')
               setEditUsername(profile.username || '')
-              setEditPassword(profile.password || '')
+              // The stored password is never sent to the client; start blank and
+              // leave blank to keep the existing one.
+              setEditPassword('')
             }}
           >
             {profile.username ? `@${profile.username}` : '@credentials'}
@@ -628,7 +630,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
                     type="password"
                     value={editPassword}
                     onChange={e => setEditPassword(e.target.value)}
-                    placeholder="256-bit hex"
+                    placeholder={profile.has_password ? '•••••••• saved — leave blank to keep' : '256-bit hex'}
                     className="h-7 text-xs"
                     onKeyDown={e => {
                       if (e.key === 'Enter') handleSaveCredentials()
