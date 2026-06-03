@@ -9,7 +9,7 @@ import { McpConnection } from './connections/mcp'
 import { McpV2Connection } from './connections/mcp_v2'
 import { resolveModel, resolveApiKey } from './model'
 import { fetchGameCommands, formatCommandList } from './schema'
-import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL } from './tools'
+import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
 import { FleetIntelCollector } from './fleet-intel'
@@ -484,6 +484,7 @@ export class Agent {
     this.safeDockTurnsRemaining = 0
     this.abortController?.abort()
     clearBriefingCache(this.profileId)
+    cleanupProfileToolState(this.profileId)
     if (this.connection) {
       this.log('connection', 'Disconnecting...')
       await this.connection.disconnect()

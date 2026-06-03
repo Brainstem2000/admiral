@@ -458,44 +458,81 @@ export function getTokenAnalytics(opts: {
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
-  const rows = getDb().query(
-    `SELECT profile_id, timestamp, detail FROM log_entries ${where} ORDER BY id LIMIT 10000`
-  ).all(...params) as { profile_id: string; timestamp: string; detail: string | null }[]
+  const db = getDb()
 
   const byProfile: Record<string, { calls: number; inputTokens: number; outputTokens: number; cost: number }> = {}
   const byModel: Record<string, { calls: number; inputTokens: number; outputTokens: number; cost: number }> = {}
-  const timeline: { timestamp: string; cost: number; tokens: number; profile_id: string; model: string }[] = []
 
-  for (const row of rows) {
-    if (!row.detail) continue
-    try {
-      const d = JSON.parse(row.detail)
-      const input = d.usage?.input ?? 0
-      const output = d.usage?.output ?? 0
-      const cost = d.usage?.cost?.total ?? 0
-      const model = d.model ?? 'unknown'
+  // Aggregate in SQL so totals/cost/ROI are exact regardless of row count.
+  // (The previous JS aggregation pulled rows with LIMIT 10000 and silently
+  // undercounted when the window held more than that.)
+  const aggRows = db.query(
+    `SELECT profile_id,
+            COALESCE(json_extract(detail, '$.model'), 'unknown') AS model,
+            COUNT(*) AS calls,
+            COALESCE(SUM(CAST(json_extract(detail, '$.usage.input')  AS REAL)), 0) AS inputTokens,
+            COALESCE(SUM(CAST(json_extract(detail, '$.usage.output') AS REAL)), 0) AS outputTokens,
+            COALESCE(SUM(CAST(json_extract(detail, '$.usage.cost.total') AS REAL)), 0) AS cost
+     FROM log_entries ${where} AND detail IS NOT NULL
+     GROUP BY profile_id, model`
+  ).all(...params) as { profile_id: string; model: string; calls: number; inputTokens: number; outputTokens: number; cost: number }[]
 
-      // By profile
-      if (!byProfile[row.profile_id]) byProfile[row.profile_id] = { calls: 0, inputTokens: 0, outputTokens: 0, cost: 0 }
-      byProfile[row.profile_id].calls++
-      byProfile[row.profile_id].inputTokens += input
-      byProfile[row.profile_id].outputTokens += output
-      byProfile[row.profile_id].cost += cost
+  for (const r of aggRows) {
+    if (!byProfile[r.profile_id]) byProfile[r.profile_id] = { calls: 0, inputTokens: 0, outputTokens: 0, cost: 0 }
+    byProfile[r.profile_id].calls += r.calls
+    byProfile[r.profile_id].inputTokens += r.inputTokens
+    byProfile[r.profile_id].outputTokens += r.outputTokens
+    byProfile[r.profile_id].cost += r.cost
 
-      // By model
-      if (!byModel[model]) byModel[model] = { calls: 0, inputTokens: 0, outputTokens: 0, cost: 0 }
-      byModel[model].calls++
-      byModel[model].inputTokens += input
-      byModel[model].outputTokens += output
-      byModel[model].cost += cost
-
-      timeline.push({ timestamp: row.timestamp, cost, tokens: input + output, profile_id: row.profile_id, model })
-    } catch {
-      // Skip unparseable entries
-    }
+    if (!byModel[r.model]) byModel[r.model] = { calls: 0, inputTokens: 0, outputTokens: 0, cost: 0 }
+    byModel[r.model].calls += r.calls
+    byModel[r.model].inputTokens += r.inputTokens
+    byModel[r.model].outputTokens += r.outputTokens
+    byModel[r.model].cost += r.cost
   }
 
+  // Timeline is a per-call series for the cumulative-cost chart. Bound it to the
+  // most recent points so a very active window can't load unbounded rows; return
+  // chronological order so the running total reads left-to-right.
+  const TIMELINE_LIMIT = 5000
+  const tlRows = db.query(
+    `SELECT timestamp, profile_id,
+            COALESCE(json_extract(detail, '$.model'), 'unknown') AS model,
+            COALESCE(CAST(json_extract(detail, '$.usage.cost.total') AS REAL), 0) AS cost,
+            COALESCE(CAST(json_extract(detail, '$.usage.input')  AS REAL), 0)
+              + COALESCE(CAST(json_extract(detail, '$.usage.output') AS REAL), 0) AS tokens
+     FROM log_entries ${where} AND detail IS NOT NULL
+     ORDER BY id DESC LIMIT ${TIMELINE_LIMIT}`
+  ).all(...params) as { timestamp: string; cost: number; tokens: number; profile_id: string; model: string }[]
+  const timeline = tlRows.reverse()
+
   return { byProfile, byModel, timeline }
+}
+
+/**
+ * Delete aged operational data so these tables don't grow without bound over a
+ * long-running deployment. Logs, snapshots and intel are all transient/derived,
+ * so old rows can be discarded. Returns the number of rows removed per table.
+ */
+export function pruneOldData(opts?: {
+  logDays?: number
+  snapshotDays?: number
+  intelDays?: number
+}): { logs: number; snapshots: number; intel: number } {
+  const logDays = opts?.logDays ?? 14
+  const snapshotDays = opts?.snapshotDays ?? 30
+  const intelDays = opts?.intelDays ?? 7
+  const db = getDb()
+  const cutoff = (days: number) =>
+    new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ')
+
+  const logs = db.query('DELETE FROM log_entries WHERE timestamp < ?').run(cutoff(logDays)).changes
+  const snapshots = db.query('DELETE FROM financial_snapshots WHERE timestamp < ?').run(cutoff(snapshotDays)).changes
+  const intelCutoff = cutoff(intelDays)
+  const m = db.query('DELETE FROM fleet_intel_market WHERE updated_at < ?').run(intelCutoff).changes
+  const s = db.query('DELETE FROM fleet_intel_systems WHERE updated_at < ?').run(intelCutoff).changes
+
+  return { logs, snapshots, intel: m + s }
 }
 
 // --- Preferences CRUD ---

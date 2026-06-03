@@ -105,6 +105,20 @@ const COOLDOWN_AFTER_PENDING = 10000  // 10s when last action was pending (match
 // Track when memory is updated so system prompt caching can skip rebuilds
 export const memoryDirtyFlags = new Map<string, boolean>()
 
+/**
+ * Drop all per-profile state held in module-level maps when an agent stops.
+ * Without this these maps only ever grow, leaking memory across the lifetime of
+ * the process as profiles connect/disconnect.
+ */
+export function cleanupProfileToolState(profileId: string): void {
+  actionCooldowns.delete(profileId)
+  memoryDirtyFlags.delete(profileId)
+  const prefix = `${profileId}:`
+  for (const key of queryCache.keys()) {
+    if (key.startsWith(prefix)) queryCache.delete(key)
+  }
+}
+
 // Sentinel prefix for action pending results — loop.ts detects this to exit the turn early
 export const ACTION_PENDING_SENTINEL = '⚠️ ACTION_PENDING: '
 

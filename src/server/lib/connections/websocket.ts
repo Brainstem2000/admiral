@@ -5,18 +5,24 @@ import WebSocket from 'ws'
 const RECONNECT_BASE_DELAY = 1000
 const RECONNECT_MAX_DELAY = 30000
 const COMMAND_TIMEOUT = 30_000
+const MAX_RECONNECT_ATTEMPTS = 10
 
 /**
- * Message types that are direct responses to client commands.
- * Everything else is a server-push notification.
+ * The expected response `type` for a given command. The WebSocket protocol has
+ * no request IDs, so we correlate a response to the head-of-queue command by
+ * matching this expected type (or a generic 'error'). This prevents unsolicited
+ * server pushes that happen to reuse a response type — notably the `logged_in`
+ * notification the server emits after `register` — from dequeuing and resolving
+ * an unrelated pending command with the wrong payload.
  */
-const RESPONSE_TYPES = new Set([
-  'ok',           // Generic success (queries + mutation acks)
-  'error',        // Generic error
-  'logged_in',    // Response to 'login'
-  'registered',   // Response to 'register' (followed by 'logged_in' as notification)
-  'version_info', // Response to 'get_version'
-])
+function expectedResponseType(command: string): string {
+  switch (command) {
+    case 'login': return 'logged_in'
+    case 'register': return 'registered'
+    case 'get_version': return 'version_info'
+    default: return 'ok' // generic success for queries + mutation acks
+  }
+}
 
 export class WebSocketConnection implements GameConnection {
   readonly mode = 'websocket' as const
@@ -27,12 +33,15 @@ export class WebSocketConnection implements GameConnection {
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private credentials: { username: string; password: string } | null = null
+  // Set by disconnect() so an in-flight reconnect doesn't resurrect the socket.
+  private shuttingDown = false
 
   // Sequential FIFO queue: server processes commands in order with no request IDs
   private pendingQueue: Array<{
     resolve: (value: CommandResult) => void
     timer: ReturnType<typeof setTimeout>
     command: string
+    expected: string
   }> = []
 
   constructor(serverUrl: string) {
@@ -41,8 +50,19 @@ export class WebSocketConnection implements GameConnection {
   }
 
   async connect(): Promise<void> {
+    this.shuttingDown = false
     return new Promise((resolve, reject) => {
       try {
+        // Detach and close any prior socket so its handlers can't fire (and
+        // schedule reconnects) against this connection after we replace it.
+        if (this.ws) {
+          const old = this.ws
+          old.onopen = null
+          old.onmessage = null
+          old.onclose = null
+          old.onerror = null
+          try { old.close() } catch { /* ignore */ }
+        }
         this.ws = new WebSocket(this.wsUrl, { headers: { 'User-Agent': USER_AGENT } })
 
         this.ws.onopen = () => {
@@ -128,10 +148,12 @@ export class WebSocketConnection implements GameConnection {
   }
 
   async disconnect(): Promise<void> {
+    this.shuttingDown = true
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
+    this.notificationHandlers = []
     this.rejectAllPending('Disconnecting')
     if (this.ws) {
       this.ws.onopen = null
@@ -167,7 +189,7 @@ export class WebSocketConnection implements GameConnection {
         resolve({ error: { code: 'timeout', message: `Command ${command} timed out` } })
       }, COMMAND_TIMEOUT)
 
-      this.pendingQueue.push({ resolve, timer, command })
+      this.pendingQueue.push({ resolve, timer, command, expected: expectedResponseType(command) })
       this.ws!.send(JSON.stringify(msg))
     })
   }
@@ -176,8 +198,12 @@ export class WebSocketConnection implements GameConnection {
     const type = msg.type as string
     const payload = (msg.payload || {}) as Record<string, unknown>
 
-    // If this is a response type and we have a pending command, resolve it
-    if (RESPONSE_TYPES.has(type) && this.pendingQueue.length > 0) {
+    // Resolve the head-of-queue command only if this message is its expected
+    // response (or a generic error). Any other typed message — including the
+    // unsolicited `logged_in` push after register — is treated as a
+    // notification, so it can't mis-resolve a waiting command.
+    const head = this.pendingQueue[0]
+    if (head && (type === 'error' || type === head.expected)) {
       const pending = this.pendingQueue.shift()!
       clearTimeout(pending.timer)
 
@@ -209,12 +235,21 @@ export class WebSocketConnection implements GameConnection {
   }
 
   private scheduleReconnect(): void {
+    // Don't reconnect after an explicit disconnect, and never stack timers.
+    if (this.shuttingDown || this.reconnectTimer) return
+    if (this.reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+      // Give up at the connection level; the agent manager handles higher-level
+      // restart/backoff and won't be misled into thinking we're still trying.
+      return
+    }
     const delay = Math.min(
       RECONNECT_BASE_DELAY * Math.pow(2, this.reconnectAttempt),
       RECONNECT_MAX_DELAY
     )
     this.reconnectAttempt++
     this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null
+      if (this.shuttingDown) return
       try {
         await this.connect()
         // Re-authenticate after reconnect

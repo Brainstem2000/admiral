@@ -63,7 +63,7 @@ export class McpConnection implements GameConnection {
     }
   }
 
-  async execute(command: string, args?: Record<string, unknown>): Promise<CommandResult> {
+  async execute(command: string, args?: Record<string, unknown>, retried = false): Promise<CommandResult> {
     const resp = await this.callTool(command, args || {})
     if (resp.error) {
       return { error: { code: resp.error.code?.toString() || 'mcp_error', message: resp.error.message || 'Unknown error' } }
@@ -71,13 +71,15 @@ export class McpConnection implements GameConnection {
 
     const result = this.parseToolResult(resp.result)
 
-    // Re-initialize on session expiry and retry once
+    // Re-initialize on session expiry and retry exactly once. The guard prevents
+    // unbounded recursion (and re-executing a game mutation more than twice) when
+    // the server keeps reporting the session invalid.
     const errCode = (result?.error as Record<string, unknown> | undefined)?.code
-    if (errCode === 'session_expired' || errCode === 'session_invalid') {
+    if ((errCode === 'session_expired' || errCode === 'session_invalid') && !retried) {
       this.sessionId = null
       this.connected = false
       await this.connect()
-      return this.execute(command, args)
+      return this.execute(command, args, true)
     }
 
     // Poll notifications at a bounded cadence to avoid an extra RPC per command.
@@ -111,6 +113,7 @@ export class McpConnection implements GameConnection {
     this.sessionId = null
     this.connected = false
     this.lastNotificationPollAt = 0
+    this.notificationHandlers = []
   }
 
   isConnected(): boolean {

@@ -14,6 +14,7 @@ import fleetIntel from './routes/fleet-intel'
 import analytics from './routes/analytics'
 import schedules from './routes/schedules'
 import { startScheduler } from './lib/scheduler'
+import { pruneOldData } from './lib/db'
 
 const app = new Hono()
 
@@ -92,6 +93,21 @@ if (isDev) {
 
 // Start cron scheduler
 startScheduler()
+
+// Prune aged logs/snapshots/intel on startup, then every 6 hours, so these
+// tables don't grow without bound.
+function runPrune() {
+  try {
+    const { logs, snapshots, intel } = pruneOldData()
+    if (logs || snapshots || intel) {
+      console.log(`[Prune] removed ${logs} log rows, ${snapshots} snapshots, ${intel} intel rows`)
+    }
+  } catch (err) {
+    console.warn('[Prune] failed:', err)
+  }
+}
+runPrune()
+setInterval(runPrune, 6 * 60 * 60 * 1000)
 
 const port = parseInt(process.env.PORT || '3031')
 // Bind to loopback by default so the API (which serves plaintext secrets) is not
