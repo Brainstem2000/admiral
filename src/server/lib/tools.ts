@@ -252,10 +252,13 @@ export async function executeTool(
       const CHANNEL_FIX: Record<string, string> = { 'global': 'system', 'general': 'system', 'local': 'system', 'faction': 'faction', 'trade': 'trading', 'help': 'system' }
       if (ch && CHANNEL_FIX[ch]) { commandArgs.channel = CHANNEL_FIX[ch] }
     }
-    // scan/attack: agents send target_id but v2 API expects id
-    if (bare === 'scan' || bare === 'attack') {
-      if (commandArgs.target_id && !commandArgs.id) { commandArgs.id = commandArgs.target_id; delete commandArgs.target_id }
-      if (commandArgs.target && !commandArgs.id) { commandArgs.id = commandArgs.target; delete commandArgs.target }
+    // scan/attack: the game API expects `target_id`. Normalize id/target -> target_id.
+    // (Do NOT rename target_id away — an earlier version mapped target_id -> id, which the
+    //  current API rejects with [invalid_payload] Unknown parameter(s): id, making all
+    //  combat impossible while gaslighting the agent into thinking it wrote the wrong key.)
+    if (bare === 'scan' || bare.endsWith('_scan') || bare === 'attack' || bare.endsWith('_attack')) {
+      if (commandArgs.id && !commandArgs.target_id) { commandArgs.target_id = commandArgs.id; delete commandArgs.id }
+      if (commandArgs.target && !commandArgs.target_id) { commandArgs.target_id = commandArgs.target; delete commandArgs.target }
     }
     // Strip empty-string values from args — they cause invalid_target/invalid_payload errors
     for (const key of Object.keys(commandArgs)) {
