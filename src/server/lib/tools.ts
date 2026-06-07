@@ -316,7 +316,12 @@ export async function executeTool(
   // return cached data instead of hitting the game server. Saves network round-trip + output tokens.
   // Feature flag: disabled when situational_briefing = 'off'
   if (isQuery && getPreference('situational_briefing') !== 'off') {
-    const BRIEFING_COVERED_QUERIES = new Set(['get_status', 'get_cargo', 'get_nearby', 'get_system', 'get_active_missions', 'get_ship', 'get_location'])
+    // Reality-verification queries (location / nearby targets / ship hull+ammo) are intentionally
+    // NOT cached: when the agent explicitly asks "where am I", "what's near me", or "am I loaded",
+    // it must get LIVE data, never a stale briefing snapshot. (Serving cached location here is what
+    // made agents act on the wrong system after rapid jumps.) The passive prompt briefing still
+    // surfaces these — this only affects the agent's explicit query calls.
+    const BRIEFING_COVERED_QUERIES = new Set(['get_cargo', 'get_system', 'get_active_missions'])
     if (BRIEFING_COVERED_QUERIES.has(deepBare)) {
       const briefing = buildSituationalBriefing(ctx.profileId)
       if (briefing) {

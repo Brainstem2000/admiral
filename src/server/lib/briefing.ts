@@ -22,6 +22,10 @@ interface CachedData {
 
 const agentCaches = new Map<string, CachedData>()
 const agentTimers = new Map<string, ReturnType<typeof setInterval>>()
+// Monotonic per-agent epoch, bumped on every invalidation (e.g. after a move). A refresh that
+// began before a bump is discarded at write time, so an out-of-order async refresh can never
+// overwrite newer state with a stale snapshot — the root cause of "system thinks I'm in <old system>".
+const agentEpochs = new Map<string, number>()
 
 function emptyCache(): CachedData {
   return { status: null, cargo: null, nearby: null, market: null, system: null, missions: null, updatedAt: 0 }
@@ -40,6 +44,7 @@ async function safeQuery(conn: GameConnection, command: string, args?: Record<st
 
 /** Refresh all cached data for an agent via direct connection queries */
 export async function refreshBriefingData(profileId: string, conn: GameConnection): Promise<void> {
+  const startEpoch = agentEpochs.get(profileId) ?? 0
   const cache = agentCaches.get(profileId) || emptyCache()
 
   // Run queries in parallel — these are all free query commands
@@ -84,6 +89,9 @@ export async function refreshBriefingData(profileId: string, conn: GameConnectio
     cache.market = null
   }
 
+  // Discard if a newer invalidation happened while we were fetching — prevents an out-of-order
+  // async refresh from overwriting fresh state with a stale snapshot (e.g. an old location).
+  if ((agentEpochs.get(profileId) ?? 0) !== startEpoch) return
   cache.updatedAt = Date.now()
   agentCaches.set(profileId, cache)
 }
@@ -120,6 +128,9 @@ export function clearBriefingCache(profileId: string): void {
 export function invalidateBriefingCache(profileId: string, conn?: GameConnection): void {
   const cache = agentCaches.get(profileId)
   if (cache) cache.updatedAt = 0
+  // Bump the epoch so any refresh already in flight (e.g. from a prior jump) is discarded
+  // instead of writing a stale location over the new one.
+  agentEpochs.set(profileId, (agentEpochs.get(profileId) ?? 0) + 1)
   // Trigger immediate background refresh so next briefing has fresh data
   if (conn) {
     refreshBriefingData(profileId, conn).catch(() => {})
