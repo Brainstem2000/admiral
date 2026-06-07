@@ -14,11 +14,15 @@
 
 ## 2. Environment & how to operate
 
-- **Project dir:** `E:\BWC-Labs-OneDrive\OneDrive - BWC Labs\Claude-Code-Projects\admiral`
+- **Project dir:** `C:\dev\admiral`  ⚠️ **MOVED 2026-06-07 off OneDrive.** The old
+  `E:\BWC-Labs-OneDrive\…\admiral` is an ABANDONED snapshot — do not run it (its `data/admiral.db`
+  is frozen). Open future sessions in `C:\dev\admiral`. (OneDrive sync churn kept crashing Vite and
+  killing the backend overnight; the plain local path fixes it.)
 - **Runtime:** Bun at `~/.bun/bin/bun` (NOT node/npm). `gh` CLI installed. Authed GitHub: Brainstem2000.
-- **Dev server:** backend on **:3031**, Vite UI on **:3030**. Start with `bun run dev`.
-  (Currently running as a standalone backend on :3031 + standalone Vite on :3030 because Vite
-  crashed once — `STATUS_STACK_BUFFER_OVERRUN`, a OneDrive-folder file-watch quirk.)
+- **How to run (preferred):** the compiled binary — `cd C:\dev\admiral; .\admiral.exe` — serves the
+  built UI + API on **:3031** with NO file-watcher (survives unattended). Rebuild after code changes
+  with `bun run build` (stop the running binary first; it locks `admiral.exe`). `bun run dev` (backend
+  :3031 + Vite :3030) is only for active frontend dev and is the thing that crashes on file-watch.
 - **PATH note:** `bun` and `gh` aren't on the default PATH for spawned shells; prepend in PowerShell:
   `$env:Path = [Environment]::GetEnvironmentVariable("Path","Machine")+";"+[Environment]::GetEnvironmentVariable("Path","User")`
 - **DB (read-only for queries):** `data/admiral.db` (bun:sqlite, WAL). Key tables: `profiles`,
@@ -72,6 +76,15 @@
    results; live get_system/get_active_missions; correct location lines. **IMPORTANT: run as the compiled
    `admiral.exe` binary, NOT `bun run dev` — the dev process keeps dying overnight in the OneDrive folder
    (3× this session). The binary has no file-watcher and survives. Real fix: move repo off OneDrive.**
+7. **DB bloat fix + bounded retention (`loop.ts` + `db.ts`):** the DB had ballooned to **3.94 GB in 4
+   days** because every `llm_call` log row serialized the ENTIRE conversation `context.messages` array
+   into `detail` (~138 KB/row × 27k rows = 3.73 GB, growing ~1 GB/day). Fixes: (a) `loop.ts` now stores
+   only an 8-message truncated preview (~2.7 KB/row, 98% smaller) plus an `omittedMessages` count;
+   (b) `db.ts` `pruneOldData()` gained a hard **120k-row cap** (age-based 14d alone can't bound high
+   write volume) and a `PRAGMA incremental_vacuum` to actually shrink the file each prune (runs at
+   startup + every 6h); (c) DB now opens with `auto_vacuum = INCREMENTAL`. One-time reclaim:
+   `json_remove($.context.messages)` on existing rows + `VACUUM` → **3.94 GB → 0.18 GB** (all rows/data
+   intact). Steady-state is now a few hundred MB, self-bounding.
 
 ## 4. The 6 agents — roles, models, state (FINAL)
 

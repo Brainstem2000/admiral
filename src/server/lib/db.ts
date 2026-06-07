@@ -44,6 +44,11 @@ export function getDb(): Database {
     fs.chmodSync(DB_DIR, 0o700)
     fs.chmodSync(DB_PATH, 0o600)
   } catch { /* ignore */ }
+  // Incremental auto-vacuum lets pruneOldData() hand freed pages back to the OS via
+  // `PRAGMA incremental_vacuum`, so the file can SHRINK as old logs are pruned instead of only
+  // ever growing. Must be set before any table exists to take effect on a fresh DB; an existing
+  // non-incremental DB adopts it only after a one-time VACUUM (done during the size-cleanup).
+  db.exec('PRAGMA auto_vacuum = INCREMENTAL')
   db.exec('PRAGMA journal_mode = WAL')
   db.exec('PRAGMA foreign_keys = ON')
 
@@ -526,19 +531,35 @@ export function pruneOldData(opts?: {
   logDays?: number
   snapshotDays?: number
   intelDays?: number
+  maxLogRows?: number
 }): { logs: number; snapshots: number; intel: number } {
   const logDays = opts?.logDays ?? 14
   const snapshotDays = opts?.snapshotDays ?? 30
   const intelDays = opts?.intelDays ?? 7
+  // Hard ceiling on log rows. Age-based pruning alone cannot bound this table when write volume
+  // is high (many agents each logging every turn), so we ALSO cap absolute row count and drop the
+  // oldest rows beyond it. With the trimmed llm_call detail this is a few hundred MB at most.
+  const maxLogRows = opts?.maxLogRows ?? 120_000
   const db = getDb()
   const cutoff = (days: number) =>
     new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ')
 
-  const logs = db.query('DELETE FROM log_entries WHERE timestamp < ?').run(cutoff(logDays)).changes
+  let logs = db.query('DELETE FROM log_entries WHERE timestamp < ?').run(cutoff(logDays)).changes
+  // Row-count cap: find the id of the maxLogRows-th most-recent row and delete everything older.
+  // Uses the primary-key index, so it stays cheap even on a large table.
+  const threshold = db.query('SELECT id FROM log_entries ORDER BY id DESC LIMIT 1 OFFSET ?')
+    .get(maxLogRows) as { id: number } | undefined
+  if (threshold) {
+    logs += db.query('DELETE FROM log_entries WHERE id < ?').run(threshold.id).changes
+  }
   const snapshots = db.query('DELETE FROM financial_snapshots WHERE timestamp < ?').run(cutoff(snapshotDays)).changes
   const intelCutoff = cutoff(intelDays)
   const m = db.query('DELETE FROM fleet_intel_market WHERE updated_at < ?').run(intelCutoff).changes
   const s = db.query('DELETE FROM fleet_intel_systems WHERE updated_at < ?').run(intelCutoff).changes
+
+  // Hand freed pages back to the OS so the file actually shrinks after a prune. No-op unless the
+  // DB uses auto_vacuum = INCREMENTAL (set at init; existing DBs adopt it after the one-time VACUUM).
+  try { db.exec('PRAGMA incremental_vacuum') } catch { /* ignore */ }
 
   return { logs, snapshots, intel: m + s }
 }

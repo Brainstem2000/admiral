@@ -76,6 +76,15 @@ export async function runAgentTurn(
       const thinkingBlocks = response.content.filter(b => b.type === 'thinking').length
       const toolCallBlocks = response.content.filter(b => b.type === 'toolCall').length
 
+      // Bound how much context we persist per call. Previously the ENTIRE message array was
+      // serialized on every llm_call — with a large context that was ~140KB/row and grew the DB
+      // by ~1GB/day. Keep only a short, truncated preview of the most-recent messages; the
+      // metadata (counts/tokens/cost) below is what the UI actually needs.
+      const PREVIEW_MSGS = 8, PREVIEW_CHARS = 220
+      const clip = (s: string) =>
+        (typeof s === 'string' && s.length > PREVIEW_CHARS ? s.slice(0, PREVIEW_CHARS) + '…' : s)
+      const previewSource = context.messages.slice(-PREVIEW_MSGS)
+
       const detail = JSON.stringify({
         model: response.model,
         provider: response.provider,
@@ -92,10 +101,11 @@ export async function runAgentTurn(
           messageCount: context.messages.length,
           estimatedTokens: totalMessageTokens(context.messages),
           systemPromptTokens: context.systemPrompt ? estimateTokens(context.systemPrompt) : 0,
-          messages: context.messages.map(msg => {
+          omittedMessages: Math.max(0, context.messages.length - previewSource.length),
+          messages: previewSource.map(msg => {
             if (msg.role === 'user') {
               const text = typeof msg.content === 'string' ? msg.content : '(complex)'
-              return { role: 'user', text }
+              return { role: 'user', text: clip(text) }
             }
             if (msg.role === 'assistant') {
               const parts: string[] = []
@@ -107,11 +117,11 @@ export async function runAgentTurn(
                 }
                 else if ('thinking' in b) parts.push(`thinking: ${(b as any).thinking?.trim()}`)
               }
-              return { role: 'assistant', text: parts.join(' | ') || '(empty)' }
+              return { role: 'assistant', text: clip(parts.join(' | ') || '(empty)') }
             }
             if (msg.role === 'toolResult') {
               const text = Array.isArray(msg.content) ? msg.content.map((b: any) => b.text || '').join('') : ''
-              return { role: 'toolResult', tool: msg.toolName, error: msg.isError || undefined, text }
+              return { role: 'toolResult', tool: msg.toolName, error: msg.isError || undefined, text: clip(text) }
             }
             return { role: (msg as any).role }
           }),
