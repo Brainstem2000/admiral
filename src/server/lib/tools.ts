@@ -4,7 +4,7 @@ import type { GameConnection } from './connections/interface'
 import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { agentManager } from './agent-manager'
-import { buildSituationalBriefing, invalidateBriefingCache } from './briefing'
+import { invalidateBriefingCache } from './briefing'
 
 // Extended query result cache: keyed by "profileId:command:argsJSON"
 const queryCache = new Map<string, { result: string; timestamp: number }>()
@@ -312,24 +312,15 @@ export async function executeTool(
     actionCooldowns.set(ctx.profileId, { timestamp: Date.now(), wasPending: false })
   }
 
-  // Cache intercept: if briefing is enabled and this is a query already covered by the briefing,
-  // return cached data instead of hitting the game server. Saves network round-trip + output tokens.
-  // Feature flag: disabled when situational_briefing = 'off'
+  // Extended query cache only. The situational briefing is NO LONGER used to short-circuit an
+  // agent's explicit query calls. When an agent deliberately runs get_status / get_system /
+  // get_active_missions / get_cargo / get_nearby, it must always receive LIVE ground-truth — never a
+  // lossy or stale briefing snapshot. Intercepting these caused agents to (a) get a summary-only
+  // get_system with no POI ids/types (breaking pirate-belt hunting), (b) act on the wrong system
+  // after a jump, and (c) loop "the cache is stale, force a fresh query", burning turns. The briefing
+  // still provides zero-token passive awareness via the system prompt; it just never overrides an
+  // explicit query. In-game queries are free (no tick), so this costs only a round-trip.
   if (isQuery && getPreference('situational_briefing') !== 'off') {
-    // Reality-verification queries (location / nearby targets / ship hull+ammo) are intentionally
-    // NOT cached: when the agent explicitly asks "where am I", "what's near me", or "am I loaded",
-    // it must get LIVE data, never a stale briefing snapshot. (Serving cached location here is what
-    // made agents act on the wrong system after rapid jumps.) The passive prompt briefing still
-    // surfaces these — this only affects the agent's explicit query calls.
-    const BRIEFING_COVERED_QUERIES = new Set(['get_cargo', 'get_system', 'get_active_missions'])
-    if (BRIEFING_COVERED_QUERIES.has(deepBare)) {
-      const briefing = buildSituationalBriefing(ctx.profileId)
-      if (briefing) {
-        ctx.log('tool_result', `(cached) ${truncate(briefing, 150)}`)
-        return `(cached) ${briefing}`
-      }
-    }
-
     // Extended query cache: catalog (static, 1h TTL) and market queries (60s TTL)
     const cacheKey = `${ctx.profileId}:${deepBare}:${JSON.stringify(commandArgs ?? {})}`
     const cached = queryCache.get(cacheKey)

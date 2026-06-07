@@ -71,12 +71,8 @@ export async function refreshBriefingData(profileId: string, conn: GameConnectio
     cache.missions = (missionsRaw as Record<string, unknown>).missions as unknown[]
   }
 
-  // Fetch market only if docked
-  const player = cache.status?.player as Record<string, unknown> | undefined
-  const location = cache.status?.location as Record<string, unknown> | undefined
-  const isDocked = player?.docked === true || player?.is_docked === true
-    || (cache.status as Record<string, unknown>)?.docked === true
-    || Boolean(location?.docked_at)
+  // Fetch market only if docked (handles both get_status shapes — see isAgentDocked)
+  const isDocked = isAgentDocked(cache.status)
   if (isDocked) {
     const marketRaw = await safeQuery(conn, 'view_market')
     if (marketRaw && typeof marketRaw === 'object') {
@@ -145,6 +141,41 @@ function fmtNum(n: number): string {
     : String(n)
 }
 
+// Station-like POI id suffixes. get_status on some connections carries NO explicit `docked` flag
+// and NO `location` object — location lives on `player.current_system` / `player.current_poi`
+// (e.g. "ironhearth_station"). When there's no flag we infer "docked" from a station-like POI id.
+// Belts / fields / nebulae / asteroids never match these, so they correctly read as IN SPACE.
+const STATION_POI_RX = /(station|citadel|outpost|trading_post|_post|_hub|_depot|_market|_yard|_dock|_port|_base|_terminal|_spire|_haven|_anchorage|_nexus|_command|_prime)$/i
+
+/** Best-effort location read across the differing get_status shapes: some connections nest a
+ *  `location` object; the HTTP shape puts it on `player.current_system` / `player.current_poi`. */
+function readLocation(gs: Record<string, unknown> | null | undefined): { system: string; poi: string } {
+  if (!gs) return { system: '?', poi: '' }
+  const player = gs.player as Record<string, unknown> | undefined
+  const location = gs.location as Record<string, unknown> | undefined
+  const system = location?.system_name ?? player?.system ?? player?.current_system ?? gs.system ?? '?'
+  const poi = location?.poi_name ?? player?.poi ?? player?.current_poi ?? gs.poi ?? ''
+  return { system: String(system), poi: String(poi) }
+}
+
+/** Best-effort docked detection across get_status shapes. Explicit flags win; otherwise infer
+ *  from a station-like current_poi (or the player's home base, which is always a station). */
+function isAgentDocked(gs: Record<string, unknown> | null | undefined): boolean {
+  if (!gs) return false
+  const player = gs.player as Record<string, unknown> | undefined
+  const location = gs.location as Record<string, unknown> | undefined
+  if (player?.docked === true || player?.is_docked === true) return true
+  if ((gs as Record<string, unknown>).docked === true) return true
+  if (location && Boolean(location.docked_at)) return true
+  // Fallback for the {player:{current_poi}} shape with no explicit flag.
+  const poi = (player?.current_poi ?? location?.poi_name ?? '') as unknown
+  if (typeof poi === 'string' && poi.length > 0) {
+    if (STATION_POI_RX.test(poi)) return true
+    if (player?.home_base && poi === player.home_base) return true
+  }
+  return false
+}
+
 /** Build a compact text briefing from cached data. Returns empty string if no data. */
 export function buildSituationalBriefing(profileId: string): string {
   const cache = agentCaches.get(profileId)
@@ -154,19 +185,16 @@ export function buildSituationalBriefing(profileId: string): string {
   const gs = cache.status
   const player = gs.player as Record<string, unknown> | undefined
   const ship = gs.ship as Record<string, unknown> | undefined
-  const location = gs.location as Record<string, unknown> | undefined
 
-  // Location & basic stats
-  const systemName = location?.system_name ?? player?.system ?? gs.system ?? '?'
-  const poiName = location?.poi_name ?? player?.poi ?? gs.poi ?? ''
+  // Location & basic stats — read across both get_status shapes (nested `location` vs player.current_*)
+  const { system: systemName, poi: poiName } = readLocation(gs)
   const fuel = ship?.fuel ?? gs.fuel ?? '?'
   const maxFuel = ship?.max_fuel ?? ship?.fuel_capacity ?? '?'
   const hull = ship?.hull ?? gs.hull ?? '?'
   const maxHull = ship?.max_hull ?? ship?.hull_capacity ?? '?'
   const shield = ship?.shield ?? gs.shield
   const credits = player?.credits ?? gs.credits ?? 0
-  const isDocked = player?.docked === true || player?.is_docked === true || gs.docked === true
-    || Boolean(location?.docked_at)
+  const isDocked = isAgentDocked(gs)
 
   lines.push(`** STATUS: ${isDocked ? 'DOCKED at ' + (poiName || systemName) : 'IN SPACE (not docked — cannot trade/market/storage/missions)'} **`)
   lines.push(`Location: ${systemName}${poiName ? ' > ' + poiName : ''}`)
