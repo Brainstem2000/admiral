@@ -12,5 +12,8 @@ dist/
 src/frontend/dist/
 admiral
 admiral.exe
+admiral.new.exe
 *.bun-build
 .*.bun-build
+# Claude Code machine-local settings (permissions etc.) — not shared
+.claude/settings.local.json
