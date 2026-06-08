@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp, Globe, BarChart3, Coins, Vault } from 'lucide-react'
+import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp, Globe, BarChart3, Coins, Vault, Users, User } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 import type { Profile, Provider } from '@/types'
 import { ProfileList } from './ProfileList'
@@ -8,6 +8,7 @@ import { FleetMap } from './FleetMap'
 import { NewProfileWizard } from './NewProfileWizard'
 import { AdmiralTour } from './AdmiralTour'
 import { AnalyticsPane } from './AnalyticsPane'
+import { CharacterPage } from './character/CharacterPage'
 
 interface Props {
   profiles: Profile[]
@@ -30,11 +31,11 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     setSearchParams(params)
   }
   const [autoEditName, setAutoEditName] = useState(false)
-  const [statuses, setStatuses] = useState<Record<string, { connected: boolean; running: boolean; safeDocking?: boolean }>>({})
+  const [statuses, setStatuses] = useState<Record<string, { connected: boolean; running: boolean; safeDocking?: boolean; activity?: string }>>({})
   const [playerDataMap, setPlayerDataMap] = useState<Record<string, Record<string, unknown>>>({})
   const [showWizard, setShowWizard] = useState(false)
   const [showTour, setShowTour] = useState(false)
-  const [view, setView] = useState<'profiles' | 'map' | 'analytics'>('profiles')
+  const [view, setView] = useState<'profiles' | 'character' | 'map' | 'analytics'>('profiles')
   const [warRoom, setWarRoom] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try { return localStorage.getItem('admiral-sidebar-open') !== 'false' } catch { return true }
@@ -58,11 +59,11 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
       try {
         const resp = await fetch('/api/profiles')
         const data: Array<Record<string, unknown>> = await resp.json()
-        const newStatuses: Record<string, { connected: boolean; running: boolean; safeDocking?: boolean }> = {}
+        const newStatuses: Record<string, { connected: boolean; running: boolean; safeDocking?: boolean; activity?: string }> = {}
         const newGameStates: Record<string, Record<string, unknown>> = {}
         for (const p of data) {
           const id = p.id as string
-          newStatuses[id] = { connected: !!p.connected, running: !!p.running, safeDocking: !!p.safeDocking }
+          newStatuses[id] = { connected: !!p.connected, running: !!p.running, safeDocking: !!p.safeDocking, activity: typeof p.activity === 'string' ? p.activity : undefined }
           if (p.gameState && typeof p.gameState === 'object') {
             newGameStates[id] = p.gameState as Record<string, unknown>
           }
@@ -81,7 +82,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
     try {
       const resp = await fetch('/api/profiles')
       const data: Array<Record<string, unknown>> = await resp.json()
-      const newStatuses: Record<string, { connected: boolean; running: boolean; safeDocking?: boolean }> = {}
+      const newStatuses: Record<string, { connected: boolean; running: boolean; safeDocking?: boolean; activity?: string }> = {}
       const newGameStates: Record<string, Record<string, unknown>> = {}
       for (const p of data) {
         const id = p.id as string
@@ -218,20 +219,12 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
           >
             <Github size={13} />
           </a>
-          <button
-            onClick={() => setView(v => v === 'map' ? 'profiles' : 'map')}
-            className={`flex items-center justify-center w-7 h-7 transition-colors border border-border ${view === 'map' ? 'text-primary bg-primary/10' : 'text-muted-foreground hover:text-foreground'}`}
-            title={view === 'map' ? 'Show profiles' : 'Show fleet map'}
-          >
-            <Globe size={13} />
-          </button>
-          <button
-            onClick={() => setView(v => v === 'analytics' ? 'profiles' : 'analytics')}
-            className={`flex items-center justify-center w-7 h-7 transition-colors border border-border ${view === 'analytics' ? 'text-primary bg-primary/10' : 'text-muted-foreground hover:text-foreground'}`}
-            title={view === 'analytics' ? 'Show profiles' : 'Show analytics'}
-          >
-            <BarChart3 size={13} />
-          </button>
+          <div className="flex items-center border border-border divide-x divide-border">
+            <NavButton active={view === 'profiles'} onClick={() => setView('profiles')} icon={<Users size={12} />} label="Fleet" title="Show fleet (editor)" />
+            <NavButton active={view === 'character'} onClick={() => activeProfile && setView('character')} icon={<User size={12} />} label="Character" title={activeProfile ? 'Show character dossier' : 'Select an agent first'} disabled={!activeProfile} />
+            <NavButton active={view === 'map'} onClick={() => setView('map')} icon={<Globe size={12} />} label="Map" title="Show fleet map" />
+            <NavButton active={view === 'analytics'} onClick={() => setView('analytics')} icon={<BarChart3 size={12} />} label="Analytics" title="Show analytics" />
+          </div>
           <ThemeToggle />
           <button
             onClick={() => {
@@ -264,7 +257,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
               activeId={activeId}
               statuses={statuses}
               playerDataMap={playerDataMap}
-              onSelect={(id) => { setActiveId(id); setView('profiles') }}
+              onSelect={(id) => { setActiveId(id); setView(v => v === 'character' ? 'character' : 'profiles') }}
               onNew={handleNewProfile}
               onReorder={handleReorder}
             />
@@ -278,6 +271,8 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
               profiles={profiles}
               statuses={statuses}
               playerDataMap={playerDataMap}
+              activeId={activeId}
+              onSelectAgent={(id) => setActiveId(id)}
               fullscreen={warRoom}
               onToggleFullscreen={() => setWarRoom(v => !v)}
             />
@@ -285,6 +280,14 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             <AnalyticsPane
               profiles={profiles}
               statuses={statuses}
+            />
+          ) : view === 'character' && activeProfile ? (
+            <CharacterPage
+              key={activeProfile.id}
+              profile={activeProfile}
+              status={statuses[activeProfile.id] || { connected: false, running: false }}
+              playerData={playerDataMap[activeProfile.id] || null}
+              onOpenEditor={() => setView('profiles')}
             />
           ) : activeProfile ? (
             <ProfileView
@@ -299,6 +302,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
               onRefresh={() => {
                 refreshProfiles()
               }}
+              onOpenDossier={() => setView('character')}
               autoEditName={autoEditName}
               onAutoEditNameDone={() => setAutoEditName(false)}
               showProfileList={sidebarOpen}
@@ -480,6 +484,29 @@ function extractStorageCredits(trimmed: string): number {
   if (bareMatch) return parseInt(bareMatch[1].replace(/,/g, ''), 10) || 0
 
   return 0
+}
+
+function NavButton({ active, onClick, icon, label, title, disabled }: {
+  active: boolean
+  onClick: () => void
+  icon: React.ReactNode
+  label: string
+  title?: string
+  disabled?: boolean
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={`flex items-center gap-1.5 h-7 px-2.5 text-[10px] uppercase tracking-[1.5px] transition-colors ${
+        active ? 'text-primary bg-primary/10' : 'text-muted-foreground hover:text-foreground'
+      } ${disabled ? 'opacity-40 cursor-not-allowed hover:text-muted-foreground' : ''}`}
+    >
+      {icon}
+      <span className="hidden md:inline">{label}</span>
+    </button>
+  )
 }
 
 function ThemeToggle() {

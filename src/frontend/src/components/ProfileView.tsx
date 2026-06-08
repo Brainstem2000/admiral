@@ -1,6 +1,6 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { Square, Plug, PlugZap, Trash2, Pencil, Check, X, PanelLeft, PanelLeftClose, PanelRightClose, MessageSquare, Anchor } from 'lucide-react'
+import { Square, Plug, PlugZap, Trash2, Pencil, Check, X, PanelLeft, PanelLeftClose, PanelRightClose, MessageSquare, Anchor, User } from 'lucide-react'
 import type { Profile, Provider } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -94,13 +94,14 @@ interface Props {
   onPlayerData: (data: Record<string, unknown>) => void
   onDelete: () => void
   onRefresh: () => void
+  onOpenDossier?: () => void
   autoEditName?: boolean
   onAutoEditNameDone?: () => void
   showProfileList?: boolean
   onToggleProfileList?: () => void
 }
 
-export function ProfileView({ profile, providers, status, playerData, onPlayerData, onDelete, onRefresh, autoEditName, onAutoEditNameDone, showProfileList, onToggleProfileList }: Props) {
+export function ProfileView({ profile, providers, status, playerData, onPlayerData, onDelete, onRefresh, onOpenDossier, autoEditName, onAutoEditNameDone, showProfileList, onToggleProfileList }: Props) {
   const [showSidePane, setShowSidePane] = useState(() => {
     try { return localStorage.getItem('admiral-sidepane-open') !== 'false' } catch { return true }
   })
@@ -928,6 +929,12 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
               Disconnect
             </Button>
           </>
+        )}
+
+        {onOpenDossier && (
+          <Button variant="ghost" size="icon" onClick={onOpenDossier} className="h-7 w-7 text-muted-foreground hover:text-primary ml-1" title="Open character dossier">
+            <User size={14} />
+          </Button>
         )}
 
         <Button variant="ghost" size="icon" onClick={() => { if (window.confirm('Delete this profile and all its logs?')) onDelete() }} className="h-7 w-7 text-muted-foreground hover:text-destructive ml-1">

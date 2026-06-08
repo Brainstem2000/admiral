@@ -8,6 +8,9 @@ interface Props {
   statuses: Record<string, { connected: boolean; running: boolean }>
   playerDataMap: Record<string, Record<string, unknown>>
   onCenter: (systemName: string) => void
+  /** Select an agent as the focused character (route/halo follows them). */
+  onSelect?: (id: string) => void
+  selectedId?: string | null
 }
 
 function resolveColor(varName: string): string {
@@ -16,7 +19,7 @@ function resolveColor(varName: string): string {
   return raw ? `hsl(${raw})` : '#888'
 }
 
-export function FleetLegend({ profiles, statuses, playerDataMap, onCenter }: Props) {
+export function FleetLegend({ profiles, statuses, playerDataMap, onCenter, onSelect, selectedId }: Props) {
   const [expanded, setExpanded] = useState(true)
 
   return (
@@ -41,12 +44,14 @@ export function FleetLegend({ profiles, statuses, playerDataMap, onCenter }: Pro
             const credits = Number(player.credits ?? pd?.credits ?? 0)
             const colorVar = AGENT_COLORS[i % AGENT_COLORS.length]
 
+            const isSelected = selectedId === p.id
             return (
               <button
                 key={p.id}
-                onClick={() => systemName && onCenter(systemName)}
-                className="flex items-start gap-2 w-full px-3 py-1.5 text-left hover:bg-secondary/30 transition-colors border-b border-border/30 last:border-b-0"
-                disabled={!systemName}
+                onClick={() => { onSelect?.(p.id); if (systemName) onCenter(systemName) }}
+                className={`flex items-start gap-2 w-full px-3 py-1.5 text-left transition-colors border-b border-border/30 last:border-b-0 ${
+                  isSelected ? 'bg-primary/15 border-l-2 border-l-primary' : 'hover:bg-secondary/30'
+                }`}
               >
                 <div
                   className="w-2.5 h-2.5 mt-0.5 shrink-0"

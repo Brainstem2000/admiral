@@ -23,6 +23,11 @@ export interface AgentPosition {
 interface Props {
   agents: AgentPosition[]
   colors: ThemeColors
+  selectedId?: string | null
+  /** Short "what they're doing" label per agent id. */
+  activityLabels?: Record<string, string>
+  /** Select this agent (focuses route/halo on them). */
+  onSelect?: (id: string) => void
 }
 
 /** Parse "current/max" string into a 0-1 ratio */
@@ -64,9 +69,10 @@ function MiniBar({ ratio, type, width }: { ratio: number; type: 'hull' | 'shield
   )
 }
 
-function AgentDiamond({ agent, color }: { agent: AgentPosition; color: string }) {
+function AgentDiamond({ agent, color, selected, activity, onSelect }: { agent: AgentPosition; color: string; selected?: boolean; activity?: string; onSelect?: (id: string) => void }) {
   const meshRef = useRef<THREE.Mesh>(null)
   const ringRef = useRef<THREE.Mesh>(null)
+  const selRingRef = useRef<THREE.Mesh>(null)
   const baseY = systemZ(agent.system.system_id)
   const offset = 120
 
@@ -81,6 +87,10 @@ function AgentDiamond({ agent, color }: { agent: AgentPosition; color: string })
     if (ringRef.current) {
       ringRef.current.rotation.z = clock.getElapsedTime() * 0.5
     }
+    // Selection halo counter-rotates
+    if (selRingRef.current) {
+      selRingRef.current.rotation.z = clock.getElapsedTime() * -0.8
+    }
   })
 
   const hullRatio = parseRatio(agent.hull)
@@ -88,12 +98,25 @@ function AgentDiamond({ agent, color }: { agent: AgentPosition; color: string })
   const cargoRatio = parseRatio(agent.cargo)
 
   return (
-    <group position={[agent.system.position.x, baseY + offset, agent.system.position.y]}>
-      {/* Main diamond marker */}
-      <mesh ref={meshRef}>
+    <group position={[agent.system.position.x, baseY + offset, agent.system.position.y]} scale={selected ? 1.3 : 1}>
+      {/* Main diamond marker — click to select this agent */}
+      <mesh
+        ref={meshRef}
+        onClick={(e) => { e.stopPropagation(); onSelect?.(agent.profile.id) }}
+        onPointerOver={(e) => { e.stopPropagation(); if (onSelect) document.body.style.cursor = 'pointer' }}
+        onPointerOut={() => { if (onSelect) document.body.style.cursor = 'auto' }}
+      >
         <octahedronGeometry args={[60, 0]} />
         <meshBasicMaterial color={color} toneMapped={false} />
       </mesh>
+
+      {/* Selection halo: bright rotating ring around the chosen agent */}
+      {selected && (
+        <mesh ref={selRingRef} rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[150, 4, 8, 32]} />
+          <meshBasicMaterial color={color} toneMapped={false} transparent opacity={0.9} />
+        </mesh>
+      )}
 
       {/* Docked indicator: ring around diamond */}
       {agent.docked && (
@@ -118,8 +141,9 @@ function AgentDiamond({ agent, color }: { agent: AgentPosition; color: string })
         style={{ pointerEvents: 'none', whiteSpace: 'nowrap' }}
       >
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-          {/* Name tag */}
+          {/* Name tag (+ optional activity subtitle) — click to select */}
           <div
+            onClick={(e) => { if (onSelect) { e.stopPropagation(); onSelect(agent.profile.id) } }}
             style={{
               background: 'rgba(0,0,0,0.8)',
               color,
@@ -131,16 +155,27 @@ function AgentDiamond({ agent, color }: { agent: AgentPosition; color: string })
               borderRadius: '2px',
               transform: 'translateY(-22px)',
               display: 'flex',
+              flexDirection: 'column',
               alignItems: 'center',
-              gap: 4,
+              gap: 1,
+              border: selected ? `1px solid ${color}` : '1px solid transparent',
+              pointerEvents: onSelect ? 'auto' : 'none',
+              cursor: onSelect ? 'pointer' : 'default',
             }}
           >
-            {agent.docked && (
-              <span style={{ fontSize: '8px', opacity: 0.7 }} title="Docked">⚓</span>
-            )}
-            {agent.profile.name}
-            {!agent.running && (
-              <span style={{ fontSize: '7px', color: '#6b7280', marginLeft: 2 }}>OFF</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              {agent.docked && (
+                <span style={{ fontSize: '8px', opacity: 0.7 }} title="Docked">⚓</span>
+              )}
+              {agent.profile.name}
+              {!agent.running && (
+                <span style={{ fontSize: '7px', color: '#6b7280', marginLeft: 2 }}>OFF</span>
+              )}
+            </div>
+            {activity && (
+              <div style={{ fontSize: '8px', fontWeight: 'normal', color: '#cbd5e1', letterSpacing: 0, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {activity}
+              </div>
             )}
           </div>
 
@@ -168,7 +203,7 @@ function AgentDiamond({ agent, color }: { agent: AgentPosition; color: string })
   )
 }
 
-export function AgentMarkers({ agents, colors }: Props) {
+export function AgentMarkers({ agents, colors, selectedId, activityLabels, onSelect }: Props) {
   return (
     <>
       {agents.map(agent => (
@@ -176,6 +211,9 @@ export function AgentMarkers({ agents, colors }: Props) {
           key={agent.profile.id}
           agent={agent}
           color={colors.agents[agent.index % colors.agents.length]}
+          selected={selectedId === agent.profile.id}
+          activity={activityLabels?.[agent.profile.id]}
+          onSelect={onSelect}
         />
       ))}
     </>

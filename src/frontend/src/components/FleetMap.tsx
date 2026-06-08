@@ -3,9 +3,10 @@ import { Canvas } from '@react-three/fiber'
 import { CameraControls } from '@react-three/drei'
 import { Loader2, RefreshCw, Maximize2, Minimize2, Shield } from 'lucide-react'
 import type CameraControlsImpl from 'camera-controls'
-import type { Profile } from '@/types'
+import type { Profile, LogEntry } from '@/types'
 import type { GalaxyMapData, GalaxySystem } from '@shared/galaxy-types'
 import type { ThreatIntel } from '@shared/fleet-intel-types'
+import { deriveActivity, parseGameSubcommand, type LogRef } from '@/lib/activity'
 import { FleetLegend } from './FleetLegend'
 import { FleetIntelPanel } from './FleetIntelPanel'
 import { resolveThemeColors, systemZ, type ThemeColors } from './fleet-map/galaxy-utils'
@@ -14,6 +15,7 @@ import { Connections } from './fleet-map/Connections'
 import { StarSystems } from './fleet-map/StarSystems'
 import { AgentMarkers, type AgentPosition } from './fleet-map/AgentMarkers'
 import { AgentHeadings, type AgentHeading } from './fleet-map/AgentHeadings'
+import { AgentRoute } from './fleet-map/AgentRoute'
 import { EmpireNebula } from './fleet-map/EmpireNebula'
 import { SecurityOverlay } from './fleet-map/SecurityOverlay'
 import { SystemPopup } from './fleet-map/SystemPopup'
@@ -21,13 +23,35 @@ import { SystemLabels } from './fleet-map/SystemLabels'
 
 interface Props {
   profiles: Profile[]
-  statuses: Record<string, { connected: boolean; running: boolean }>
+  statuses: Record<string, { connected: boolean; running: boolean; safeDocking?: boolean; activity?: string }>
   playerDataMap: Record<string, Record<string, unknown>>
+  activeId?: string
+  onSelectAgent?: (id: string) => void
   fullscreen?: boolean
   onToggleFullscreen?: () => void
 }
 
-export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onToggleFullscreen }: Props) {
+const MAX_SEL_ENTRIES = 60
+
+/** Coarse "what they're doing" from the raw activity string (for non-selected agents). */
+function coarseActivity(s?: string): string {
+  if (!s || s === 'idle') return ''
+  if (/waiting for llm|connecting/i.test(s)) return 'Thinking'
+  if (/executing tool/i.test(s)) return 'Working'
+  if (/sleeping/i.test(s)) return 'Sleeping'
+  if (/polling/i.test(s)) return 'Standing by'
+  return s.slice(0, 24)
+}
+
+function mergeCapEntries(prev: LogEntry[], incoming: LogEntry[]): LogEntry[] {
+  const ids = new Set(prev.map(e => e.id))
+  const fresh = incoming.filter(e => typeof e.id === 'number' && !ids.has(e.id))
+  if (fresh.length === 0) return prev
+  const combined = [...prev, ...fresh].sort((a, b) => a.id - b.id)
+  return combined.length > MAX_SEL_ENTRIES ? combined.slice(-MAX_SEL_ENTRIES) : combined
+}
+
+export function FleetMap({ profiles, statuses, playerDataMap, activeId, onSelectAgent, fullscreen, onToggleFullscreen }: Props) {
   const [galaxyData, setGalaxyData] = useState<GalaxyMapData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -55,6 +79,22 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
     return m
   }, [galaxyData])
 
+  // Robust resolver: agent state often gives a lowercase id ("krynn") while the
+  // galaxy name is title-cased ("Krynn"). Match by name → id → case-insensitive.
+  const resolveSystem = useMemo(() => {
+    const lower = new Map<string, GalaxySystem>()
+    if (galaxyData) {
+      for (const s of galaxyData.systems) {
+        lower.set(s.name.toLowerCase(), s)
+        lower.set(s.system_id.toLowerCase(), s)
+      }
+    }
+    return (token: string): GalaxySystem | undefined => {
+      if (!token) return undefined
+      return systemByName.get(token) || systemById.get(token) || lower.get(token.toLowerCase())
+    }
+  }, [galaxyData, systemByName, systemById])
+
   const agentPositions: AgentPosition[] = useMemo(() => {
     const result: AgentPosition[] = []
     profiles.forEach((p, i) => {
@@ -64,7 +104,7 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
       const location = (pd.location || {}) as Record<string, unknown>
       const sysName = String(player.current_system || location.system_name || pd.system || '')
       if (!sysName) return
-      const sys = systemByName.get(sysName)
+      const sys = resolveSystem(sysName)
       if (!sys) return
       // Extract status data from slimGameState (flat shape: ship.hull="200/200", poi="Grand Exchange")
       const ship = (pd.ship || {}) as Record<string, unknown>
@@ -83,7 +123,7 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
       })
     })
     return result
-  }, [profiles, playerDataMap, statuses, systemByName])
+  }, [profiles, playerDataMap, statuses, resolveSystem])
 
   // Compute agent headings from position changes. Done in an effect (not a memo)
   // because it mutates the agentPrevSystems ref — doing that during render is
@@ -111,6 +151,106 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
     return agentPositions.filter(ap => ap.system.system_id === selectedSystem.system_id)
   }, [selectedSystem, agentPositions])
 
+  // ── Selected agent: live route + activity ───────────────────────────────────
+  const selectedAgent = useMemo(
+    () => agentPositions.find(ap => ap.profile.id === activeId) || null,
+    [agentPositions, activeId],
+  )
+
+  // Stream the selected agent's logs to derive precise activity + jump destination.
+  const [selEntries, setSelEntries] = useState<LogEntry[]>([])
+  const [selActivityStr, setSelActivityStr] = useState('idle')
+  const [nowTick, setNowTick] = useState(() => Date.now())
+  const selEsRef = useRef<EventSource | null>(null)
+  const selConnected = activeId ? (statuses[activeId]?.connected ?? false) : false
+
+  useEffect(() => {
+    if (selEsRef.current) { selEsRef.current.close(); selEsRef.current = null }
+    setSelEntries([]); setSelActivityStr('idle')
+    if (!activeId || !selConnected) return
+    const es = new EventSource(`/api/profiles/${activeId}/logs?stream=true`)
+    selEsRef.current = es
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        if (data._init && Array.isArray(data.entries)) {
+          setSelEntries(prev => mergeCapEntries(prev, data.entries as LogEntry[]))
+          return
+        }
+        if (typeof data.id === 'number') setSelEntries(prev => mergeCapEntries(prev, [data as LogEntry]))
+      } catch { /* heartbeat */ }
+    }
+    es.addEventListener('activity', (event) => {
+      try { setSelActivityStr(JSON.parse((event as MessageEvent).data).activity || 'idle') } catch { /* ignore */ }
+    })
+    return () => { es.close(); selEsRef.current = null }
+  }, [activeId, selConnected])
+
+  // Staleness tick so a finished jump decays out of "traveling".
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 1500)
+    return () => clearInterval(t)
+  }, [])
+
+  const selActivity = useMemo(() => {
+    if (!activeId) return null
+    const toolCalls: LogRef[] = selEntries.filter(e => e.type === 'tool_call').slice(-12).map(e => ({ summary: e.summary, timestamp: e.timestamp }))
+    const notifs: LogRef[] = selEntries.filter(e => e.type === 'notification' || e.type === 'server_message').slice(-12).map(e => ({ summary: e.summary, timestamp: e.timestamp }))
+    return deriveActivity({
+      activityString: selActivityStr,
+      recentToolCalls: toolCalls,
+      recentNotifications: notifs,
+      gameState: playerDataMap[activeId] || null,
+      connected: selConnected,
+      running: statuses[activeId]?.running ?? false,
+      now: nowTick,
+    })
+  }, [activeId, selEntries, selActivityStr, playerDataMap, statuses, selConnected, nowTick])
+
+  // Destination system from the latest jump tool call (only while traveling).
+  const selDestination = useMemo(() => {
+    if (!activeId || !selActivity || selActivity.kind !== 'traveling') return null
+    const jumps = selEntries.filter(e => e.type === 'tool_call' && /^game\(\s*jump/i.test(e.summary))
+    const latest = jumps[jumps.length - 1]
+    if (!latest) return null
+    const parsed = parseGameSubcommand(latest.summary)
+    const m = parsed?.args.match(/target_system\s*=\s*([^,\s)]+)/i)
+    if (!m) return null
+    return resolveSystem(m[1].trim()) ?? null
+  }, [activeId, selActivity, selEntries, resolveSystem])
+
+  // Breadcrumb history of recent systems for the selected agent.
+  const [trailIds, setTrailIds] = useState<string[]>([])
+  useEffect(() => {
+    setTrailIds(selectedAgent ? [selectedAgent.system.system_id] : [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId])
+  useEffect(() => {
+    if (!selectedAgent) return
+    setTrailIds(prev => {
+      const cur = selectedAgent.system.system_id
+      if (prev[prev.length - 1] === cur) return prev
+      const next = [...prev, cur]
+      return next.length > 6 ? next.slice(-6) : next
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAgent?.system.system_id])
+
+  const selTrail = useMemo(
+    () => trailIds.map(id => systemById.get(id)).filter((s): s is GalaxySystem => !!s),
+    [trailIds, systemById],
+  )
+
+  // Activity label per agent: precise for the selected one, coarse for the rest.
+  const activityLabels = useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const ap of agentPositions) {
+      const id = ap.profile.id
+      m[id] = (id === activeId && selActivity) ? selActivity.label : coarseActivity(statuses[id]?.activity)
+    }
+    return m
+  }, [agentPositions, activeId, selActivity, statuses])
+
   // Fetch galaxy data
   const fetchGalaxy = useCallback(async (forceRefresh = false) => {
     setLoading(true)
@@ -131,6 +271,17 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
   }, [])
 
   useEffect(() => { fetchGalaxy() }, [fetchGalaxy])
+
+  // r3f can mount the Canvas before its container is measured (it gets stuck at
+  // the default 300x150). Nudge a few resizes once the galaxy loads — spaced out
+  // so at least one lands after r3f has attached its own resize listener.
+  useEffect(() => {
+    if (!galaxyData) return
+    const timers = [0, 120, 350, 700, 1200].map(d =>
+      setTimeout(() => window.dispatchEvent(new Event('resize')), d),
+    )
+    return () => timers.forEach(clearTimeout)
+  }, [galaxyData])
 
   // Theme observer
   useEffect(() => {
@@ -181,6 +332,27 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
       true
     )
   }, [systemByName])
+
+  // Auto-fly to the selected agent once when the map opens with one chosen.
+  // Retries until CameraControls is mounted (ref readiness doesn't trigger effects).
+  const centeredRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!galaxyData || !selectedAgent) return
+    if (centeredRef.current === activeId) return
+    let cancelled = false
+    let tries = 0
+    const tryCenter = () => {
+      if (cancelled) return
+      if (controlsRef.current) {
+        centeredRef.current = activeId ?? null
+        centerOnSystem(selectedAgent.system.name)
+        return
+      }
+      if (tries++ < 40) setTimeout(tryCenter, 100)
+    }
+    const t = setTimeout(tryCenter, 150)
+    return () => { cancelled = true; clearTimeout(t) }
+  }, [galaxyData, selectedAgent, activeId, centerOnSystem])
 
   const handleSelect = useCallback((sys: GalaxySystem) => {
     setSelectedSystem(prev => prev?.system_id === sys.system_id ? null : sys)
@@ -239,8 +411,17 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
             onSelect={handleSelect}
           />
           <SystemLabels systems={galaxyData.systems} agents={agentPositions} hoveredId={hoveredId} colors={colors} />
-          <AgentMarkers agents={agentPositions} colors={colors} />
+          <AgentMarkers agents={agentPositions} colors={colors} selectedId={activeId} activityLabels={activityLabels} onSelect={onSelectAgent} />
           <AgentHeadings agents={agentPositions} headings={agentHeadings} colors={colors} />
+          {selectedAgent && (
+            <AgentRoute
+              trail={selTrail}
+              current={selectedAgent.system}
+              destination={selDestination ?? null}
+              label={selActivity?.label}
+              color={colors.agents[selectedAgent.index % colors.agents.length]}
+            />
+          )}
           {selectedSystem && (
             <SystemPopup
               system={selectedSystem}
@@ -277,6 +458,8 @@ export function FleetMap({ profiles, statuses, playerDataMap, fullscreen, onTogg
         statuses={statuses}
         playerDataMap={playerDataMap}
         onCenter={centerOnSystem}
+        onSelect={onSelectAgent}
+        selectedId={activeId}
       />
 
       <FleetIntelPanel />

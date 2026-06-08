@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Shield, Heart, Fuel, Package, Cpu, Zap, MapPin, DollarSign, Flag } from 'lucide-react'
+import { Shield, Heart, Fuel, Package, Cpu, Zap, MapPin, DollarSign } from 'lucide-react'
 
 const LS_KEY = 'admiral-status-compact'
 
@@ -36,9 +36,6 @@ export function PlayerStatus({ data }: Props) {
   const systemName = player.current_system || location.system_name || data.system || '?'
   const poiName = player.current_poi || location.poi_name || data.poi || '?'
   const credits = player.credits ?? data.credits ?? 0
-  const factionRaw = data.faction ?? player.faction
-  const factionName = factionRaw && typeof factionRaw === 'object' ? (factionRaw as Record<string, unknown>).name : factionRaw
-  const factionTag = data.faction_tag ?? (factionRaw && typeof factionRaw === 'object' ? (factionRaw as Record<string, unknown>).tag : undefined)
 
   // Ship stats: slimGameState returns pre-formatted strings like "110/110",
   // full state returns separate numeric fields (hull, max_hull, etc.)
@@ -51,7 +48,6 @@ export function PlayerStatus({ data }: Props) {
 
   const stats: { icon: React.ReactNode; label: string; value: string; sub?: string; color?: string }[] = [
     { icon: <MapPin size={12} />, label: 'Location', value: `${systemName}`, sub: String(poiName) },
-    ...(factionName ? [{ icon: <Flag size={12} />, label: 'Faction', value: String(factionName), sub: factionTag ? `[${factionTag}]` : undefined, color: 'var(--smui-frost-2)' }] : []),
     { icon: <DollarSign size={12} />, label: 'Credits', value: Number(credits).toLocaleString(), color: 'var(--smui-yellow)' },
     { icon: <Heart size={12} />, label: 'Hull', value: shipStat('hull', 'max_hull', 'hull'), color: 'var(--destructive)' },
     { icon: <Shield size={12} />, label: 'Shield', value: shipStat('shield', 'max_shield', 'shield'), color: 'var(--primary)' },

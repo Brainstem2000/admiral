@@ -383,3 +383,120 @@
 .admiral-tour-popover .driver-popover-arrow-side-right .driver-popover-arrow {
   border-color: hsl(var(--border)) !important;
 }
+
+/* --- Character Dossier: surfaces --- */
+
+.dossier-card {
+  background: linear-gradient(180deg, hsl(var(--card)), hsl(var(--smui-surface-1)));
+  border: 1px solid hsl(var(--border));
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.dossier-card:hover {
+  border-color: hsl(var(--smui-border-hover));
+  box-shadow: 0 0 18px hsl(var(--primary) / 0.06);
+}
+
+.activity-stage {
+  background:
+    radial-gradient(circle at 50% 38%, hsl(var(--smui-surface-2) / 0.65), hsl(var(--smui-surface-0)) 72%);
+}
+
+/* --- Character Dossier: activity scene animations --- */
+
+/* Predictable transforms on inner SVG elements (scale/rotate around own center). */
+.svg-origin { transform-box: fill-box; transform-origin: center; }
+
+@keyframes scene-in { from { opacity: 0; } to { opacity: 1; } }
+.scene-fade { animation: scene-in 0.28s ease-out; }
+
+@keyframes star-drift {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+.star-strip {
+  animation-name: star-drift;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+@keyframes engine-glow {
+  0%, 100% { opacity: 0.4; transform: scaleX(0.8); }
+  50% { opacity: 1; transform: scaleX(1.3); }
+}
+.engine-glow { animation: engine-glow 0.9s ease-in-out infinite; transform-origin: right center; }
+
+@keyframes gear-spin { to { transform: rotate(360deg); } }
+@keyframes gear-spin-rev { to { transform: rotate(-360deg); } }
+.gear-spin { animation: gear-spin 6s linear infinite; }
+.gear-spin-rev { animation: gear-spin-rev 5s linear infinite; }
+
+@keyframes target-pulse {
+  0%, 100% { transform: scale(0.8); opacity: 0.7; }
+  50% { transform: scale(1.15); opacity: 1; }
+}
+.target-pulse { animation: target-pulse 1.1s ease-in-out infinite; }
+
+@keyframes muzzle-flash {
+  0% { opacity: 0; transform: scale(0.6); }
+  12% { opacity: 1; transform: scale(1.3); }
+  34% { opacity: 0; transform: scale(0.6); }
+  100% { opacity: 0; }
+}
+.muzzle-flash { animation: muzzle-flash 0.7s ease-out infinite; }
+
+@keyframes beam-flicker {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+.beam-flicker { animation: beam-flicker 0.5s ease-in-out infinite; }
+
+@keyframes spark-fly {
+  0% { transform: translate(0, 0); opacity: 1; }
+  100% { transform: translate(-22px, -14px); opacity: 0; }
+}
+.spark-fly { animation: spark-fly 0.8s ease-out infinite; }
+
+@keyframes coin-rise {
+  0% { transform: translateY(0); opacity: 0; }
+  20% { opacity: 1; }
+  100% { transform: translateY(-22px); opacity: 0; }
+}
+.coin-rise { animation: coin-rise 1.8s ease-out infinite; }
+
+@keyframes dock-slide {
+  0% { transform: translateX(0); opacity: 0; }
+  20% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { transform: translateX(120px); opacity: 0; }
+}
+.dock-slide { animation: dock-slide 3.4s ease-in-out infinite; }
+
+@keyframes dock-glow {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.7; }
+}
+.dock-glow { animation: dock-glow 2.4s ease-in-out infinite; }
+
+@keyframes think-pulse {
+  0%, 100% { transform: scale(0.7); opacity: 0.4; }
+  50% { transform: scale(1.1); opacity: 1; }
+}
+.think-pulse { animation: think-pulse 1.6s ease-in-out infinite; }
+
+@keyframes idle-blink {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.6; }
+}
+.idle-blink { animation: idle-blink 3.5s ease-in-out infinite; }
+
+@keyframes activity-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 hsl(var(--activity-accent) / 0.5); opacity: 1; }
+  50% { box-shadow: 0 0 6px 1px hsl(var(--activity-accent) / 0.6); opacity: 0.7; }
+}
+.activity-pulse { animation: activity-pulse 1.8s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-stage *,
+  .scene-fade,
+  .star-strip { animation: none !important; }
+}
