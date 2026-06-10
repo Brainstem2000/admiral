@@ -13,7 +13,7 @@ import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileTool
 import { runAgentTurn, type CompactionState } from './loop'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
 import { FleetIntelCollector } from './fleet-intel'
-import { startBriefingCollector, stopBriefingCollector, clearBriefingCache, buildSituationalBriefing } from './briefing'
+import { startBriefingCollector, stopBriefingCollector, clearBriefingCache, buildSituationalBriefing, buildFactionBriefing, getCachedSystemName } from './briefing'
 import { checkEventTriggers } from './event-watcher'
 import { EventEmitter } from 'events'
 import fs from 'fs'
@@ -405,6 +405,36 @@ export class Agent {
         nudgeParts.push('## PRIORITY: DOCK IMMEDIATELY\nYour human operator has issued a shutdown order. Dock at the nearest safe station NOW. Do not do anything else — just dock. You have ' + this.safeDockTurnsRemaining + ' turns remaining before forced disconnect.')
       } else {
         nudgeParts.push('Continue your mission.')
+      }
+
+      // Fleet-commander situational view (Phase 1 of autonomous leadership): inject a
+      // zero-cost, read-only roster of every other member so the designated commander
+      // (preference `fleet_commander_profile_id`) can lead from live data. Appended as an
+      // ephemeral per-turn message — NOT the cached system prompt — so member churn never
+      // invalidates the prompt cache. Honors the same `situational_briefing` kill switch.
+      if (
+        getPreference('situational_briefing') !== 'off' &&
+        this.profileId === getPreference('fleet_commander_profile_id')
+      ) {
+        const roster = listProfiles()
+          .filter((p) => p.id !== this.profileId)
+          .map((p) => ({ id: p.id, name: p.name }))
+        const factionBriefing = buildFactionBriefing(roster)
+        if (factionBriefing) nudgeParts.push(factionBriefing)
+      }
+
+      // Hunting Grounds: for COMBAT agents, append the nearest low-police belt systems the
+      // fleet has scanned (where NPC pirates spawn). Ephemeral message only — never the cached
+      // system prompt — so newly discovered grounds don't invalidate the prompt cache.
+      {
+        const cp = getProfile(this.profileId)
+        const isCombat =
+          /combat|hunt|pirate|warrior|war\b/i.test(cp?.group_name || '') ||
+          /hunt|warrior|pirate|combat/i.test(cp?.directive || '')
+        if (isCombat) {
+          const hunting = FleetIntelCollector.buildHuntingBriefing(getCachedSystemName(this.profileId))
+          if (hunting) nudgeParts.push(hunting)
+        }
       }
 
       context.messages.push({

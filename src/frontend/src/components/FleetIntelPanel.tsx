@@ -1,21 +1,29 @@
 import { useState, useEffect, useCallback } from 'react'
-import { ChevronDown, ChevronRight, AlertTriangle, TrendingUp, Globe, RefreshCw } from 'lucide-react'
-import type { FleetIntelData, MarketIntel, SystemIntel, ThreatIntel } from '@shared/fleet-intel-types'
+import { ChevronDown, ChevronRight, AlertTriangle, TrendingUp, Globe, RefreshCw, Crosshair } from 'lucide-react'
+import type { FleetIntelData, MarketIntel, SystemIntel, ThreatIntel, KillZone } from '@shared/fleet-intel-types'
 
-type Tab = 'market' | 'systems' | 'threats'
+type Tab = 'market' | 'systems' | 'threats' | 'hunting'
 
 export function FleetIntelPanel() {
   const [expanded, setExpanded] = useState(true)
   const [tab, setTab] = useState<Tab>('market')
   const [data, setData] = useState<FleetIntelData | null>(null)
+  const [hunting, setHunting] = useState<SystemIntel[]>([])
+  const [killZones, setKillZones] = useState<KillZone[]>([])
   const [loading, setLoading] = useState(false)
 
   const fetchIntel = useCallback(async () => {
     try {
       setLoading(true)
-      const resp = await fetch('/api/fleet-intel')
-      if (resp.ok) {
-        setData(await resp.json())
+      const [allResp, huntResp] = await Promise.all([
+        fetch('/api/fleet-intel'),
+        fetch('/api/fleet-intel?hunting=true'),
+      ])
+      if (allResp.ok) setData(await allResp.json())
+      if (huntResp.ok) {
+        const hj = await huntResp.json()
+        setHunting(hj.hunting_grounds || [])
+        setKillZones(hj.kill_zones || [])
       }
     } catch { /* silent */ } finally {
       setLoading(false)
@@ -57,6 +65,7 @@ export function FleetIntelPanel() {
             {([
               { id: 'market' as Tab, label: 'Market', icon: TrendingUp },
               { id: 'systems' as Tab, label: 'Systems', icon: Globe },
+              { id: 'hunting' as Tab, label: 'Hunt', icon: Crosshair },
               { id: 'threats' as Tab, label: 'Threats', icon: AlertTriangle },
             ]).map(t => (
               <button
@@ -88,6 +97,8 @@ export function FleetIntelPanel() {
               <MarketTab data={data.market} />
             ) : tab === 'systems' ? (
               <SystemsTab data={data.systems} />
+            ) : tab === 'hunting' ? (
+              <HuntingTab data={hunting} killZones={killZones} />
             ) : (
               <ThreatsTab data={data.threats} />
             )}
@@ -166,6 +177,75 @@ function SystemsTab({ data }: { data: SystemIntel[] }) {
             )}
           </div>
           <div className="text-[9px] text-muted-foreground/40 shrink-0">{sys.discovered_by}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function HuntingTab({ data, killZones }: { data: SystemIntel[]; killZones: KillZone[] }) {
+  if (data.length === 0 && killZones.length === 0) {
+    return <Empty message="No hunting grounds yet. Combat agents map confirmed kill zones (named spawn POIs) via get_nearby and low-police belts via get_system as they scan." />
+  }
+  const policeColor = (n: number | null) =>
+    n == null ? 'text-muted-foreground/50' : n <= 5 ? 'text-green-400' : n <= 20 ? 'text-yellow-400' : 'text-orange-400'
+  const typeLabel = (t: string) =>
+    t.replace('asteroid_belt', 'belt').replace('ice_field', 'ice').replace('gas_cloud', 'gas')
+  return (
+    <div className="divide-y divide-border/30">
+      {killZones.length > 0 && (
+        <div className="divide-y divide-border/30 bg-red-500/[0.04]">
+          <div className="px-3 py-1.5 text-[9px] text-red-400/80 uppercase tracking-wider flex items-center gap-1">
+            <Crosshair size={10} /> Confirmed kill zones — pirates actually spawn here
+          </div>
+          {killZones.slice(0, 12).map(z => {
+            const live = z.pirate_seen > 0
+            return (
+              <div key={z.poi_id} className="px-3 py-1.5 flex items-start gap-2">
+                <Crosshair size={11} className={`mt-0.5 shrink-0 ${live ? 'text-red-400' : 'text-orange-400/70'}`} />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-medium text-foreground truncate">{z.poi_name || z.poi_id}</span>
+                    {z.poi_type && (
+                      <span className="px-1 bg-secondary/40 text-[9px] uppercase tracking-wide shrink-0">{typeLabel(z.poi_type)}</span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground flex items-center gap-1.5 mt-0.5">
+                    <span className="text-muted-foreground/70">{z.system_name || z.system_id || '?'}</span>
+                    {live
+                      ? <span className="text-red-400">● {z.pirate_seen} pirate{z.pirate_seen === 1 ? '' : 's'} seen</span>
+                      : <span className="text-orange-400/80">{z.wreck_seen} wreck{z.wreck_seen === 1 ? '' : 's'}</span>}
+                  </div>
+                </div>
+                <div className="text-[9px] text-muted-foreground/40 shrink-0">{formatAge(z.last_pirate_at || z.updated_at)}</div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+      {data.length > 0 && (
+      <div className="px-3 py-1.5 text-[9px] text-muted-foreground/50 uppercase tracking-wider">
+        Low-police belts — broad coverage (get_system)
+      </div>
+      )}
+      {data.slice(0, 20).map(sys => (
+        <div key={sys.system_id} className="px-3 py-1.5 flex items-start gap-2">
+          <Crosshair size={11} className={`mt-0.5 shrink-0 ${policeColor(sys.police_level)}`} />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-medium text-foreground">{sys.system_name}</span>
+              <span className={`text-[9px] font-mono ${policeColor(sys.police_level)}`}>
+                {sys.police_level}♦ police
+              </span>
+            </div>
+            <div className="text-[10px] text-muted-foreground flex items-center gap-1 mt-0.5">
+              {(sys.poi_types || '').split(',').filter(Boolean).map(t => (
+                <span key={t} className="px-1 bg-secondary/40 text-[9px] uppercase tracking-wide">{typeLabel(t)}</span>
+              ))}
+              {sys.empire && <span className="text-muted-foreground/50 capitalize ml-1">{sys.empire}</span>}
+            </div>
+          </div>
+          <div className="text-[9px] text-muted-foreground/40 shrink-0">{formatAge(sys.updated_at)}</div>
         </div>
       ))}
     </div>

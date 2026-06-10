@@ -169,6 +169,8 @@ function migrate(db: Database): void {
       has_station INTEGER DEFAULT 0,
       station_services TEXT,
       resources TEXT,
+      police_level INTEGER,
+      poi_types TEXT,
       discovered_by TEXT NOT NULL,
       updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -184,6 +186,24 @@ function migrate(db: Database): void {
       expires_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_fit_system ON fleet_intel_threats(system_id);
+
+    -- Confirmed kill zones: NAMED POIs where pirates / pirate wrecks were observed via
+    -- get_nearby. These are the spawn nodes get_system is BLIND to (e.g. "Decay Chain
+    -- Formation" never appears in get_system's POI list), so they are captured separately,
+    -- keyed by poi_id and sourced only from on-site get_nearby scans.
+    CREATE TABLE IF NOT EXISTS fleet_intel_killzones (
+      poi_id TEXT PRIMARY KEY,
+      system_id TEXT,
+      system_name TEXT,
+      poi_name TEXT,
+      poi_type TEXT,
+      pirate_seen INTEGER DEFAULT 0,
+      wreck_seen INTEGER DEFAULT 0,
+      last_pirate_at TEXT,
+      discovered_by TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_fik_system ON fleet_intel_killzones(system_id);
   `)
 
   // Financial snapshots for session-level tracking
@@ -263,6 +283,18 @@ function migrate(db: Database): void {
   }
   if (!fordCols.some(c => c.name === 'next_orders')) {
     db.exec('ALTER TABLE fleet_orders ADD COLUMN next_orders TEXT DEFAULT NULL')
+  }
+
+  // Migrate fleet_intel_systems: add police_level + poi_types for the Hunting Grounds finder.
+  // Kept NULLABLE (no DEFAULT) so "never scanned via get_system" (NULL) stays distinct from
+  // "lawless" (0) — the getHuntingGrounds query relies on `police_level IS NOT NULL`.
+  const fisCols = db.query("PRAGMA table_info(fleet_intel_systems)").all() as { name: string }[]
+  if (!fisCols.some(c => c.name === 'police_level')) {
+    db.exec('ALTER TABLE fleet_intel_systems ADD COLUMN police_level INTEGER')
+    db.exec('CREATE INDEX IF NOT EXISTS idx_fis_police ON fleet_intel_systems(police_level)')
+  }
+  if (!fisCols.some(c => c.name === 'poi_types')) {
+    db.exec('ALTER TABLE fleet_intel_systems ADD COLUMN poi_types TEXT')
   }
 
   // Drop legacy table (storage credits now parsed from agent memory)
@@ -556,12 +588,14 @@ export function pruneOldData(opts?: {
   const intelCutoff = cutoff(intelDays)
   const m = db.query('DELETE FROM fleet_intel_market WHERE updated_at < ?').run(intelCutoff).changes
   const s = db.query('DELETE FROM fleet_intel_systems WHERE updated_at < ?').run(intelCutoff).changes
+  // Kill zones are rare + high-value; retain ~4x longer than ordinary intel before pruning.
+  const kz = db.query('DELETE FROM fleet_intel_killzones WHERE updated_at < ?').run(cutoff(intelDays * 4)).changes
 
   // Hand freed pages back to the OS so the file actually shrinks after a prune. No-op unless the
   // DB uses auto_vacuum = INCREMENTAL (set at init; existing DBs adopt it after the one-time VACUUM).
   try { db.exec('PRAGMA incremental_vacuum') } catch { /* ignore */ }
 
-  return { logs, snapshots, intel: m + s }
+  return { logs, snapshots, intel: m + s + kz }
 }
 
 // --- Preferences CRUD ---

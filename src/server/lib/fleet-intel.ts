@@ -1,5 +1,5 @@
 import { getDb } from './db'
-import type { FleetIntelData, MarketIntel, SystemIntel, ThreatIntel } from '../../shared/fleet-intel-types'
+import type { FleetIntelData, MarketIntel, SystemIntel, ThreatIntel, KillZone } from '../../shared/fleet-intel-types'
 
 type R = Record<string, unknown>
 
@@ -93,18 +93,24 @@ export class FleetIntelCollector {
   }
 
   private static processSystem(r: R, reportedBy: string): void {
-    const systemId = str(r.system_id || r.id || '')
-    const systemName = str(r.name || r.system_name || '')
+    // get_system (v1 http — what every agent currently uses) nests the data:
+    //   { action, system: { id, name, empire, police_level, pois: [...] }, security_status }
+    // so the system fields live under r.system, NOT at the root. mcp/v2 connections may
+    // pre-unwrap via structuredContent, so fall back to r itself. (This deref also repairs a
+    // pre-existing bug where has_station/resources were never captured from get_system.)
+    const sysObj = (r.system && typeof r.system === 'object') ? (r.system as R) : r
+    const systemId = str(sysObj.system_id || sysObj.id || '')
+    const systemName = str(sysObj.name || sysObj.system_name || '')
     if (!systemId || !systemName) return
 
-    const pois = Array.isArray(r.pois) ? r.pois : []
+    const pois = Array.isArray(sysObj.pois) ? sysObj.pois : []
     const hasStation = pois.some((p: unknown) => {
       if (!p || typeof p !== 'object') return false
       const poi = p as R
       return str(poi.type).includes('station') || str(poi.type).includes('base')
     })
 
-    // Extract resource types from POIs
+    // Extract resource types from POIs (best-effort; field may be absent)
     const resources: string[] = []
     for (const p of pois) {
       if (!p || typeof p !== 'object') continue
@@ -113,23 +119,37 @@ export class FleetIntelCollector {
       if (resType && !resources.includes(resType)) resources.push(resType)
     }
 
+    // Hunting Grounds intel: police level + the POI types where NPC pirates spawn.
+    const policeLevel = num(sysObj.police_level)
+    const HUNT_TYPES = ['asteroid_belt', 'ice_field', 'gas_cloud']
+    const poiTypes: string[] = []
+    for (const p of pois) {
+      if (!p || typeof p !== 'object') continue
+      const t = str((p as R).type).toLowerCase()
+      if (HUNT_TYPES.includes(t) && !poiTypes.includes(t)) poiTypes.push(t)
+    }
+
     const db = getDb()
     db.query(`
-      INSERT INTO fleet_intel_systems (system_id, system_name, empire, poi_count, has_station, resources, discovered_by, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      INSERT INTO fleet_intel_systems (system_id, system_name, empire, poi_count, has_station, resources, police_level, poi_types, discovered_by, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       ON CONFLICT(system_id) DO UPDATE SET
         system_name = excluded.system_name,
         empire = COALESCE(excluded.empire, fleet_intel_systems.empire),
         poi_count = excluded.poi_count,
         has_station = MAX(fleet_intel_systems.has_station, excluded.has_station),
         resources = CASE WHEN excluded.resources IS NOT NULL THEN excluded.resources ELSE fleet_intel_systems.resources END,
+        police_level = COALESCE(excluded.police_level, fleet_intel_systems.police_level),
+        poi_types = CASE WHEN excluded.poi_types IS NOT NULL THEN excluded.poi_types ELSE fleet_intel_systems.poi_types END,
         updated_at = datetime('now')
     `).run(
       systemId, systemName,
-      str(r.empire || '') || null,
+      str(sysObj.empire || '') || null,
       pois.length,
       hasStation ? 1 : 0,
       resources.length > 0 ? resources.join(',') : null,
+      policeLevel,
+      poiTypes.length > 0 ? poiTypes.join(',') : null,
       reportedBy,
     )
   }
@@ -155,20 +175,60 @@ export class FleetIntelCollector {
   }
 
   private static processNearby(r: R, reportedBy: string): void {
-    const players = r.players as unknown[] | undefined
-    if (!Array.isArray(players) || players.length === 0) return
+    // KILL-ZONE CAPTURE. get_nearby is the ONLY call that reveals named spawn-node POIs
+    // (e.g. "Decay Chain Formation") — get_system omits them entirely. So when an agent
+    // scans on-site and finds live pirates OR pirate wrecks, record that NAMED POI as a
+    // confirmed kill zone, keyed by poi_id. This is the high-signal complement to the
+    // generic low-police-belt atlas built from get_system.
+    const poiObj = (r.poi && typeof r.poi === 'object') ? (r.poi as R) : {}
+    const poiId = str(poiObj.id || poiObj.poi_id || r.poi_id || '')
+    if (!poiId) return
 
-    const systemId = str(r.system_id || '')
-    const systemName = str(r.system_name || '')
+    const poiName = str(poiObj.name || '')
+    const poiType = str(poiObj.type || '')
+    const systemId = str(poiObj.system_id || r.system_id || '')
+    const systemName = str(poiObj.system_name || r.system_name || '')
 
-    for (const p of players) {
-      if (!p || typeof p !== 'object') continue
-      const player = p as R
-      const name = str(player.username || player.name || 'Unknown')
-      const faction = str(player.faction || '')
-      // Only flag as threat if they seem hostile (armed, at war, etc.)
-      // For now just record player presence without creating threat — too noisy otherwise
+    // Live pirate presence here, right now (strongest signal).
+    const pirates = Array.isArray(r.pirates) ? r.pirates : []
+    const pirateCount = Math.max(int(r.pirate_count), pirates.length)
+
+    // Pirate wrecks here = this POI is a PROVEN kill zone even when the spawn is down.
+    const wrecks = Array.isArray(r.wrecks) ? (r.wrecks as R[]) : []
+    let pirateWrecks = 0
+    for (const w of wrecks) {
+      if (w && typeof w === 'object' && str((w as R).type).toLowerCase().includes('pirate')) pirateWrecks++
     }
+
+    // Only record when there is COMBAT EVIDENCE. Empty belts belong in fleet_intel_systems,
+    // not here — this table must stay a list of CONFIRMED spawn nodes, not every POI scanned.
+    if (pirateCount === 0 && pirateWrecks === 0) return
+
+    const nowUtc = new Date().toISOString().slice(0, 19).replace('T', ' ')
+    const db = getDb()
+    db.query(`
+      INSERT INTO fleet_intel_killzones (poi_id, system_id, system_name, poi_name, poi_type, pirate_seen, wreck_seen, last_pirate_at, discovered_by, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(poi_id) DO UPDATE SET
+        system_id = CASE WHEN excluded.system_id IS NOT NULL THEN excluded.system_id ELSE fleet_intel_killzones.system_id END,
+        system_name = CASE WHEN excluded.system_name IS NOT NULL THEN excluded.system_name ELSE fleet_intel_killzones.system_name END,
+        poi_name = CASE WHEN excluded.poi_name IS NOT NULL THEN excluded.poi_name ELSE fleet_intel_killzones.poi_name END,
+        poi_type = CASE WHEN excluded.poi_type IS NOT NULL THEN excluded.poi_type ELSE fleet_intel_killzones.poi_type END,
+        pirate_seen = MAX(fleet_intel_killzones.pirate_seen, excluded.pirate_seen),
+        wreck_seen = MAX(fleet_intel_killzones.wreck_seen, excluded.wreck_seen),
+        last_pirate_at = CASE WHEN excluded.last_pirate_at IS NOT NULL THEN excluded.last_pirate_at ELSE fleet_intel_killzones.last_pirate_at END,
+        updated_at = datetime('now')
+    `).run(
+      poiId,
+      systemId || null,
+      systemName || null,
+      poiName || null,
+      poiType || null,
+      pirateCount,
+      pirateWrecks,
+      pirateCount > 0 ? nowUtc : null,
+      reportedBy,
+    )
   }
 
   private static processScan(r: R, reportedBy: string): void {
@@ -319,5 +379,96 @@ export class FleetIntelCollector {
     }
 
     return { market, systems, threats }
+  }
+
+  /**
+   * Hunting Grounds: low/zero-police systems that have a belt/ice/gas POI — i.e. where
+   * NPC pirates spawn (per the pirate-hunter doctrine: pirates live in unpoliced space).
+   * Only returns systems actually scanned via get_system (police_level IS NOT NULL); rows
+   * known only from get_map have NULL police and are correctly excluded.
+   */
+  static getHuntingGrounds(maxPolice = 20): SystemIntel[] {
+    this.cleanup()
+    return getDb().query(`
+      SELECT * FROM fleet_intel_systems
+      WHERE police_level IS NOT NULL AND police_level <= ?
+        AND (poi_types LIKE '%asteroid_belt%' OR poi_types LIKE '%ice_field%' OR poi_types LIKE '%gas_cloud%')
+      ORDER BY police_level ASC, poi_count DESC, updated_at DESC
+      LIMIT 50
+    `).all(maxPolice) as SystemIntel[]
+  }
+
+  /**
+   * Confirmed kill zones: NAMED spawn-node POIs where pirates / pirate wrecks were actually
+   * observed via on-site get_nearby. Ordered by freshest live-pirate sighting first, then by
+   * wreck evidence. These are the highest-signal combat targets the fleet knows about.
+   */
+  static getKillZones(limit = 25): KillZone[] {
+    return getDb().query(`
+      SELECT * FROM fleet_intel_killzones
+      ORDER BY
+        CASE WHEN last_pirate_at IS NOT NULL THEN 0 ELSE 1 END,
+        last_pirate_at DESC,
+        wreck_seen DESC,
+        updated_at DESC
+      LIMIT ?
+    `).all(limit) as KillZone[]
+  }
+
+  /**
+   * Compact, append-only briefing for a combat agent: CONFIRMED KILL ZONES (named spawn nodes)
+   * first, then the nearest low-police belts. Injected into the per-turn ephemeral message (NOT
+   * the cached system prompt), so newly discovered grounds never invalidate the prompt cache.
+   * Empty string if nothing useful is known.
+   */
+  static buildHuntingBriefing(currentSystem?: string): string {
+    const sections: string[] = []
+
+    // 1) Confirmed kill zones — named POIs where pirates actually spawned (get_system can't see these).
+    const zones = this.getKillZones(8)
+    if (zones.length > 0) {
+      const lines = zones.map(z => {
+        const sys = z.system_name || z.system_id || '?'
+        const where = z.poi_name || z.poi_id
+        const type = z.poi_type ? ` [${z.poi_type}]` : ''
+        const evid = z.pirate_seen > 0
+          ? `pirates seen (max ${z.pirate_seen})`
+          : `${z.wreck_seen} pirate wreck${z.wreck_seen === 1 ? '' : 's'}`
+        const fresh = z.last_pirate_at ? ` — last pirates ${z.last_pirate_at} UTC` : ''
+        return `- ${sys} → ${where}${type}: ${evid}${fresh}`
+      })
+      sections.push(
+        '## CONFIRMED KILL ZONES (named spawn POIs — pirates/wrecks actually seen here)\n' +
+        'These NAMED POIs are where pirates ACTUALLY spawn. get_system does NOT list them, so: ' +
+        'find_route/jump to the SYSTEM, then get_nearby to reach the named POI. Camp the one with the ' +
+        'freshest pirate sighting — the spawn is on a TIMER, so HOLD and re-scan rather than leaving on ' +
+        'one empty scan.\n' +
+        lines.join('\n')
+      )
+    }
+
+    // 2) Generic low-police belts (broad coverage from get_system).
+    const grounds = this.getHuntingGrounds(20)
+    if (grounds.length > 0) {
+      const norm = (s: string) => (s || '').toLowerCase().replace(/_/g, ' ').trim()
+      const here = currentSystem ? grounds.find(g => norm(g.system_name) === norm(currentSystem)) : undefined
+      const ordered = here ? [here, ...grounds.filter(g => g !== here)] : grounds
+      const lines = ordered.slice(0, 6).map(s => {
+        const types = (s.poi_types || '')
+          .split(',')
+          .map(t => t.replace('asteroid_belt', 'belt').replace('ice_field', 'ice').replace('gas_cloud', 'gas'))
+          .join('/')
+        const hereTag = here && s === here ? '  [YOU ARE HERE — hunt it]' : ''
+        return `- ${s.system_name}: ${types} | ${s.police_level} police${hereTag}`
+      })
+      sections.push(
+        '## NEAREST LOW-POLICE BELTS (pirate hunting grounds — scanned by your fleet)\n' +
+        'Rotate these belt/ice/gas systems to find NPC pirates already present. Lower police = more pirates. ' +
+        'If a system is not listed, get_system it on arrival to add it to the fleet map.\n' +
+        lines.join('\n')
+      )
+    }
+
+    return sections.join('\n\n')
   }
 }

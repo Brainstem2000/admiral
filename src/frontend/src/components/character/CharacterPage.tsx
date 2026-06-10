@@ -59,13 +59,22 @@ export function CharacterPage({ profile, status, playerData, onOpenEditor }: Pro
     setActivityString('idle')
   }, [profile.id])
 
-  // HTTP seed for reliable initial data — matches LogPane (SSE _init alone lags).
+  // HTTP seed + CONTINUOUS re-sync. The one-shot seed brings the feed current on
+  // mount; the interval guarantees it keeps converging to the live state even if the
+  // SSE stream drops or silently misses entries — so the Recent Activity feed stays
+  // FULLY SYNCED with the Fleet log rather than drifting behind. The dedup in
+  // mergeEntries makes each poll a no-op when nothing is new (cheap).
   useEffect(() => {
     const pid = profile.id
-    fetch(`/api/profiles/${pid}/logs`)
-      .then(r => r.json())
-      .then((data: LogEntry[]) => { if (Array.isArray(data)) mergeEntries(pid, data) })
-      .catch(() => {})
+    const poll = () => {
+      fetch(`/api/profiles/${pid}/logs`)
+        .then(r => r.json())
+        .then((data: LogEntry[]) => { if (Array.isArray(data)) mergeEntries(pid, data) })
+        .catch(() => {})
+    }
+    poll() // immediate seed
+    const t = setInterval(poll, 3000) // continuous re-sync
+    return () => clearInterval(t)
   }, [profile.id, mergeEntries])
 
   // Live log + activity stream.

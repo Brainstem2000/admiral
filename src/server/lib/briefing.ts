@@ -277,3 +277,61 @@ export function buildSituationalBriefing(profileId: string): string {
 
   return lines.join('\n')
 }
+
+/**
+ * Build a compact, ZERO-COST fleet roster briefing for a faction commander.
+ *
+ * Pure read of the per-agent briefing caches (`agentCaches`) — no game ticks, no
+ * LLM round-trip, no extra connection queries. One line per member. Members with
+ * no cached status (offline / collector not yet warmed) are shown as offline so the
+ * commander still sees the gap.
+ *
+ * Injected by agent.ts as an APPENDED ephemeral message (like a nudge), NOT baked
+ * into the cached system prompt — so member movement never invalidates the
+ * commander's prompt cache (the system-prompt cache invariant is untouched).
+ */
+export function buildFactionBriefing(members: Array<{ id: string; name: string }>): string {
+  if (!members || members.length === 0) return ''
+  const now = Date.now()
+  const rows: string[] = []
+  for (const m of members.slice(0, 8)) {
+    const cache = agentCaches.get(m.id)
+    if (!cache || !cache.status || cache.updatedAt === 0) {
+      rows.push(`- ${m.name}: offline / no recent data`)
+      continue
+    }
+    const gs = cache.status
+    const player = gs.player as Record<string, unknown> | undefined
+    const ship = gs.ship as Record<string, unknown> | undefined
+    const { system, poi } = readLocation(gs)
+    const credits = Number(player?.credits ?? gs.credits ?? 0)
+    const shipClass = String(ship?.class_id ?? ship?.class ?? ship?.name ?? '?')
+    const hull = ship?.hull ?? '?'
+    const maxHull = ship?.max_hull ?? '?'
+    const docked = isAgentDocked(gs)
+    const age = Math.round((now - cache.updatedAt) / 1000)
+    const loc = docked ? `docked ${poi || system}` : `${system}${poi ? '>' + poi : ''}`
+    rows.push(`- ${m.name}: ${loc} | ${shipClass} hull ${hull}/${maxHull} | ${fmtNum(credits)}cr | ${age}s ago`)
+  }
+  if (rows.length === 0) return ''
+  return (
+    '## FLEET STATUS — your faction, live (read-only)\n' +
+    'You are the fleet commander. Lead from this data: review each member, then DIRECT them via ' +
+    'faction missions, fleet orders, and chat. You may NOT change any member\'s model, directive, ' +
+    'memory, or connection (not even your own) — raise those to your human operator.\n' +
+    rows.join('\n')
+  )
+}
+
+/**
+ * Best-effort current system NAME for an agent, read from the zero-cost briefing cache.
+ * Returns undefined when unknown (e.g. mid-jump). Used to localize the Hunting Grounds
+ * briefing to where the agent actually is. agentCaches / readLocation are module-private,
+ * so this accessor is exported for the agent loop.
+ */
+export function getCachedSystemName(profileId: string): string | undefined {
+  const cache = agentCaches.get(profileId)
+  if (!cache || !cache.status) return undefined
+  const { system } = readLocation(cache.status)
+  return system && system !== '?' ? system : undefined
+}
