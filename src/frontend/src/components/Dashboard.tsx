@@ -26,7 +26,10 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const [searchParams, setSearchParams] = useSearchParams()
   const activeId = searchParams.get('profile') || initialProfiles[0]?.id || ''
   const setActiveId = (id: string | null) => {
-    const params = new URLSearchParams(searchParams)
+    // Read the live URL, not the router snapshot — CharacterPage writes ?ctab=
+    // via history.replaceState, which the router never sees; copying the stale
+    // snapshot here would drop it on agent switch.
+    const params = new URLSearchParams(window.location.search)
     if (id) { params.set('profile', id) } else { params.delete('profile') }
     setSearchParams(params)
   }
@@ -35,7 +38,10 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const [playerDataMap, setPlayerDataMap] = useState<Record<string, Record<string, unknown>>>({})
   const [showWizard, setShowWizard] = useState(false)
   const [showTour, setShowTour] = useState(false)
-  const [view, setView] = useState<'profiles' | 'character' | 'map' | 'analytics'>('profiles')
+  const [view, setView] = useState<'profiles' | 'character' | 'map' | 'analytics'>(() => {
+    // ?ctab= deep links land on the dossier instead of the Fleet editor.
+    try { return new URLSearchParams(window.location.search).has('ctab') ? 'character' : 'profiles' } catch { return 'profiles' }
+  })
   const [warRoom, setWarRoom] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try { return localStorage.getItem('admiral-sidebar-open') !== 'false' } catch { return true }

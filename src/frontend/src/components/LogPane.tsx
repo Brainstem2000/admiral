@@ -1,64 +1,17 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import { ArrowDown, ArrowUp, Check, Copy, Loader2, Minus, X } from 'lucide-react'
+import { useState, useRef, useEffect, useCallback, useMemo, useDeferredValue } from 'react'
+import { ArrowDown, ArrowUp, Check, Copy, Loader2, X } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useSearchParams } from 'react-router'
 import type { LogEntry, LogType } from '@/types'
 import { JsonHighlight } from './JsonHighlight'
 import { MarkdownRenderer } from './MarkdownRenderer'
-
-const FILTER_GROUPS: { key: string; label: string; types: LogType[] }[] = [
-  { key: 'call', label: 'Call', types: ['llm_call'] },
-  { key: 'llm', label: 'LLM', types: ['llm_thought'] },
-  { key: 'tools', label: 'Tools', types: ['tool_call', 'tool_result'] },
-  { key: 'server', label: 'Server', types: ['server_message', 'notification'] },
-  { key: 'errors', label: 'Errors', types: ['error'] },
-  { key: 'system', label: 'System', types: ['connection', 'system'] },
-]
-
-const ALL_FILTER_KEYS = FILTER_GROUPS.map(g => g.key)
+import {
+  FILTER_GROUPS, ALL_FILTER_KEYS, BADGE_CLASS, TYPE_LABELS,
+  FilterCheckbox, loadSavedFilters, persistFilters, toISO,
+} from './log/log-shared'
 
 // Per-profile cache survives component remounts — instant data on switch
 const logCache = new Map<string, LogEntry[]>()
-
-// Persist filter selections across profile switches via localStorage
-const FILTER_STORAGE_KEY = 'admiral-log-filters'
-function loadSavedFilters(): Set<string> | null {
-  try {
-    const stored = localStorage.getItem(FILTER_STORAGE_KEY)
-    if (stored) {
-      const arr = JSON.parse(stored)
-      if (Array.isArray(arr)) return new Set(arr as string[])
-    }
-  } catch { /* ignore */ }
-  return null
-}
-function persistFilters(filters: Set<string>) {
-  try { localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify([...filters])) } catch { /* ignore */ }
-}
-
-const BADGE_CLASS: Record<string, string> = {
-  connection: 'log-badge-connection',
-  error: 'log-badge-error',
-  llm_call: 'log-badge-llm_call',
-  llm_thought: 'log-badge-llm_thought',
-  tool_call: 'log-badge-tool_call',
-  tool_result: 'log-badge-tool_result',
-  server_message: 'log-badge-server_message',
-  notification: 'log-badge-notification',
-  system: 'log-badge-system',
-}
-
-const TYPE_LABELS: Record<string, string> = {
-  connection: 'CONNECT',
-  error: 'ERROR',
-  llm_call: 'CALL',
-  llm_thought: 'LLM',
-  tool_call: 'TOOL',
-  tool_result: 'RESULT',
-  server_message: 'SERVER',
-  notification: 'NOTIFY',
-  system: 'SYSTEM',
-}
 
 interface Props {
   profileId: string
@@ -78,11 +31,13 @@ export function LogPane({ profileId, connected }: Props) {
   const [searchParams, setSearchParams] = useSearchParams()
   const selectedLogId = searchParams.get('log') ? parseInt(searchParams.get('log')!) : null
   const setSelectedLogId = (id: number | null) => {
-    const params = new URLSearchParams(searchParams)
+    // Live URL, not router snapshot — preserves ?ctab= written via replaceState.
+    const params = new URLSearchParams(window.location.search)
     if (id !== null) { params.set('log', String(id)) } else { params.delete('log') }
     setSearchParams(params)
   }
   const [autoScroll, setAutoScroll] = useState(true)
+  const [search, setSearch] = useState('')
   const [activity, setActivity] = useState('idle')
   const scrollRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
@@ -190,12 +145,18 @@ export function LogPane({ profileId, connected }: Props) {
     return types
   }, [enabledFilters])
 
-  const filtered = useMemo(() =>
-    enabledFilters.size === ALL_FILTER_KEYS.length
+  // Deferred so keystrokes stay responsive while large detail blobs are scanned
+  const deferredSearch = useDeferredValue(search)
+  const filtered = useMemo(() => {
+    const typeFiltered = enabledFilters.size === ALL_FILTER_KEYS.length
       ? entries
-      : entries.filter(e => allowedTypes.has(e.type)),
-    [entries, enabledFilters, allowedTypes]
-  )
+      : entries.filter(e => allowedTypes.has(e.type))
+    const q = deferredSearch.trim().toLowerCase()
+    if (!q) return typeFiltered
+    return typeFiltered.filter(e =>
+      (e.summary ?? '').toLowerCase().includes(q) || (e.detail ?? '').toLowerCase().includes(q)
+    )
+  }, [entries, enabledFilters, allowedTypes, deferredSearch])
 
   // Compute counts per filter group
   const counts = useMemo(() => {
@@ -265,7 +226,7 @@ export function LogPane({ profileId, connected }: Props) {
   return (
     <div className="flex flex-col h-full relative">
       {/* Filter checkboxes */}
-      <div className="flex items-center gap-0.5 bg-card border-b border-border px-2 py-1.5">
+      <div className="flex items-center flex-wrap gap-0.5 bg-card border-b border-border px-2 py-1.5">
         <FilterCheckbox
           label="All"
           checked={allChecked}
@@ -283,6 +244,12 @@ export function LogPane({ profileId, connected }: Props) {
           />
         ))}
         <div className="flex-1" />
+        <input
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="search..."
+          className="bg-background border border-border text-[11px] font-mono px-2 py-1 w-36 text-foreground outline-none focus:border-primary/40 placeholder:text-muted-foreground/40"
+        />
         {entries.length > 0 && (
           <button
             onClick={handleClear}
@@ -299,7 +266,9 @@ export function LogPane({ profileId, connected }: Props) {
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto text-xs">
         {filtered.length === 0 ? (
           <div className="flex items-center justify-center h-full text-muted-foreground text-xs">
-            No log entries yet. Connect a profile to see activity.
+            {entries.length === 0
+              ? 'No log entries yet. Connect a profile to see activity.'
+              : 'No entries match the current filters.'}
           </div>
         ) : (
           <div style={{ height: virtualizer.getTotalSize(), width: '100%', position: 'relative' }}>
@@ -545,47 +514,10 @@ function LogDetailModal({ entry, onClose }: { entry: LogEntry; onClose: () => vo
   )
 }
 
-function FilterCheckbox({ label, count, checked, indeterminate, onChange }: {
-  label: string
-  count?: number
-  checked: boolean
-  indeterminate?: boolean
-  onChange: () => void
-}) {
-  return (
-    <button
-      onClick={onChange}
-      className="flex items-center gap-1.5 px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors leading-none"
-    >
-      <span className={`w-3 h-3 border flex items-center justify-center shrink-0 ${
-        checked || indeterminate
-          ? 'bg-primary/20 border-primary/60'
-          : 'border-border'
-      }`}>
-        {checked && <Check size={9} className="text-primary" />}
-        {indeterminate && <Minus size={9} className="text-primary" />}
-      </span>
-      <span className="uppercase tracking-wider font-medium">{label}</span>
-      {count !== undefined && count > 0 && (
-        <span className="text-[9px] tabular-nums text-muted-foreground/50">{count}</span>
-      )}
-    </button>
-  )
-}
-
 function looksLikeJson(text: string): boolean {
   const trimmed = text.trim()
   return (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
          (trimmed.startsWith('[') && trimmed.endsWith(']'))
-}
-
-/** Normalize a timestamp into a proper ISO 8601 string so Date parsing is
- *  consistent across browsers. SQLite's datetime('now') returns UTC as
- *  "YYYY-MM-DD HH:MM:SS" (space, no T, no Z) which some engines misparse. */
-function toISO(timestamp: string): string {
-  let s = timestamp.replace(' ', 'T')
-  if (!s.includes('Z') && !s.includes('+') && !s.includes('-', 10)) s += 'Z'
-  return s
 }
 
 function formatDateTime(timestamp: string): string {

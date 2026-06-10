@@ -1,27 +1,10 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { ArrowDown, Loader2, Clock, DollarSign, Cpu, Users, MessageSquare, CalendarClock } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import type { Profile, LogEntry, LogType } from '@/types'
+import type { Profile, LogEntry } from '@/types'
+import { BADGE_CLASS, TYPE_LABELS, formatTime } from '@/components/log/log-shared'
 
 type Tab = 'timeline' | 'comms' | 'financial' | 'tokens' | 'automation'
-
-const BADGE_CLASS: Record<string, string> = {
-  connection: 'log-badge-connection',
-  error: 'log-badge-error',
-  llm_call: 'log-badge-llm_call',
-  llm_thought: 'log-badge-llm_thought',
-  tool_call: 'log-badge-tool_call',
-  tool_result: 'log-badge-tool_result',
-  server_message: 'log-badge-server_message',
-  notification: 'log-badge-notification',
-  system: 'log-badge-system',
-}
-
-const TYPE_LABELS: Record<string, string> = {
-  connection: 'CONNECT', error: 'ERROR', llm_call: 'CALL',
-  llm_thought: 'LLM', tool_call: 'TOOL', tool_result: 'RESULT',
-  server_message: 'SERVER', notification: 'NOTIFY', system: 'SYSTEM',
-}
 
 // Distinct colors for agents in the timeline
 const AGENT_COLORS = [
@@ -902,15 +885,6 @@ function MiniChart({ data, labels, color, prefix = '', suffix = '' }: { data: nu
 }
 
 // ---- Formatters ----
-
-function formatTime(ts: string): string {
-  try {
-    const d = new Date(ts.endsWith('Z') ? ts : ts + 'Z')
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-  } catch {
-    return ts
-  }
-}
 
 function formatCost(cost: number): string {
   if (cost === 0) return '$0.00'

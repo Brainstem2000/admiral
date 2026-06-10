@@ -1,13 +1,19 @@
 /**
- * Character dossier page — everything about one agent on one screen, plus the
- * animated activity graphic. Read-focused; the editor stays in ProfileView.
+ * Character dossier page — tabbed shell over everything about one agent.
+ * Read-focused; the editor stays in ProfileView.
  *
  * Opens its OWN EventSource to the per-profile log stream to receive both live
  * log entries (for tool-call-based activity detection) and the `activity` event.
  * Multiple EventSources to the same SSE endpoint are independent, so this
- * coexists with LogPane in the editor view.
+ * coexists with LogPane in the editor view (and the Activity tab's LogPane here).
+ * The SSE/entries wiring runs regardless of active tab so Overview is always live.
+ *
+ * Active tab is deep-linked as ?ctab= alongside ?profile=. The page remounts per
+ * agent (key={profile.id} in Dashboard), so the lazy useState initializer re-reads
+ * ctab from the URL on each switch — that's what makes the tab persist across agents.
  */
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { ScrollText, LayoutDashboard, GraduationCap, Radio, BookOpen, Coins } from 'lucide-react'
 import type { Profile, LogEntry } from '@/types'
 import { deriveActivity, type LogRef } from '@/lib/activity'
 import { ActivityGraphic } from './ActivityGraphic'
@@ -15,6 +21,10 @@ import {
   CharacterHeader, VitalsPanel, MarkdownCard, CaptainsLogCard,
   RecentActivityFeed, FinancialSparkline,
 } from './CharacterPanels'
+import { SkillsTab } from './tabs/SkillsTab'
+import { CommsTab } from './tabs/CommsTab'
+import { CostTab } from './tabs/CostTab'
+import { LogPane } from '@/components/LogPane'
 
 interface Props {
   profile: Profile
@@ -24,6 +34,25 @@ interface Props {
 }
 
 const MAX_ENTRIES = 200
+
+const TABS = [
+  { id: 'activity', label: 'Activity', icon: <ScrollText size={12} /> },
+  { id: 'overview', label: 'Overview', icon: <LayoutDashboard size={12} /> },
+  { id: 'skills', label: 'Skills', icon: <GraduationCap size={12} /> },
+  { id: 'comms', label: 'Comms', icon: <Radio size={12} /> },
+  { id: 'knowledge', label: 'Knowledge', icon: <BookOpen size={12} /> },
+  { id: 'cost', label: 'Cost', icon: <Coins size={12} /> },
+] as const
+type TabId = typeof TABS[number]['id']
+
+/** Read ?ctab= from the live URL (not router state — see replaceState below). */
+function readTabFromUrl(): TabId {
+  try {
+    const v = new URLSearchParams(window.location.search).get('ctab')
+    if (v && TABS.some(t => t.id === v)) return v as TabId
+  } catch { /* ignore */ }
+  return 'activity'
+}
 
 // Per-profile cache so the feed is instantly populated on profile switch and
 // stays at parity with the editor's LogPane (which also caches + HTTP-seeds).
@@ -35,6 +64,25 @@ export function CharacterPage({ profile, status, playerData, onOpenEditor }: Pro
   const [now, setNow] = useState(() => Date.now())
   const [sseKey, setSseKey] = useState(0)
   const esRef = useRef<EventSource | null>(null)
+  // Lazy init re-runs on every per-agent remount → tab persists across agent switches.
+  const [tab, setTab] = useState<TabId>(readTabFromUrl)
+
+  // Tab changes rewrite ?ctab= in place, preserving all other query params
+  // (and the router's history.state — replacing it with null corrupts its bookkeeping).
+  const selectTab = useCallback((id: TabId) => {
+    setTab(id)
+    const params = new URLSearchParams(window.location.search)
+    params.set('ctab', id)
+    if (id !== 'activity') params.delete('log') // stale ?log= would re-open the detail modal
+    history.replaceState(history.state, '', `${window.location.pathname}?${params.toString()}${window.location.hash}`)
+  }, [])
+
+  // Back/forward re-syncs the tab from the URL (replaceState writes never fire popstate).
+  useEffect(() => {
+    const onPop = () => setTab(readTabFromUrl())
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
 
   // Reconnect SSE when connection state flips (mirrors LogPane's sseKey trick).
   useEffect(() => { setSseKey(k => k + 1) }, [status.connected])
@@ -65,6 +113,9 @@ export function CharacterPage({ profile, status, playerData, onOpenEditor }: Pro
   // FULLY SYNCED with the Fleet log rather than drifting behind. The dedup in
   // mergeEntries makes each poll a no-op when nothing is new (cheap).
   useEffect(() => {
+    // The Activity tab's embedded LogPane maintains the same stream itself; skip the
+    // duplicate poll there — switching back re-seeds instantly via cache + immediate poll.
+    if (tab === 'activity') return
     const pid = profile.id
     const poll = () => {
       fetch(`/api/profiles/${pid}/logs`)
@@ -75,7 +126,7 @@ export function CharacterPage({ profile, status, playerData, onOpenEditor }: Pro
     poll() // immediate seed
     const t = setInterval(poll, 3000) // continuous re-sync
     return () => clearInterval(t)
-  }, [profile.id, mergeEntries])
+  }, [profile.id, mergeEntries, tab])
 
   // Live log + activity stream.
   useEffect(() => {
@@ -143,38 +194,79 @@ export function CharacterPage({ profile, status, playerData, onOpenEditor }: Pro
   }, [playerData])
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="p-4 md:p-6 space-y-4 max-w-[1600px] mx-auto">
+    <div className="h-full flex flex-col min-h-0">
+      {/* Pinned header + tab bar */}
+      <div className="shrink-0 w-full max-w-[1600px] mx-auto px-4 md:px-6 pt-4 md:pt-6 space-y-3">
         <CharacterHeader profile={profile} status={status} onOpenEditor={onOpenEditor} />
-
-        {/* Hero: compact activity graphic (~1/4 area) + vitals taking the rest */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div className="lg:col-span-1 max-w-sm">
-            <ActivityGraphic result={activity} shipName={shipName} />
-          </div>
-          <div className="lg:col-span-2 min-h-0">
-            <VitalsPanel playerData={playerData} />
-          </div>
+        <div className="flex items-center w-fit border border-border divide-x divide-border bg-card">
+          {TABS.map(t => (
+            <button
+              key={t.id}
+              onClick={() => selectTab(t.id)}
+              title={t.label}
+              className={`flex items-center gap-1.5 h-7 px-2.5 text-[10px] uppercase tracking-[1.5px] transition-colors ${
+                tab === t.id
+                  ? 'text-primary bg-primary/10 shadow-[inset_0_-2px_0_0_hsl(var(--primary))]'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {t.icon}
+              <span className="hidden md:inline">{t.label}</span>
+            </button>
+          ))}
         </div>
-
-        {/* Directive (wide) + wealth */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div className="lg:col-span-2">
-            <MarkdownCard title="Directive" kind="directive" content={profile.directive} source="Local" />
-          </div>
-          <FinancialSparkline profileId={profile.id} />
-        </div>
-
-        {/* Todo / Memory / Captain's Log */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <MarkdownCard title="TODO" kind="todo" content={profile.todo} source="Local" />
-          <MarkdownCard title="Memory" kind="memory" content={profile.memory} source="Local" />
-          <CaptainsLogCard profileId={profile.id} connected={status.connected} />
-        </div>
-
-        {/* Recent activity feed */}
-        <RecentActivityFeed entries={entries} />
       </div>
+
+      {/* Tab content */}
+      {tab === 'activity' ? (
+        /* Full remaining height; LogPane handles its own scroll/tail/search */
+        <div className="flex-1 min-h-0 flex flex-col w-full max-w-[1600px] mx-auto px-4 md:px-6 pt-3 pb-4 md:pb-6">
+          <div className="flex-1 min-h-0 dossier-card overflow-hidden">
+            <LogPane profileId={profile.id} connected={status.connected} />
+          </div>
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          <div className="w-full max-w-[1600px] mx-auto px-4 md:px-6 pt-3 pb-4 md:pb-6 space-y-4">
+            {tab === 'overview' && (
+              <>
+                {/* Hero: compact activity graphic (~1/4 area) + vitals taking the rest */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                  <div className="lg:col-span-1 max-w-sm">
+                    <ActivityGraphic result={activity} shipName={shipName} />
+                  </div>
+                  <div className="lg:col-span-2 min-h-0">
+                    <VitalsPanel playerData={playerData} />
+                  </div>
+                </div>
+
+                {/* Wealth + recent activity feed */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                  <FinancialSparkline profileId={profile.id} />
+                  <div className="lg:col-span-2">
+                    <RecentActivityFeed entries={entries} />
+                  </div>
+                </div>
+              </>
+            )}
+
+            {tab === 'skills' && <SkillsTab profile={profile} connected={status.connected} />}
+
+            {tab === 'comms' && <CommsTab profile={profile} connected={status.connected} />}
+
+            {tab === 'knowledge' && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <MarkdownCard title="Directive" kind="directive" content={profile.directive} source="Local" />
+                <MarkdownCard title="TODO" kind="todo" content={profile.todo} source="Local" />
+                <MarkdownCard title="Memory" kind="memory" content={profile.memory} source="Local" />
+                <CaptainsLogCard profileId={profile.id} connected={status.connected} />
+              </div>
+            )}
+
+            {tab === 'cost' && <CostTab profile={profile} connected={status.connected} />}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
