@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import { getTimelineEntries, getTokenAnalytics, listProfiles, addFinancialSnapshot, getFinancialSnapshots } from '../lib/db'
+import { LedgerCollector } from '../lib/ledger'
 import { agentManager } from '../lib/agent-manager'
 
 const analytics = new Hono()
@@ -203,6 +204,36 @@ analytics.get('/snapshots', (c) => {
   const since = c.req.query('since') || undefined
   const data = getFinancialSnapshots({ profileId, since })
   return c.json(data)
+})
+
+/**
+ * GET /api/analytics/ledger
+ * Per-event credit ledger parsed from game command results.
+ * Query params: profileId (required), since, kind, item_id, limit (cap 2000, default 500).
+ */
+analytics.get('/ledger', (c) => {
+  const profileId = c.req.query('profileId')
+  if (!profileId) return c.json({ error: 'profileId is required' }, 400)
+  const since = c.req.query('since') || undefined
+  const kind = c.req.query('kind') || undefined
+  const itemId = c.req.query('item_id') || undefined
+  const limit = c.req.query('limit') ? parseInt(c.req.query('limit')!) : 500
+
+  const rows = LedgerCollector.getEntries({ profileId, since, kind, itemId, limit })
+  const summary = LedgerCollector.getSummary({ profileId, since, kind, itemId })
+  return c.json({ rows, summary })
+})
+
+/**
+ * GET /api/analytics/ledger/reconcile
+ * Windows between consecutive financial_snapshots vs booked ledger movement.
+ * Query params: profileId (required), since (default last 24h).
+ */
+analytics.get('/ledger/reconcile', (c) => {
+  const profileId = c.req.query('profileId')
+  if (!profileId) return c.json({ error: 'profileId is required' }, 400)
+  const since = c.req.query('since') || undefined
+  return c.json(LedgerCollector.reconcile(profileId, since))
 })
 
 /**

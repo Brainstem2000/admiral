@@ -11,7 +11,8 @@ fleetIntel.get('/', (c) => {
       const t = Number(c.req.query('threshold')) || 20
       return c.json({
         hunting_grounds: FleetIntelCollector.getHuntingGrounds(t),
-        kill_zones: FleetIntelCollector.getKillZones(),
+        // Ghost rows are included (with ghost=1) so the UI can tag them; briefings exclude them.
+        kill_zones: FleetIntelCollector.getKillZones(25, true),
       })
     }
     const data = FleetIntelCollector.getAll()

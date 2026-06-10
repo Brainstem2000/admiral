@@ -220,6 +220,37 @@ function migrate(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_fsnap_profile ON financial_snapshots(profile_id, timestamp);
   `)
 
+  // Financial ledger: per-event credit movements parsed from game command results.
+  // amount_signed: positive = income, negative = expense. The partial UNIQUE index
+  // dedupes events that occur at most once per order_id (e.g. a mission reward echoed
+  // on both the command result and a notification) — inserts use INSERT OR IGNORE so
+  // the replay lands on the index, not a dupe row. order_fill and combat are
+  // deliberately NOT covered: an order legitimately fills in N partial fills sharing
+  // one order_id, and a unique index would silently drop fills 2..N.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS financial_ledger (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id TEXT NOT NULL,
+      timestamp TEXT DEFAULT (datetime('now')),
+      kind TEXT NOT NULL,
+      item_id TEXT,
+      quantity REAL,
+      unit_price REAL,
+      amount_signed INTEGER NOT NULL,
+      counterparty TEXT,
+      order_id TEXT,
+      balance_after INTEGER,
+      source_command TEXT NOT NULL,
+      raw_ref TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_fled_profile ON financial_ledger(profile_id, timestamp);
+    CREATE INDEX IF NOT EXISTS idx_fled_order ON financial_ledger(order_id);
+    CREATE INDEX IF NOT EXISTS idx_fled_item ON financial_ledger(item_id);
+    DROP INDEX IF EXISTS idx_fled_dedupe;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_fled_dedupe2 ON financial_ledger(profile_id, order_id, kind)
+      WHERE order_id IS NOT NULL AND kind IN ('order_create', 'order_cancel', 'mission_reward', 'other');
+  `)
+
   // Agent schedules for cron-like automation
   db.exec(`
     CREATE TABLE IF NOT EXISTS schedules (
@@ -295,6 +326,16 @@ function migrate(db: Database): void {
   }
   if (!fisCols.some(c => c.name === 'poi_types')) {
     db.exec('ALTER TABLE fleet_intel_systems ADD COLUMN poi_types TEXT')
+  }
+
+  // Migrate fleet_intel_killzones: ghost flag for permanently-present unkillable phantom
+  // NPCs (e.g. "Murmur Load" at ross_248_cryobelt). Ghost rows are kept for the UI but
+  // excluded from hunting briefings so agents stop chasing unattackable spawns.
+  const fikCols = db.query("PRAGMA table_info(fleet_intel_killzones)").all() as { name: string }[]
+  if (!fikCols.some(c => c.name === 'ghost')) {
+    db.exec('ALTER TABLE fleet_intel_killzones ADD COLUMN ghost INTEGER DEFAULT 0')
+    // One-time data fix: the existing ross_248_cryobelt row is the Murmur Load phantom.
+    db.exec("UPDATE fleet_intel_killzones SET ghost = 1 WHERE poi_id = 'ross_248_cryobelt'")
   }
 
   // Drop legacy table (storage credits now parsed from agent memory)
@@ -563,11 +604,13 @@ export function pruneOldData(opts?: {
   logDays?: number
   snapshotDays?: number
   intelDays?: number
+  ledgerDays?: number
   maxLogRows?: number
-}): { logs: number; snapshots: number; intel: number } {
+}): { logs: number; snapshots: number; intel: number; ledger: number } {
   const logDays = opts?.logDays ?? 14
   const snapshotDays = opts?.snapshotDays ?? 30
   const intelDays = opts?.intelDays ?? 7
+  const ledgerDays = opts?.ledgerDays ?? 90
   // Hard ceiling on log rows. Age-based pruning alone cannot bound this table when write volume
   // is high (many agents each logging every turn), so we ALSO cap absolute row count and drop the
   // oldest rows beyond it. With the trimmed llm_call detail this is a few hundred MB at most.
@@ -589,13 +632,16 @@ export function pruneOldData(opts?: {
   const m = db.query('DELETE FROM fleet_intel_market WHERE updated_at < ?').run(intelCutoff).changes
   const s = db.query('DELETE FROM fleet_intel_systems WHERE updated_at < ?').run(intelCutoff).changes
   // Kill zones are rare + high-value; retain ~4x longer than ordinary intel before pruning.
-  const kz = db.query('DELETE FROM fleet_intel_killzones WHERE updated_at < ?').run(cutoff(intelDays * 4)).changes
+  // Ghost rows are pinned: ghost-only sightings never refresh updated_at (filtered at
+  // capture), and a pruned phantom row could never be re-created — keep it for the UI tag.
+  const kz = db.query('DELETE FROM fleet_intel_killzones WHERE updated_at < ? AND ghost = 0').run(cutoff(intelDays * 4)).changes
+  const ledger = db.query('DELETE FROM financial_ledger WHERE timestamp < ?').run(cutoff(ledgerDays)).changes
 
   // Hand freed pages back to the OS so the file actually shrinks after a prune. No-op unless the
   // DB uses auto_vacuum = INCREMENTAL (set at init; existing DBs adopt it after the one-time VACUUM).
   try { db.exec('PRAGMA incremental_vacuum') } catch { /* ignore */ }
 
-  return { logs, snapshots, intel: m + s + kz }
+  return { logs, snapshots, intel: m + s + kz, ledger }
 }
 
 // --- Preferences CRUD ---

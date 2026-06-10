@@ -98,9 +98,9 @@ startScheduler()
 // tables don't grow without bound.
 function runPrune() {
   try {
-    const { logs, snapshots, intel } = pruneOldData()
-    if (logs || snapshots || intel) {
-      console.log(`[Prune] removed ${logs} log rows, ${snapshots} snapshots, ${intel} intel rows`)
+    const { logs, snapshots, intel, ledger } = pruneOldData()
+    if (logs || snapshots || intel || ledger) {
+      console.log(`[Prune] removed ${logs} log rows, ${snapshots} snapshots, ${intel} intel rows, ${ledger} ledger rows`)
     }
   } catch (err) {
     console.warn('[Prune] failed:', err)

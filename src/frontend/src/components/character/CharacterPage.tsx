@@ -13,7 +13,7 @@
  * ctab from the URL on each switch — that's what makes the tab persist across agents.
  */
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
-import { ScrollText, LayoutDashboard, GraduationCap, Radio, BookOpen, Coins } from 'lucide-react'
+import { ScrollText, LayoutDashboard, TrendingUp, GraduationCap, Rocket, Crosshair, Radio, BookOpen, Coins } from 'lucide-react'
 import type { Profile, LogEntry } from '@/types'
 import { deriveActivity, type LogRef } from '@/lib/activity'
 import { ActivityGraphic } from './ActivityGraphic'
@@ -21,7 +21,10 @@ import {
   CharacterHeader, VitalsPanel, MarkdownCard, CaptainsLogCard,
   RecentActivityFeed, FinancialSparkline,
 } from './CharacterPanels'
+import { FinancialsTab } from './tabs/FinancialsTab'
 import { SkillsTab } from './tabs/SkillsTab'
+import { ShipTab } from './tabs/ShipTab'
+import { CombatTab } from './tabs/CombatTab'
 import { CommsTab } from './tabs/CommsTab'
 import { CostTab } from './tabs/CostTab'
 import { LogPane } from '@/components/LogPane'
@@ -38,7 +41,10 @@ const MAX_ENTRIES = 200
 const TABS = [
   { id: 'activity', label: 'Activity', icon: <ScrollText size={12} /> },
   { id: 'overview', label: 'Overview', icon: <LayoutDashboard size={12} /> },
+  { id: 'financials', label: 'Financials', icon: <TrendingUp size={12} /> },
   { id: 'skills', label: 'Skills', icon: <GraduationCap size={12} /> },
+  { id: 'ship', label: 'Ship', icon: <Rocket size={12} /> },
+  { id: 'combat', label: 'Combat', icon: <Crosshair size={12} /> },
   { id: 'comms', label: 'Comms', icon: <Radio size={12} /> },
   { id: 'knowledge', label: 'Knowledge', icon: <BookOpen size={12} /> },
   { id: 'cost', label: 'Cost', icon: <Coins size={12} /> },
@@ -250,7 +256,13 @@ export function CharacterPage({ profile, status, playerData, onOpenEditor }: Pro
               </>
             )}
 
+            {tab === 'financials' && <FinancialsTab profile={profile} connected={status.connected} />}
+
             {tab === 'skills' && <SkillsTab profile={profile} connected={status.connected} />}
+
+            {tab === 'ship' && <ShipTab profile={profile} connected={status.connected} />}
+
+            {tab === 'combat' && <CombatTab profile={profile} connected={status.connected} />}
 
             {tab === 'comms' && <CommsTab profile={profile} connected={status.connected} />}
 

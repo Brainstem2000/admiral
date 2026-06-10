@@ -32,6 +32,7 @@ export interface KillZone {
   pirate_seen: number
   wreck_seen: number
   last_pirate_at: string | null
+  ghost: number
   discovered_by: string
   updated_at: string
 }

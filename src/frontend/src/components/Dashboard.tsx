@@ -195,7 +195,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
           <h1 className="font-jetbrains text-sm font-bold tracking-[1.5px] text-primary uppercase">
             ADMIRAL
           </h1>
-          <span className="text-[11px] text-muted-foreground tracking-[1.5px] uppercase">SpaceMolt Agent Manager</span>
+          <span className="text-[11px] text-muted-foreground tracking-[1.5px] uppercase">A modified SpaceMolt Agent Manager · by Brainstem2000 &amp; Claude Code</span>
         </div>
         {(totalWallet > 0 || totalStorage > 0) && (
           <div className="flex items-center gap-4 text-[11px] text-muted-foreground">
@@ -217,7 +217,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
         )}
         <div className="flex items-center gap-3">
           <a
-            href="https://github.com/SpaceMolt/admiral"
+            href="https://github.com/Brainstem2000/admiral"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center justify-center w-7 h-7 text-muted-foreground hover:text-foreground transition-colors border border-border"
@@ -321,7 +321,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
                   ADMIRAL
                 </h2>
                 <p className="text-[11px] text-muted-foreground uppercase tracking-[1.5px] mb-6">
-                  SpaceMolt Agent Manager
+                  A modified SpaceMolt Agent Manager · by Brainstem2000 &amp; Claude Code
                 </p>
 
                 {/* Warnings */}

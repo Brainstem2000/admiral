@@ -7,6 +7,19 @@ function str(v: unknown): string { return typeof v === 'string' ? v : '' }
 function num(v: unknown): number | null { return typeof v === 'number' ? v : null }
 function int(v: unknown): number { return typeof v === 'number' ? Math.floor(v) : 0 }
 
+// Known ghost NPCs: permanently-present unkillable phantoms that read as "pirates" in
+// get_nearby but never despawn and cannot be attacked (e.g. "Murmur Load" at
+// ross_248_cryobelt). Sightings of ONLY these must not create/refresh kill zones.
+const KNOWN_GHOSTS = [
+  { name: 'murmur load', idPrefix: 'ab2c9a70' },
+]
+
+function isGhostPirate(p: R): boolean {
+  const name = str(p.name).toLowerCase()
+  const id = str(p.pirate_id || p.id)
+  return KNOWN_GHOSTS.some(g => name === g.name || (g.idPrefix && id.startsWith(g.idPrefix)))
+}
+
 export class FleetIntelCollector {
   /**
    * Extract and store intel from a game command result.
@@ -189,9 +202,13 @@ export class FleetIntelCollector {
     const systemId = str(poiObj.system_id || r.system_id || '')
     const systemName = str(poiObj.system_name || r.system_name || '')
 
-    // Live pirate presence here, right now (strongest signal).
+    // Live pirate presence here, right now (strongest signal). Ghost NPCs (permanent
+    // unkillable phantoms) are excluded — a ghost-only sighting is NOT combat evidence.
     const pirates = Array.isArray(r.pirates) ? r.pirates : []
-    const pirateCount = Math.max(int(r.pirate_count), pirates.length)
+    const realPirates = pirates.filter(p => p && typeof p === 'object' && !isGhostPirate(p as R))
+    // Count only confirmed ghosts (non-object entries are not ghosts — keep baseline math).
+    const ghostCount = pirates.filter(p => p && typeof p === 'object' && isGhostPirate(p as R)).length
+    const pirateCount = Math.max(int(r.pirate_count) - ghostCount, realPirates.length, 0)
 
     // Pirate wrecks here = this POI is a PROVEN kill zone even when the spawn is down.
     const wrecks = Array.isArray(r.wrecks) ? (r.wrecks as R[]) : []
@@ -217,6 +234,7 @@ export class FleetIntelCollector {
         pirate_seen = MAX(fleet_intel_killzones.pirate_seen, excluded.pirate_seen),
         wreck_seen = MAX(fleet_intel_killzones.wreck_seen, excluded.wreck_seen),
         last_pirate_at = CASE WHEN excluded.last_pirate_at IS NOT NULL THEN excluded.last_pirate_at ELSE fleet_intel_killzones.last_pirate_at END,
+        ghost = CASE WHEN excluded.pirate_seen > 0 THEN 0 ELSE fleet_intel_killzones.ghost END,
         updated_at = datetime('now')
     `).run(
       poiId,
@@ -403,9 +421,10 @@ export class FleetIntelCollector {
    * observed via on-site get_nearby. Ordered by freshest live-pirate sighting first, then by
    * wreck evidence. These are the highest-signal combat targets the fleet knows about.
    */
-  static getKillZones(limit = 25): KillZone[] {
+  static getKillZones(limit = 25, includeGhosts = false): KillZone[] {
     return getDb().query(`
       SELECT * FROM fleet_intel_killzones
+      ${includeGhosts ? '' : 'WHERE ghost = 0'}
       ORDER BY
         CASE WHEN last_pirate_at IS NOT NULL THEN 0 ELSE 1 END,
         last_pirate_at DESC,

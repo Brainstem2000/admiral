@@ -13,6 +13,7 @@ import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileTool
 import { runAgentTurn, type CompactionState } from './loop'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
 import { FleetIntelCollector } from './fleet-intel'
+import { LedgerCollector } from './ledger'
 import { startBriefingCollector, stopBriefingCollector, clearBriefingCache, buildSituationalBriefing, buildFactionBriefing, getCachedSystemName } from './briefing'
 import { checkEventTriggers } from './event-watcher'
 import { EventEmitter } from 'events'
@@ -153,6 +154,11 @@ export class Agent {
     // Set up notification handler
     this.connection.onNotification((n) => {
       this.log('notification', formatNotificationSummary(n), JSON.stringify(n, null, 2))
+      // Book credit-bearing events (combat bounties, order fills, mission rewards) at the
+      // one chokepoint every connection emits notifications through — they attach to
+      // whatever response drains them (queries, background polls, manual UI commands),
+      // so booking per-command would systematically miss them. Never throws.
+      LedgerCollector.processNotifications([n], this.profileId, profile.username || '')
       // Check event triggers (fire-and-forget)
       checkEventTriggers(this.profileId, n as Record<string, unknown>).catch(() => {})
     })

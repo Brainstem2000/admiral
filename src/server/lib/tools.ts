@@ -3,6 +3,7 @@ import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference } from './db'
 import { FleetIntelCollector } from './fleet-intel'
+import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
 import { invalidateBriefingCache } from './briefing'
 
@@ -420,6 +421,19 @@ export async function executeTool(
       FleetIntelCollector.processCommandResult(command, resp.result, ctx.profileName)
       if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
     } catch { /* never break game execution */ }
+
+    // Book credit movements from the resolved result — ONLY here, on the resolved success
+    // path of action commands. The action-pending sentinel path above must NOT book: the
+    // resolved result echoes the same trade payload again, so booking both would
+    // double-count every trade. Notification-borne credits (bounties, fills, mission
+    // rewards) are NOT booked here: they attach to whatever response comes next (usually
+    // a query) and are booked once in the Agent's onNotification handler — the chokepoint
+    // every connection and command path funnels notifications through.
+    if (!isQuery) {
+      try {
+        LedgerCollector.processCommandResult(command, resultData, ctx.profileId, ctx.profileName)
+      } catch { /* never break game execution */ }
+    }
 
     // After a successful action, invalidate caches so the next
     // query fetches live data instead of returning stale pre-action state.
