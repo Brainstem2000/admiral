@@ -260,6 +260,29 @@ export class LedgerCollector {
         rows.push({ kind: 'repair', quantity: num(r.repaired), amount: -cost, balance_after: balance })
         break
       }
+      case 'buy_insurance': {
+        // { action: buy_insurance, premium, coverage, ticks, ... } — premium is the wallet cost.
+        const cost = num(r.premium) ?? num(r.cost) ?? num(r.total_cost)
+        if (cost === null || cost === 0) break
+        rows.push({ kind: 'insurance', amount: -cost, counterparty: str(r.ship_class || r.ship_name) || null, balance_after: balance })
+        break
+      }
+      case 'commission_ship': {
+        // { action: commission_ship, ship_class, credit_cost/total_cost, commission_id } — the
+        // credits-only portion of a build order hits the wallet (materials are supplied separately).
+        const cost = num(r.credits_paid) ?? num(r.credit_cost) ?? num(r.total_cost) ?? num(r.cost)
+        if (cost === null || cost === 0) break
+        rows.push({ kind: 'commission', amount: -cost, counterparty: str(r.ship_class || r.class_id) || null, order_id: str(r.commission_id) || null, balance_after: balance })
+        break
+      }
+      case 'supply_commission': {
+        // Supplying build materials can also pay a reduced credit portion — book only when
+        // credits actually moved (material-only supplies don't touch the wallet).
+        const cost = num(r.credits_paid) ?? num(r.credit_cost) ?? num(r.cost)
+        if (cost === null || cost === 0) break
+        rows.push({ kind: 'commission', amount: -cost, counterparty: str(r.ship_class) || null, order_id: str(r.commission_id) || null, balance_after: balance })
+        break
+      }
       case 'deposit_credits': {
         const amount = num(r.amount) ?? num(r.credits_deposited) ?? num(r.deposited)
         if (amount === null || amount === 0) break

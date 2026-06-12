@@ -255,6 +255,13 @@ export async function executeTool(
       const ch = String(commandArgs.channel || '').toLowerCase()
       const CHANNEL_FIX: Record<string, string> = { 'global': 'system', 'general': 'system', 'local': 'system', 'faction': 'faction', 'trade': 'trading', 'help': 'system' }
       if (ch && CHANNEL_FIX[ch]) { commandArgs.channel = CHANNEL_FIX[ch] }
+      // Truncate over-long messages before send — the game rejects them with [message_too_long]
+      // (232 wasted calls in 36h), usually from agents pasting multi-paragraph SITREPs into chat.
+      const CHAT_MAX = 480
+      for (const k of ['content', 'message', 'text']) {
+        const v = commandArgs[k]
+        if (typeof v === 'string' && v.length > CHAT_MAX) commandArgs[k] = v.slice(0, CHAT_MAX - 1) + '…'
+      }
     }
     // scan/attack: the game API expects `target_id`. Normalize id/target -> target_id.
     // (Do NOT rename target_id away — an earlier version mapped target_id -> id, which the

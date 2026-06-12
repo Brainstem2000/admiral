@@ -12,6 +12,10 @@ function int(v: unknown): number { return typeof v === 'number' ? Math.floor(v) 
 // ross_248_cryobelt). Sightings of ONLY these must not create/refresh kill zones.
 const KNOWN_GHOSTS = [
   { name: 'murmur load', idPrefix: 'ab2c9a70' },
+  // Permanent unkillable phantoms at 40 Eridani — same class as Murmur Load. Confirmed by the
+  // fleet repeatedly "engaging" them with no result. Name-matched (their ids weren't captured).
+  { name: 'clanker', idPrefix: '' },
+  { name: 'glurch', idPrefix: '' },
 ]
 
 function isGhostPirate(p: R): boolean {

@@ -2,6 +2,7 @@ export type LedgerKind =
   | 'buy' | 'sell'
   | 'order_create' | 'order_fill' | 'order_cancel'
   | 'mission_reward' | 'fuel' | 'repair' | 'dock_fee' | 'combat'
+  | 'insurance' | 'commission'
   | 'deposit' | 'withdraw' | 'transfer' | 'other'
 
 export interface LedgerEntry {
