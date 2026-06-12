@@ -122,6 +122,9 @@ export function cleanupProfileToolState(profileId: string): void {
 
 // Sentinel prefix for action pending results — loop.ts detects this to exit the turn early
 export const ACTION_PENDING_SENTINEL = '⚠️ ACTION_PENDING: '
+// Prefix of the cooldown-gate rejection. The loop watches for this to end the turn early instead
+// of letting the model re-fire into the gate for the rest of its round budget.
+export const COOLDOWN_BLOCKED_SENTINEL = '⏳ ACTION BLOCKED'
 
 // Commands that are free queries (no tick cost) — exempt from cooldown.
 // Includes both v1 bare names AND v2 grouped names (e.g. market_view_market, storage_view).
@@ -307,7 +310,7 @@ export async function executeTool(
       if (elapsed < cooldownMs) {
         const waitSec = Math.ceil((cooldownMs - elapsed) / 1000)
         ctx.log('tool_result', `Cooldown: ${command} blocked (${waitSec}s remaining)`)
-        return `⏳ ACTION BLOCKED — cooldown active (${waitSec}s remaining). Game actions cost 1 tick (~10s). You just performed an action. Use query commands (get_status, get_cargo, view_market, read_todo, etc.) while waiting, or STOP calling tools and end your turn.`
+        return `${COOLDOWN_BLOCKED_SENTINEL} — cooldown active (${waitSec}s remaining). Game actions cost 1 tick (~10s). You just performed an action. Use query commands (get_status, get_cargo, view_market, read_todo, etc.) while waiting, or STOP calling tools and end your turn.`
       }
     }
     actionCooldowns.set(ctx.profileId, { timestamp: Date.now(), wasPending: false })

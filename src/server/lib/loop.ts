@@ -2,9 +2,12 @@ import { complete } from '@mariozechner/pi-ai'
 import type { Model, Context, AssistantMessage, ToolCall, Message } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import type { LogFn } from './tools'
-import { executeTool, ACTION_PENDING_SENTINEL } from './tools'
+import { executeTool, ACTION_PENDING_SENTINEL, COOLDOWN_BLOCKED_SENTINEL } from './tools'
 
-const DEFAULT_MAX_TOOL_ROUNDS = 30
+// Lowered from 30: the cap was being treated as a quota — turns ran to the ceiling firing queries
+// and (pre-fix) re-firing into the cooldown gate. With the cooldown-block early-exit below, 12 is
+// ample for any real turn (place an action → exit) and stops the per-turn over-deliberation.
+const DEFAULT_MAX_TOOL_ROUNDS = 12
 const MAX_RETRIES = 3
 const RETRY_BASE_DELAY = 5000
 const DEFAULT_LLM_TIMEOUT_MS = 300_000
@@ -170,6 +173,7 @@ export async function runAgentTurn(
 
     let showedReason = false
     let actionPending = false
+    let cooldownBlocked = false
     for (const toolCall of toolCalls) {
       if (options?.signal?.aborted) return
 
@@ -183,6 +187,7 @@ export async function runAgentTurn(
       memory.value = toolCtx.memory
 
       if (result.startsWith(ACTION_PENDING_SENTINEL)) actionPending = true
+      if (result.startsWith(COOLDOWN_BLOCKED_SENTINEL)) cooldownBlocked = true
       const isError = result.startsWith('Error')
       const toolResultMessage: Message = {
         role: 'toolResult',
@@ -198,6 +203,15 @@ export async function runAgentTurn(
     // Early exit: if an action is pending, end the turn immediately instead of burning more rounds
     if (actionPending) {
       log('system', 'Action pending — ending turn early')
+      return
+    }
+
+    // Early exit: a cooldown-block means the agent just acted and must wait ~a tick before it can
+    // act again. Continuing the turn only re-fires into the gate (the dominant source of burned
+    // rounds and turn-exhaustion). Any queries in this round already executed; end now and let the
+    // next turn proceed after the tick.
+    if (cooldownBlocked) {
+      log('system', 'Cooldown active — ending turn early')
       return
     }
 

@@ -197,10 +197,15 @@ export class FleetIntelCollector {
     const poiId = str(poiObj.id || poiObj.poi_id || r.poi_id || '')
     if (!poiId) return
 
-    const poiName = str(poiObj.name || '')
-    const poiType = str(poiObj.type || '')
+    // get_nearby sometimes returns the current POI nested under `r.poi` and sometimes as flat
+    // top-level fields, so the nested-only read left poi_name/system_name NULL (only the slug
+    // poi_id survived). Fall back through flat fields, then humanize the slug so a zone always
+    // carries a readable label for the Hunt tab / briefing.
+    const humanize = (s: string) => s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+    const poiName = str(poiObj.name || r.poi_name || r.name || '') || (poiId ? humanize(poiId) : '')
+    const poiType = str(poiObj.type || r.poi_type || '')
     const systemId = str(poiObj.system_id || r.system_id || '')
-    const systemName = str(poiObj.system_name || r.system_name || '')
+    const systemName = str(poiObj.system_name || r.system_name || '') || (systemId ? humanize(systemId) : '')
 
     // Live pirate presence here, right now (strongest signal). Ghost NPCs (permanent
     // unkillable phantoms) are excluded — a ghost-only sighting is NOT combat evidence.
