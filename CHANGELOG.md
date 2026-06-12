@@ -2,6 +2,54 @@
 
 All notable changes to Admiral are documented here.
 
+## [0.4.1] - 2026-06-12
+
+### Fixed
+- **Cooldown-blocked turns end early** -- The agent loop only short-circuited on a *pending* action, so a cooldown-blocked command let the model re-fire into the gate for the rest of its round budget (~4,050 wasted rounds across the fleet in 36h). A cooldown-block now ends the turn -- the agent must wait a tick anyway, and any queries already in the round still ran. New `COOLDOWN_BLOCKED_SENTINEL` lets the loop detect it.
+- **Per-turn round cap lowered 30 -> 12** -- The 30-round ceiling was being treated as a quota, producing ~968 turn-exhaustion events. With the cooldown early-exit, 12 rounds is ample for any real turn (place an action, exit) and roughly halves cost on the heaviest agents.
+- **Kill-zone names no longer NULL** -- `fleet_intel_killzones` stored only the slug `poi_id`; `poi_name`/`system_name` came back NULL because `get_nearby` returns the POI as flat fields rather than nested `r.poi`. Capture now falls through flat fields and humanizes the slug so every zone carries a readable label.
+
+## [0.4.0] - 2026-06-10
+
+### Added
+- **Per-agent financial ledger** -- New `financial_ledger` table passively captures signed credit deltas from game results and notifications (buy/sell/orders/missions/refuel/combat). Adds Financials, Ship, and Combat tabs to the Character page, plus `/api/analytics/ledger` and `/ledger/reconcile` (flags balance changes the ledger can't explain).
+- **Character dossier dashboard** -- The per-agent Character view became a tabbed dashboard (Activity / Overview / Skills / Ship / Combat / Comms / Knowledge / Cost / Financials) with `?ctab=` deep-linking, animated activity graphics, and fleet-map agent tracking (route trails, destination lines, activity labels).
+- **Confirmed kill-zone capture** -- Passive fleet intel now records named pirate-spawn POIs from `get_nearby` (which `get_system` can't see) as confirmed kill zones, with a ghost-NPC filter so permanent unkillable phantoms don't pollute the atlas. Surfaced in a Hunt tab and injected into hunting briefings at zero LLM cost.
+
+## [0.3.15] - 2026-06-07
+
+### Fixed
+- **Briefing cache never serves stale location to explicit queries** -- All explicit state queries now go live instead of returning a cached location, and a refresh race that caused lingering "stale cache" complaints was removed.
+- **Bounded database growth** -- `llm_call` log detail is trimmed to a short preview (was serializing the entire message array, ~140KB/row, growing the DB ~1GB/day) and a hard row-count cap (120k) was added on top of age-based retention.
+
+### Changed
+- **gitignore** -- Ignore Claude Code local settings and the build temp artifact.
+
+## [0.3.14] - 2026-06-05
+
+### Fixed
+- **Combat was impossible** -- `scan`/`attack` were sending `id` instead of `target_id`, so no target ever resolved. Corrected the parameter so agents can actually engage.
+
+## [0.3.13] - 2026-06-03
+
+### Security
+- **Stop leaking stored secrets and lock down the local API** -- Profile `password` and provider `api_key` are never returned (only `has_password`/`has_key` flags); empty-secret writes preserve the existing value; the server binds `127.0.0.1` by default.
+
+### Fixed
+- **Connection & reliability hardening** -- Fixed connection leaks, capped previously-unbounded `rate_limited` retries, and corrected analytics aggregation.
+- **Correctness pass** -- Compaction message budget is computed against (context window - system prompt) rather than the full window; restart/backoff bounded; analytics time-filtering fixed; cron expressions validated on create (malformed schedules rejected instead of silently never firing).
+- **LLM loop errors surfaced; zombie idle state fixed** -- Loop errors are now logged instead of silently leaving an agent stuck idle.
+- **Polish** -- Faction-cache race, command matching, key-validation status, and input-validation fixes.
+
+### Added
+- **Newest Opus models surfaced**, and the data-dir `EEXIST` crash on boot was fixed.
+- **CLAUDE.md** -- Build/run instructions, architecture overview, and project invariants for AI-assisted development.
+
+## [0.3.12] - 2026-04-17
+
+### Fixed
+- **15 more command auto-corrections and error hints** -- Additional parameter remaps and clearer error messages to eliminate wasted API calls from common agent command mistakes.
+
 ## [0.3.11] - 2026-04-01
 
 ### Fixed
