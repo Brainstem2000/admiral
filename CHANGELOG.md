@@ -2,6 +2,14 @@
 
 All notable changes to Admiral are documented here.
 
+## [0.4.2] - 2026-06-13
+
+### Fixed
+- **Lone-surrogate corruption that bricked an agent's LLM history** -- Emoji (e.g. U+1F680) in game/faction chat were truncated mid-surrogate-pair by code-unit `.slice()` calls, leaving an unpaired surrogate that becomes invalid JSON when serialized to the Anthropic API ("no low surrogate in string"). pi-ai sanitizes most fields but ships `tool_use` input (`ToolCall.arguments`) and tool defs raw, so the orphan reached the API and permanently 400-looped the agent (CyberSapper: 308 identical failures over ~50 min at a fixed char offset). New `src/server/lib/text-safe.ts` adds `safeTruncate()` (slice that never orphans a trailing high surrogate), `stripLoneSurrogates()`, and `scrubContextSurrogates()` (deep pre-send scrub that heals already-poisoned history without a restart and covers the `ToolCall.arguments` gap pi-ai leaves). Wired before both `complete()` calls; 9 raw truncation sites replaced. Verified by `scripts/verify-surrogate-fix.ts` (18/18).
+
+### Performance
+- **Prompt cache no longer busted every turn by a wall-clock counter** -- `buildSituationalBriefing` appended a `(Data age: Ns)` line that ticked every second. Because the briefing is baked into the *cached* system prompt and gated by a strict `!==`, the ~25-31k-token system prompt rebuilt almost every turn, busting Anthropic's prompt-cache prefix and forcing full `cacheWrite`s -- a 5-lens code+log audit traced ~64% of all LLM spend to this single byte. Removing the line *strengthens* the system-prompt-cache invariant (drops an always-changing term). Measured post-deploy: **total LLM cost/call -52%** ($0.0311 -> $0.0148), **cacheWrite tokens/call -76%** (8,405 -> 2,019).
+
 ## [0.4.1] - 2026-06-12
 
 ### Fixed
