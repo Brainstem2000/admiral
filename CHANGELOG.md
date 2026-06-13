@@ -2,6 +2,23 @@
 
 All notable changes to Admiral are documented here.
 
+## [0.4.3] - 2026-06-13
+
+Efficiency bundle from a five-lens code+log audit. Each change was adversarially
+reviewed before deploy (the review caught a dropped-column DB INSERT bug and a
+build-passing/runtime-throwing missed-return defect, both fixed pre-ship).
+
+### Performance
+- **Turn re-entry gated on the real action cooldown** -- ~48% of LLM turns took zero game actions: after a cooldown-blocked turn the loop re-fired every 2s only to no-op back into the gate, paying a full context cache cycle each time. The inter-turn wait now uses the *actual* remaining action cooldown (`getCooldownRemainingMs`, clamped to 2-12s) for cooldown-blocked turns only; normal turns are byte-identical. The wait stays fully interruptible -- a nudge, fleet order, attack notification, or stop aborts the shared `abortController` and wakes the agent immediately, never after the cooldown (responsiveness/stop/starvation all proven in review). `runAgentTurn` now returns `{ cooldownBlocked }` with all seven return paths updated. Deployed solo; fleet-wide turn-frequency effect still being measured.
+- **Scrub cost O(new) not O(history)** -- `scrubContextSurrogates` skips already-scrubbed messages via a per-message WeakSet (the systemPrompt is still always scrubbed), so the pre-send pass no longer re-walks unchanged history on every `complete()`.
+- **Prompt-cache retention** -- the main agent-turn `complete()` now requests provider-side `cacheRetention:'long'` so the prompt prefix survives idle stretches.
+
+### Changed
+- **DB hygiene** -- Added `idx_log_type_ts(type,timestamp,id)` so analytics token/timeline queries seek instead of full-scanning ~120k rows; capped persisted `tool_result` detail at 32KB (the full result still reaches the LLM in-context; 999 rows >10KB had held 21.8MB); deduped `financial_snapshots` (skip the 5-min insert when wallet+storage are unchanged); dropped the unread `context.messages` transcript preview from `llm_call` detail (~43MB / 68% of that table's detail).
+- **LLM loop** -- `DEFAULT_LLM_TIMEOUT_MS` 300s -> 90s (per-call override preserved); a cooldown-block now hard-stops the turn, emitting synthetic tool results for any queued calls so no `tool_use` is left without a `tool_result`.
+- **Planner** -- `PLANNING_MAX_TOOL_ROUNDS` 10 -> 5 (51-62% of Opus planning turns were hitting the 10-round ceiling against their own "don't research" instruction).
+- **Model tiers & cadence (config)** -- Morg'Thar executor Sonnet -> Haiku (~$94/24h, the single largest cost lever; Opus planner retained); `planning_interval` 5 -> 10 for the leader plus the five simple agents; directive steering for Grit Vane (relocate off low-value belts, never jettison sellable ore) and Morg'Thar (camp recorded kill-zones instead of wandering).
+
 ## [0.4.2] - 2026-06-13
 
 ### Fixed
