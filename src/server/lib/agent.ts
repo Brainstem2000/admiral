@@ -617,7 +617,7 @@ ${(() => {
 })()}${(() => {
   if (getPreference('situational_briefing') === 'off' || !profileId) return ''
   const sitBriefing = buildSituationalBriefing(profileId)
-  return sitBriefing ? `## Current Situation (auto-collected, refreshed every 60s — DO NOT re-query this data)\n${sitBriefing}\n\n` : ''
+  return sitBriefing ? `## Current Situation — LIVE GROUND TRUTH (auto-collected, refreshed every 60s — DO NOT re-query this data)\n⚠️ AUTHORITATIVE: if your Agent Memory or TODO List disagrees with anything below — your ACTIVE SHIP, location, fuel, credits, or cargo — then THIS briefing is correct and your memory/TODO is STALE. Trust this, act on it, and update your memory/TODO to match. Never plan around a ship or location your live status does not confirm.\n${sitBriefing}\n\n` : ''
 })()}${(() => {
   if (getPreference('situational_briefing') === 'off') return ''
   // Inject TODO inline to save read_todo round-trips
