@@ -44,13 +44,13 @@ export async function runAgentTurn(
   memory: { value: string },
   options?: LoopOptions,
   compaction?: CompactionState,
-): Promise<{ cooldownBlocked: boolean }> {
+): Promise<void> {
   const maxRounds = options?.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS
   const summaryModel = options?.compactionModel || model
   let rounds = 0
 
   while (rounds < maxRounds) {
-    if (options?.signal?.aborted) return { cooldownBlocked: false }
+    if (options?.signal?.aborted) return
 
     await compactContext(summaryModel, context, compaction, options)
 
@@ -65,7 +65,7 @@ export async function runAgentTurn(
         estimatedTokens: totalMessageTokens(context.messages),
         error: err instanceof Error ? err.message : String(err),
       }, null, 2))
-      return { cooldownBlocked: false }
+      return
     }
 
     // Log rich LLM call metadata
@@ -133,7 +133,7 @@ export async function runAgentTurn(
 
     if (toolCalls.length === 0) {
       if (reasoning) log('llm_thought', reasoning)
-      return { cooldownBlocked: false }
+      return
     }
 
     const reason = reasoning
@@ -148,7 +148,7 @@ export async function runAgentTurn(
     let actionPending = false
     let cooldownBlocked = false
     for (const toolCall of toolCalls) {
-      if (options?.signal?.aborted) return { cooldownBlocked: false }
+      if (options?.signal?.aborted) return
 
       // Hard-stop: once a cooldown block (or a queued action) is seen, the turn is ending. Do NOT
       // execute the remaining queued tool calls in this assistant message — they would only re-fire
@@ -193,7 +193,7 @@ export async function runAgentTurn(
     // Early exit: if an action is pending, end the turn immediately instead of burning more rounds
     if (actionPending) {
       log('system', 'Action pending — ending turn early')
-      return { cooldownBlocked: false }
+      return
     }
 
     // Early exit: a cooldown-block means the agent just acted and must wait ~a tick before it can
@@ -202,14 +202,13 @@ export async function runAgentTurn(
     // next turn proceed after the tick.
     if (cooldownBlocked) {
       log('system', 'Cooldown active — ending turn early')
-      return { cooldownBlocked: true }
+      return
     }
 
     rounds++
   }
 
   log('system', `Reached max tool rounds (${maxRounds}), ending turn`)
-  return { cooldownBlocked: false }
 }
 
 // --- Context compaction ---

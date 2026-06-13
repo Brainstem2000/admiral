@@ -108,23 +108,6 @@ const COOLDOWN_AFTER_PENDING = 10000  // 10s when last action was pending (match
 export const memoryDirtyFlags = new Map<string, boolean>()
 
 /**
- * Read-only accessor for the action cooldown clock. Returns the milliseconds an
- * agent must still wait before a *new* action command would clear the cooldown
- * gate below — i.e. (window - elapsed), where the window is COOLDOWN_AFTER_PENDING
- * when the last action was reported pending, else COOLDOWN_AFTER_SUCCESS. Returns 0
- * if there is no recorded action or the cooldown has already elapsed. Same
- * arithmetic the gate uses; exposed so the agent loop can gate inter-turn re-entry
- * after a cooldown-blocked turn instead of waking on the flat TURN_INTERVAL only to
- * no-op back into the gate. Pure read — does not mutate the map.
- */
-export function getCooldownRemainingMs(profileId: string): number {
-  const last = actionCooldowns.get(profileId)
-  if (!last) return 0
-  const cooldownMs = last.wasPending ? COOLDOWN_AFTER_PENDING : COOLDOWN_AFTER_SUCCESS
-  return Math.max(0, cooldownMs - (Date.now() - last.timestamp))
-}
-
-/**
  * Drop all per-profile state held in module-level maps when an agent stops.
  * Without this these maps only ever grow, leaking memory across the lifetime of
  * the process as profiles connect/disconnect.

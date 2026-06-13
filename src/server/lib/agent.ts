@@ -9,7 +9,7 @@ import { McpConnection } from './connections/mcp'
 import { McpV2Connection } from './connections/mcp_v2'
 import { resolveModel, resolveApiKey } from './model'
 import { fetchGameCommands, formatCommandList } from './schema'
-import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, getCooldownRemainingMs } from './tools'
+import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
 import { FleetIntelCollector } from './fleet-intel'
@@ -22,11 +22,6 @@ import fs from 'fs'
 import path from 'path'
 
 const TURN_INTERVAL = 2000
-// Upper bound on the cooldown-gated inter-turn wait. After a turn ends on the cooldown-block path we
-// wait out the real action cooldown (getCooldownRemainingMs) instead of the flat TURN_INTERVAL, but we
-// clamp it so a stale/garbage clock value can never strand the agent. 12s covers COOLDOWN_AFTER_PENDING
-// (10s) plus headroom; the wait stays fully interruptible by nudge/stop via the same abortController.
-const MAX_COOLDOWN_GATE_WAIT = 12000
 const PROMPT_PATH = path.join(process.cwd(), 'prompt.md')
 
 let _promptMd: string | null = null
@@ -47,10 +42,6 @@ export class Agent {
   private running = false
   private abortController: AbortController | null = null
   private restartRequested = false
-  // Set after each turn: true iff the turn ended on the cooldown-block path. Gates the next
-  // inter-turn wait to the real remaining action cooldown (see the sleep below). Stored on the
-  // instance so it survives the local scope between the turn call and the sleep.
-  private cooldownGated = false
   private pendingNudges: string[] = []
   private _activity: string = 'idle'
   private _gameState: Record<string, unknown> | null = null
@@ -330,7 +321,7 @@ export class Agent {
             : maxToolRounds
 
         this.setActivity(`${phasePrefix}Waiting for LLM response...`)
-        const turnResult = await runAgentTurn(
+        await runAgentTurn(
           turnModel, context, this.connection, this.profileId, profile.name,
           this.log, todo, memory,
           {
@@ -342,10 +333,6 @@ export class Agent {
           },
           compaction,
         )
-        // Gate inter-turn re-entry only when the turn ended on the cooldown-block path (NOT a normal
-        // successful action — that also leaves cooldown remaining, but we must not delay it). Read at
-        // sleep time from the live clock and clamped; collapses to TURN_INTERVAL if already elapsed.
-        this.cooldownGated = turnResult.cooldownBlocked
         turnCounter++
 
         // Safe dock check: if pending and agent is now docked (or timeout), auto-disconnect
@@ -379,20 +366,8 @@ export class Agent {
 
       if (!this.running) break
       if (this.restartRequested) continue
-      // Inter-turn wait. Normally TURN_INTERVAL. But if the turn ended because an action was
-      // cooldown-blocked, wait out the *real* remaining action cooldown (clamped to MAX_COOLDOWN_GATE_WAIT)
-      // so we don't spend an LLM turn that can only no-op back into the gate. The wait stays fully
-      // interruptible: injectNudge/restartTurn/safeDock and Agent.stop() all abort this.abortController,
-      // which wakes abortableSleep immediately — so a nudge, fleet order, attack, or stop returns control
-      // at once, never after the cooldown. Read this.abortController.signal FRESH here (it may have been
-      // recreated at the top of this iteration).
-      let interTurnWait = TURN_INTERVAL
-      if (this.cooldownGated) {
-        const remaining = getCooldownRemainingMs(this.profileId)
-        interTurnWait = Math.min(MAX_COOLDOWN_GATE_WAIT, Math.max(TURN_INTERVAL, remaining))
-      }
-      this.setActivity(this.cooldownGated ? 'Waiting out action cooldown...' : 'Sleeping between turns...')
-      await abortableSleep(interTurnWait, this.abortController.signal)
+      this.setActivity('Sleeping between turns...')
+      await abortableSleep(TURN_INTERVAL, this.abortController.signal)
       if (!this.running) break
       if (this.restartRequested) continue
 
