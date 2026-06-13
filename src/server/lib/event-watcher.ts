@@ -5,6 +5,7 @@
  */
 import { listEventTriggers, markEventTriggerFired, addLogEntry, getProfile, type EventTrigger } from './db'
 import { agentManager } from './agent-manager'
+import { safeTruncate } from './text-safe'
 
 /**
  * Check a notification against all enabled triggers for a profile.
@@ -45,7 +46,7 @@ async function executeTriggerAction(trigger: EventTrigger, notification: Record<
   const profile = getProfile(trigger.profile_id)
   if (!profile) return
 
-  const notifSummary = (notification.message || notification.content || JSON.stringify(notification)).toString().slice(0, 100)
+  const notifSummary = safeTruncate((notification.message || notification.content || JSON.stringify(notification)).toString(), 100)
 
   if (trigger.action === 'wake' || trigger.action === 'connect_llm') {
     addLogEntry(profile.id, 'system', `[Event Trigger] Waking agent: ${trigger.event_type} matched — ${notifSummary}`)

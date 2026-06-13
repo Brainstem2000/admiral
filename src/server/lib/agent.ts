@@ -13,6 +13,7 @@ import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileTool
 import { runAgentTurn, type CompactionState } from './loop'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
 import { FleetIntelCollector } from './fleet-intel'
+import { safeTruncate } from './text-safe'
 import { LedgerCollector } from './ledger'
 import { startBriefingCollector, stopBriefingCollector, clearBriefingCache, buildSituationalBriefing, buildFactionBriefing, getCachedSystemName } from './briefing'
 import { checkEventTriggers } from './event-watcher'
@@ -631,7 +632,7 @@ ${(() => {
     // Cap at 10 most recent orders to prevent prompt overflow (was causing 213k+ token prompts)
     const capped = pending.slice(-10)
     const lines = capped.map(o =>
-      `- [${o.id.slice(0, 8)}] ${o.status.toUpperCase()} from ${nameOf(o.from_profile_id)}: [${o.type}] ${o.description.slice(0, 200)}${o.progress ? ' | Progress: ' + o.progress : ''}`
+      `- [${o.id.slice(0, 8)}] ${o.status.toUpperCase()} from ${nameOf(o.from_profile_id)}: [${o.type}] ${safeTruncate(o.description, 200)}${o.progress ? ' | Progress: ' + o.progress : ''}`
     )
     const overflow = pending.length > 10 ? `\n(${pending.length - 10} older orders not shown — use read_fleet_orders to see all)` : ''
     return `## Pending Fleet Orders (auto-injected — use read_fleet_orders only to accept/complete/reject)\n${lines.join('\n')}${overflow}\n\n`
@@ -699,7 +700,7 @@ function formatNotificationSummary(n: unknown): string {
     if (msg) return `[${type.toUpperCase()}] ${msg}`
   }
 
-  return `[${type.toUpperCase()}] ${JSON.stringify(n).slice(0, 200)}`
+  return `[${type.toUpperCase()}] ${safeTruncate(JSON.stringify(n), 200)}`
 }
 
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {

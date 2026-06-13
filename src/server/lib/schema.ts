@@ -1,4 +1,5 @@
 import { getPreference, setPreference } from './db'
+import { safeTruncate } from './text-safe'
 import type { GameCommandInfo, GameCommandParam } from '@shared/types'
 
 export type { GameCommandInfo, GameCommandParam }
@@ -173,7 +174,7 @@ function formatCommandSignature(cmd: GameCommandInfo): string {
     const paramList = cmd.params.map(p => p.required ? p.name : `${p.name}?`).join(', ')
     sig += `(${paramList})`
   }
-  const desc = cmd.description ? ` -- ${cmd.description.slice(0, 80)}` : ''
+  const desc = cmd.description ? ` -- ${safeTruncate(cmd.description, 80)}` : ''
   return `  ${sig}${desc}`
 }
 

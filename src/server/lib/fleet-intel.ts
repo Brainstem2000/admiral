@@ -1,4 +1,5 @@
 import { getDb } from './db'
+import { safeTruncate } from './text-safe'
 import type { FleetIntelData, MarketIntel, SystemIntel, ThreatIntel, KillZone } from '../../shared/fleet-intel-types'
 
 type R = Record<string, unknown>
@@ -383,7 +384,7 @@ export class FleetIntelCollector {
 
     const briefing = sections.join('\n\n')
     // Cap at ~1500 chars to avoid bloating the prompt
-    return briefing.length > 1500 ? briefing.slice(0, 1497) + '...' : briefing
+    return safeTruncate(briefing, 1497, '...')
   }
 
   /** Remove expired threats */

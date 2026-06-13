@@ -6,6 +6,7 @@ import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
 import { invalidateBriefingCache } from './briefing'
+import { safeTruncate } from './text-safe'
 
 // Extended query result cache: keyed by "profileId:command:argsJSON"
 const queryCache = new Map<string, { result: string; timestamp: number }>()
@@ -260,7 +261,7 @@ export async function executeTool(
       const CHAT_MAX = 480
       for (const k of ['content', 'message', 'text']) {
         const v = commandArgs[k]
-        if (typeof v === 'string' && v.length > CHAT_MAX) commandArgs[k] = v.slice(0, CHAT_MAX - 1) + '…'
+        if (typeof v === 'string' && v.length > CHAT_MAX) commandArgs[k] = safeTruncate(v, CHAT_MAX - 1, '…')
       }
     }
     // scan/attack: the game API expects `target_id`. Normalize id/target -> target_id.
@@ -641,13 +642,12 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
 }
 
 function truncateResult(text: string): string {
-  if (text.length <= MAX_RESULT_CHARS) return text
-  return text.slice(0, MAX_RESULT_CHARS) + '\n\n... (truncated)'
+  return safeTruncate(text, MAX_RESULT_CHARS, '\n\n... (truncated)')
 }
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text
-  return text.slice(0, max - 3) + '...'
+  return safeTruncate(text, max - 3, '...')
 }
 
 const REDACTED_KEYS = new Set(['password', 'token', 'secret', 'api_key'])

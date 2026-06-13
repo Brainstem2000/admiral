@@ -3,6 +3,7 @@ import type { Model, Context, AssistantMessage, ToolCall, Message } from '@mario
 import type { GameConnection } from './connections/interface'
 import type { LogFn } from './tools'
 import { executeTool, ACTION_PENDING_SENTINEL, COOLDOWN_BLOCKED_SENTINEL } from './tools'
+import { safeTruncate, scrubContextSurrogates } from './text-safe'
 
 // Lowered from 30: the cap was being treated as a quota — turns ran to the ceiling firing queries
 // and (pre-fix) re-firing into the cooldown gate. With the cooldown-block early-exit below, 12 is
@@ -279,7 +280,7 @@ function formatMessagesForSummary(messages: Message[]): string {
       const text = Array.isArray(msg.content)
         ? msg.content.map((b: any) => b.text || '').join('')
         : ''
-      const trimmed = text.length > 500 ? text.slice(0, 500) + '...' : text
+      const trimmed = safeTruncate(text, 500, '...')
       const errorTag = msg.isError ? ' [ERROR]' : ''
       lines.push(`[RESULT${errorTag}] ${msg.toolName}: ${trimmed}`)
     }
@@ -300,7 +301,7 @@ async function compactContext(
         if ('text' in block) {
           const text = (block as any).text
           if (typeof text === 'string' && text.length > 4000) {
-            (block as any).text = text.slice(0, 3000) + '\n...(truncated)'
+            (block as any).text = safeTruncate(text, 3000, '\n...(truncated)')
           }
         }
       }
@@ -391,6 +392,7 @@ async function summarizeViaLLM(
     : timeoutController.signal
 
   try {
+    scrubContextSurrogates(summaryCtx)
     const resp = await complete(model, summaryCtx, {
       signal,
       apiKey: options?.apiKey,
@@ -434,6 +436,7 @@ async function completeWithRetry(
         : timeoutController.signal
 
       try {
+        scrubContextSurrogates(context)
         const result = await complete(model, context, {
           signal,
           apiKey: options?.apiKey,
@@ -506,7 +509,7 @@ async function emergencyCompact(
         if ('text' in block) {
           const text = (block as any).text
           if (typeof text === 'string' && text.length > 2000) {
-            (block as any).text = text.slice(0, 1500) + '\n...(truncated)'
+            (block as any).text = safeTruncate(text, 1500, '\n...(truncated)')
           }
         }
       }
