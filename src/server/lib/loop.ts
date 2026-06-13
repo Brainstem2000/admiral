@@ -59,11 +59,16 @@ export async function runAgentTurn(
     try {
       response = await completeWithRetry(model, context, log, options, compaction)
     } catch (err) {
-      log('error', `LLM call failed: ${err instanceof Error ? err.message : String(err)}`, JSON.stringify({
+      const msg = err instanceof Error ? err.message : String(err)
+      // An empty or overloaded LLM response that survives the retry loop is transient, not a real
+      // fault — the agent just takes another turn next cycle. Log those as a benign 'system' note so
+      // they don't pollute the error stream (and skew error-rate monitoring); genuine failures stay 'error'.
+      const benign = /empty response|overloaded/i.test(msg)
+      log(benign ? 'system' : 'error', `${benign ? 'LLM transient (will retry next turn)' : 'LLM call failed'}: ${msg}`, JSON.stringify({
         model: { name: (model as any).name || 'unknown', contextWindow: model.contextWindow },
         messageCount: context.messages.length,
         estimatedTokens: totalMessageTokens(context.messages),
-        error: err instanceof Error ? err.message : String(err),
+        error: msg,
       }, null, 2))
       return
     }
