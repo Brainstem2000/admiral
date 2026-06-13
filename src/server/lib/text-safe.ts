@@ -40,6 +40,19 @@ const TRAILING_HIGH_SURROGATE_RE = /[\uD800-\uDBFF]$/
 const scrubbedTools = new WeakSet<object>()
 
 /**
+ * Per-message scrub memo. scrubContextSurrogates() is called before EVERY complete(), and the
+ * message history grows monotonically by APPENDING new objects (user/assistant/toolResult). A
+ * message object, once scrubbed, can only be further MUTATED by in-place truncation of its
+ * toolResult text (compactContext/emergencyCompact via safeTruncate) — and safeTruncate only
+ * REMOVES code units / drops a trailing high surrogate, so it can never reintroduce a lone
+ * surrogate into already-clean text (its appended suffix is pure ASCII). Re-scrubbing such a
+ * message is therefore a no-op, so we skip messages already scrubbed and only scrub newly-pushed
+ * ones (plus the systemPrompt, always — see below). Turns the per-call cost from O(history) to
+ * O(new messages).
+ */
+const scrubbedMessages = new WeakSet<object>()
+
+/**
  * Truncate `text` to at most `maxLen` UTF-16 code units, then append `suffix`.
  * Never splits a surrogate pair: a fixed-length head slice can only ever orphan a
  * trailing HIGH surrogate (its low partner was cut off), so that orphan is dropped
@@ -99,6 +112,11 @@ export function scrubContextSurrogates(context: Context): Context {
     context.systemPrompt = stripLoneSurrogates(context.systemPrompt)
   }
   for (const msg of context.messages as any[]) {
+    // Skip messages already scrubbed on a previous call. They are immutable post-scrub except for
+    // in-place toolResult truncation, which cannot reintroduce a lone surrogate (see
+    // scrubbedMessages doc). The systemPrompt is scrubbed unconditionally above — only messages
+    // are memoized here.
+    if (scrubbedMessages.has(msg)) continue
     if (msg.role === 'user' && typeof msg.content === 'string') {
       msg.content = stripLoneSurrogates(msg.content) // the only bare-string content
     } else if (Array.isArray(msg.content)) {
@@ -110,6 +128,7 @@ export function scrubContextSurrogates(context: Context): Context {
     }
     if (typeof msg.toolCallId === 'string') msg.toolCallId = stripLoneSurrogates(msg.toolCallId)
     if (typeof msg.toolName === 'string') msg.toolName = stripLoneSurrogates(msg.toolName)
+    scrubbedMessages.add(msg)
   }
   // Tool definitions are static and shared across agents/turns — scrub each array
   // at most once rather than deep-walking the shared singleton on every call.

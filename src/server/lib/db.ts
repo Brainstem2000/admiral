@@ -94,6 +94,7 @@ function migrate(db: Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_log_profile ON log_entries(profile_id, id);
+    CREATE INDEX IF NOT EXISTS idx_log_type_ts ON log_entries(type, timestamp, id);
   `)
 
   // Migrations: add columns that may be missing from older databases
@@ -454,9 +455,18 @@ export function reorderProfiles(orderedIds: string[]): void {
 // --- Log CRUD ---
 
 export function addLogEntry(profileId: string, type: string, summary: string, detail?: string): number {
+  // Cap only the PERSISTED copy of tool_result detail. The full result is still
+  // handed to the LLM in-context by the caller; this truncation affects the DB row
+  // alone, keeping the log_entries table from bloating on huge tool payloads.
+  let persistedDetail = detail ?? null
+  const TOOL_RESULT_DETAIL_CEILING = 32768
+  if (type === 'tool_result' && persistedDetail !== null && persistedDetail.length > TOOL_RESULT_DETAIL_CEILING) {
+    const dropped = persistedDetail.length - TOOL_RESULT_DETAIL_CEILING
+    persistedDetail = persistedDetail.slice(0, TOOL_RESULT_DETAIL_CEILING) + `\n…[truncated ${dropped} bytes]`
+  }
   const result = getDb().query(
     'INSERT INTO log_entries (profile_id, type, summary, detail) VALUES (?, ?, ?, ?)'
-  ).run(profileId, type, summary, detail ?? null)
+  ).run(profileId, type, summary, persistedDetail)
   return Number(result.lastInsertRowid)
 }
 
@@ -682,7 +692,16 @@ export function setGalaxyMap(data: GalaxyMapData): void {
 // --- Financial Snapshots ---
 
 export function addFinancialSnapshot(profileId: string, wallet: number, storage: number): void {
-  getDb().query(
+  const db = getDb()
+  // Dedup idle runs: if the most-recent snapshot for this profile already has the
+  // identical wallet+storage, skip the insert. Every real BALANCE CHANGE still lands
+  // a row (the next differing value inserts); only consecutive identical idle samples
+  // are collapsed, keeping the wealth-over-time series faithful while bounding growth.
+  const last = db.query(
+    'SELECT wallet, storage FROM financial_snapshots WHERE profile_id = ? ORDER BY timestamp DESC, id DESC LIMIT 1'
+  ).get(profileId) as { wallet: number; storage: number } | undefined
+  if (last && last.wallet === wallet && last.storage === storage) return
+  db.query(
     'INSERT INTO financial_snapshots (profile_id, wallet, storage, total) VALUES (?, ?, ?, ?)'
   ).run(profileId, wallet, storage, wallet + storage)
 }

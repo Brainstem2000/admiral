@@ -11,7 +11,7 @@ import { safeTruncate, scrubContextSurrogates } from './text-safe'
 const DEFAULT_MAX_TOOL_ROUNDS = 12
 const MAX_RETRIES = 3
 const RETRY_BASE_DELAY = 5000
-const DEFAULT_LLM_TIMEOUT_MS = 300_000
+const DEFAULT_LLM_TIMEOUT_MS = 90_000
 
 const CHARS_PER_TOKEN = 2  // Game JSON tokenizes at ~1.7 chars/token; 2 is a safe approximation
 const CONTEXT_BUDGET_RATIO = 0.45  // Trigger compaction earlier to leave room
@@ -80,15 +80,10 @@ export async function runAgentTurn(
       const thinkingBlocks = response.content.filter(b => b.type === 'thinking').length
       const toolCallBlocks = response.content.filter(b => b.type === 'toolCall').length
 
-      // Bound how much context we persist per call. Previously the ENTIRE message array was
-      // serialized on every llm_call — with a large context that was ~140KB/row and grew the DB
-      // by ~1GB/day. Keep only a short, truncated preview of the most-recent messages; the
-      // metadata (counts/tokens/cost) below is what the UI actually needs.
-      const PREVIEW_MSGS = 8, PREVIEW_CHARS = 220
-      const clip = (s: string) =>
-        (typeof s === 'string' && s.length > PREVIEW_CHARS ? s.slice(0, PREVIEW_CHARS) + '…' : s)
-      const previewSource = context.messages.slice(-PREVIEW_MSGS)
-
+      // We persist only lightweight per-call metadata (counts/tokens/cost). The full message
+      // array used to be serialized here too — even truncated to a preview it dominated the
+      // llm_call rows (~68% of detail bytes / tens of MB) and was never read by the UI, so the
+      // transcript preview was dropped entirely.
       const detail = JSON.stringify({
         model: response.model,
         provider: response.provider,
@@ -105,30 +100,7 @@ export async function runAgentTurn(
           messageCount: context.messages.length,
           estimatedTokens: totalMessageTokens(context.messages),
           systemPromptTokens: context.systemPrompt ? estimateTokens(context.systemPrompt) : 0,
-          omittedMessages: Math.max(0, context.messages.length - previewSource.length),
-          messages: previewSource.map(msg => {
-            if (msg.role === 'user') {
-              const text = typeof msg.content === 'string' ? msg.content : '(complex)'
-              return { role: 'user', text: clip(text) }
-            }
-            if (msg.role === 'assistant') {
-              const parts: string[] = []
-              for (const b of msg.content) {
-                if ('text' in b && (b as any).text?.trim()) parts.push((b as any).text.trim())
-                else if ('name' in b) {
-                  const args = JSON.stringify((b as any).arguments || {})
-                  parts.push(`tool: ${(b as any).name}(${args})`)
-                }
-                else if ('thinking' in b) parts.push(`thinking: ${(b as any).thinking?.trim()}`)
-              }
-              return { role: 'assistant', text: clip(parts.join(' | ') || '(empty)') }
-            }
-            if (msg.role === 'toolResult') {
-              const text = Array.isArray(msg.content) ? msg.content.map((b: any) => b.text || '').join('') : ''
-              return { role: 'toolResult', tool: msg.toolName, error: msg.isError || undefined, text: clip(text) }
-            }
-            return { role: (msg as any).role }
-          }),
+          omittedMessages: context.messages.length,
         },
         content: {
           text: textBlocks,
@@ -177,6 +149,23 @@ export async function runAgentTurn(
     let cooldownBlocked = false
     for (const toolCall of toolCalls) {
       if (options?.signal?.aborted) return
+
+      // Hard-stop: once a cooldown block (or a queued action) is seen, the turn is ending. Do NOT
+      // execute the remaining queued tool calls in this assistant message — they would only re-fire
+      // into the gate or stack a second action. But every toolCall MUST still get a matching
+      // toolResult, or the next turn's complete() request is malformed (tool_use without
+      // tool_result → API 400). So skipped calls get a synthetic result instead of executing.
+      if (cooldownBlocked || actionPending) {
+        context.messages.push({
+          role: 'toolResult',
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content: [{ type: 'text', text: 'Skipped — turn is ending (cooldown active / action pending). This call was not executed; reissue it next turn if still needed.' }],
+          isError: false,
+          timestamp: Date.now(),
+        })
+        continue
+      }
 
       options?.onActivity?.(`Executing tool: ${toolCall.name}`)
       const callReason = !showedReason ? reason : undefined
@@ -441,6 +430,7 @@ async function completeWithRetry(
           signal,
           apiKey: options?.apiKey,
           maxTokens: options?.maxTokens ?? 4096,
+          cacheRetention: 'long',
         })
         clearTimeout(timeout)
 

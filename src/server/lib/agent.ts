@@ -308,8 +308,11 @@ export class Agent {
         const turnApiKey = await resolveApiKey(turnProvider!)
         const phasePrefix = isPlanningTurn ? '[Planning] ' : (hasDualModel ? '[Executing] ' : '')
 
-        // Planning turns get fewer tool rounds — Opus should set strategy, not do exhaustive research
-        const PLANNING_MAX_TOOL_ROUNDS = 10
+        // Planning turns get fewer tool rounds — Opus should set strategy, not do exhaustive research.
+        // Lowered 10->5: audit found 51-62% of Opus planning turns hit the 10-round cap against the
+        // prompt's own 'don't research' instruction; the planner already has full situational briefing +
+        // TODO + memory + fleet orders injected, so it rarely needs more than 2-3 query rounds.
+        const PLANNING_MAX_TOOL_ROUNDS = 5
         const SAFE_DOCK_MAX_TOOL_ROUNDS = 5
         const turnMaxToolRounds = this.pendingSafeDock
           ? SAFE_DOCK_MAX_TOOL_ROUNDS
