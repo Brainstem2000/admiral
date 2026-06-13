@@ -272,8 +272,16 @@ export function buildSituationalBriefing(profileId: string): string {
     lines.push(`Market: ${items.join(', ')}`)
   }
 
-  const age = Math.round((Date.now() - cache.updatedAt) / 1000)
-  lines.push(`(Data age: ${age}s)`)
+  // NOTE: deliberately NO wall-clock "data age" line here. This briefing is baked
+  // into the CACHED system prompt and gated by a strict `!==` comparison
+  // (agent.ts), so any per-second-changing byte would rebuild the ~25-31k-token
+  // system prompt almost every turn and bust Anthropic's prompt-cache prefix
+  // (measured: ~65% of LLM spend was spurious cacheWrites). The header already
+  // states the data is auto-refreshed every 60s; freshness/invalidation is tracked
+  // independently via cache.updatedAt (the `updatedAt === 0` guard above), so the
+  // briefing now changes ONLY when real game-state fields change — exactly when a
+  // rebuild is warranted. If a live age is ever needed, inject it as an EPHEMERAL
+  // per-turn user message, never into this cached string.
 
   return lines.join('\n')
 }
