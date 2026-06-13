@@ -9,7 +9,6 @@ reviewed before deploy (the review caught a dropped-column DB INSERT bug and a
 build-passing/runtime-throwing missed-return defect, both fixed pre-ship).
 
 ### Performance
-- **Turn re-entry gated on the real action cooldown** -- ~48% of LLM turns took zero game actions: after a cooldown-blocked turn the loop re-fired every 2s only to no-op back into the gate, paying a full context cache cycle each time. The inter-turn wait now uses the *actual* remaining action cooldown (`getCooldownRemainingMs`, clamped to 2-12s) for cooldown-blocked turns only; normal turns are byte-identical. The wait stays fully interruptible -- a nudge, fleet order, attack notification, or stop aborts the shared `abortController` and wakes the agent immediately, never after the cooldown (responsiveness/stop/starvation all proven in review). `runAgentTurn` now returns `{ cooldownBlocked }` with all seven return paths updated. Deployed solo; fleet-wide turn-frequency effect still being measured.
 - **Scrub cost O(new) not O(history)** -- `scrubContextSurrogates` skips already-scrubbed messages via a per-message WeakSet (the systemPrompt is still always scrubbed), so the pre-send pass no longer re-walks unchanged history on every `complete()`.
 - **Prompt-cache retention** -- the main agent-turn `complete()` now requests provider-side `cacheRetention:'long'` so the prompt prefix survives idle stretches.
 
@@ -18,6 +17,9 @@ build-passing/runtime-throwing missed-return defect, both fixed pre-ship).
 - **LLM loop** -- `DEFAULT_LLM_TIMEOUT_MS` 300s -> 90s (per-call override preserved); a cooldown-block now hard-stops the turn, emitting synthetic tool results for any queued calls so no `tool_use` is left without a `tool_result`.
 - **Planner** -- `PLANNING_MAX_TOOL_ROUNDS` 10 -> 5 (51-62% of Opus planning turns were hitting the 10-round ceiling against their own "don't research" instruction).
 - **Model tiers & cadence (config)** -- Morg'Thar executor Sonnet -> Haiku (~$94/24h, the single largest cost lever; Opus planner retained); `planning_interval` 5 -> 10 for the leader plus the five simple agents; directive steering for Grit Vane (relocate off low-value belts, never jettison sellable ore) and Morg'Thar (camp recorded kill-zones instead of wandering).
+
+### Investigated, reverted
+- **Cooldown-gated turn re-entry** -- A change to wait out the real action cooldown after a cooldown-blocked turn (instead of the flat 2s) was implemented, reviewed, deployed, and then **reverted**: live measurement showed only ~4% of turns are actually cooldown-blocked (Bundle 1's hard-stop already handles those), so it moved fleet-wide turn frequency by ~0% (+6%, within noise). The "~48% zero-action turns" the audit flagged are overwhelmingly the model choosing to query/think rather than cooldown-blocked re-entry, which this gate did not address. Removed to keep the core turn loop lean.
 
 ## [0.4.2] - 2026-06-13
 
