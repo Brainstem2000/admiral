@@ -36,6 +36,10 @@ logs.get('/:id/logs', async (c) => {
     if (currentAgent) {
       currentAgent.events.on('log', handler)
       currentAgent.events.on('activity', activityHandler)
+      // Seed the CURRENT activity immediately — without this, a client that
+      // subscribes mid-turn (e.g. during a long-running macro) shows "idle"
+      // until the next activity CHANGE, which can be 10+ minutes away.
+      activityHandler(currentAgent.activity)
     }
 
     // Poll for agent reconnections
@@ -50,6 +54,7 @@ logs.get('/:id/logs', async (c) => {
         currentAgent = latestAgent
         currentAgent.events.on('log', handler)
         currentAgent.events.on('activity', activityHandler)
+        activityHandler(currentAgent.activity)
       }
     }, 2000)
 

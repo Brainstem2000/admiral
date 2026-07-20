@@ -7,6 +7,7 @@ import { HttpV2Connection } from './connections/http_v2'
 import { WebSocketConnection } from './connections/websocket'
 import { McpConnection } from './connections/mcp'
 import { McpV2Connection } from './connections/mcp_v2'
+import { LibV2Connection } from './connections/lib_v2'
 import { resolveModel, resolveApiKey } from './model'
 import { fetchGameCommands, formatCommandList } from './schema'
 import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState } from './tools'
@@ -66,6 +67,21 @@ export class Agent {
   }
 
   get gameState(): Record<string, unknown> | null {
+    // Connections with a client-side state cache (lib_v2) are current the
+    // instant any action executes — serve that live, so the dashboard's wallet
+    // and location never lag mid-turn (observed: a +35K sale that the UI
+    // didn't show until the turn ended). Preserve the faction-name enrichment
+    // stamped on the cached player, and fall back to the sampled snapshot for
+    // connections without a local cache.
+    const live = this.connection?.getLocalState?.() ?? null
+    if (live) {
+      const cachedPlayer = this._gameState?.player as Record<string, unknown> | undefined
+      const livePlayer = live.player as Record<string, unknown> | undefined
+      if (cachedPlayer?._faction_name && livePlayer && cachedPlayer.faction_id === livePlayer.faction_id) {
+        return { ...live, player: { ...livePlayer, _faction_name: cachedPlayer._faction_name, _faction_tag: cachedPlayer._faction_tag } }
+      }
+      return live
+    }
     return this._gameState
   }
 
@@ -215,6 +231,9 @@ export class Agent {
     if (profile.connection_mode === 'mcp_v2' && this.connection instanceof McpV2Connection) {
       commandList = this.connection.getCommandList()
       this.log('system', `Discovered ${this.connection.toolCount} v2 commands`)
+    } else if (profile.connection_mode === 'lib_v2' && this.connection instanceof LibV2Connection) {
+      commandList = this.connection.getCommandList()
+      this.log('system', `Loaded ${this.connection.commandCount} commands from @spacemolt/lib catalog`)
     } else {
       const serverUrl = profile.server_url.replace(/\/$/, '')
       const apiVersion = profile.connection_mode === 'http_v2' ? 'v2' : 'v1'
@@ -373,6 +392,13 @@ export class Agent {
 
       // Poll for events between turns (skip for push-capable connections — they get notifications via onNotification)
       let pendingEvents = ''
+      const localState = this.connection.getLocalState?.() ?? null
+      if (localState) {
+        // Connection keeps its own state cache (lib_v2) — refresh the
+        // dashboard-facing snapshot for free, no get_status round-trip.
+        this._gameState = localState
+        this.enrichFactionInfo()
+      }
       if (!this.connection.supportsNotifications()) {
         this.setActivity('Polling for events...')
         try {
@@ -438,9 +464,15 @@ export class Agent {
       // system prompt — so newly discovered grounds don't invalidate the prompt cache.
       {
         const cp = getProfile(this.profileId)
+        // Classify from the TOP of the directive only (the current-objective block) —
+        // matching the whole document misfires: rules text like "no pirate hunting"
+        // classified every agent as combat and the briefing lured crafters off-mission.
+        const head = (cp?.directive || '').slice(0, 600)
+        const isNonCombatRole = /standby|stay docked|crafter|coordinator|verify-only|miner|no (pirate )?hunt/i.test(head)
         const isCombat =
-          /combat|hunt|pirate|warrior|war\b/i.test(cp?.group_name || '') ||
-          /hunt|warrior|pirate|combat/i.test(cp?.directive || '')
+          !isNonCombatRole &&
+          (/combat specialist|bounty.?hunt|\bhunter\b|warrior/i.test(head) ||
+            /combat|hunt(er|ing)?|warrior/i.test(cp?.group_name || ''))
         if (isCombat) {
           const hunting = FleetIntelCollector.buildHuntingBriefing(getCachedSystemName(this.profileId))
           if (hunting) nudgeParts.push(hunting)
@@ -556,6 +588,8 @@ function createConnection(profile: Profile): GameConnection {
       return new McpConnection(profile.server_url)
     case 'mcp_v2':
       return new McpV2Connection(profile.server_url)
+    case 'lib_v2':
+      return new LibV2Connection(profile.server_url)
     case 'http_v2':
       return new HttpV2Connection(profile.server_url)
     case 'http':
@@ -568,7 +602,7 @@ function buildSystemPrompt(profile: Profile, commandList: string, phase?: 'plann
   const promptMd = getPromptMd()
   const directive = profile.directive || 'Play the game. Mine ore, sell it, and grow stronger.'
   const connectionMode = profile.connection_mode
-  const apiVersion = connectionMode === 'http_v2' || connectionMode === 'mcp_v2' ? 'v2'
+  const apiVersion = connectionMode === 'http_v2' || connectionMode === 'mcp_v2' || connectionMode === 'lib_v2' ? 'v2'
     : connectionMode === 'http' ? 'v1'
     : connectionMode === 'websocket' ? 'ws'
     : connectionMode === 'mcp' ? 'mcp-v1'

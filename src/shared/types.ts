@@ -24,7 +24,7 @@ export interface Profile {
   todo: string
   memory: string
   context_budget: number | null
-  connection_mode: 'http' | 'http_v2' | 'websocket' | 'mcp' | 'mcp_v2'
+  connection_mode: 'http' | 'http_v2' | 'websocket' | 'mcp' | 'mcp_v2' | 'lib_v2'
   server_url: string
   autoconnect: boolean
   enabled: boolean

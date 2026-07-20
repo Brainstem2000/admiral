@@ -81,6 +81,7 @@ const CONNECTION_MODES: { value: string; label: string }[] = [
   { value: 'websocket', label: 'WebSocket' },
   { value: 'mcp', label: 'MCP v1' },
   { value: 'mcp_v2', label: 'MCP v2' },
+  { value: 'lib_v2', label: 'Lib v2 (WebSocket, @spacemolt/lib)' },
 ]
 
 type EditingField = 'name' | 'mode' | 'provider' | 'credentials' | null

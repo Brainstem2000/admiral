@@ -26,7 +26,7 @@ export interface CommandResult {
 export type NotificationHandler = (notification: unknown) => void
 
 export interface GameConnection {
-  readonly mode: 'http' | 'http_v2' | 'websocket' | 'mcp' | 'mcp_v2'
+  readonly mode: 'http' | 'http_v2' | 'websocket' | 'mcp' | 'mcp_v2' | 'lib_v2'
 
   connect(): Promise<void>
   login(username: string, password: string): Promise<LoginResult>
@@ -37,4 +37,12 @@ export interface GameConnection {
   isConnected(): boolean
   /** Whether this connection receives push notifications (WebSocket/MCP), avoiding redundant polling */
   supportsNotifications(): boolean
+  /**
+   * Local game-state snapshot maintained by the connection itself (no server
+   * round-trip), shaped like a get_status response ({player, ship, location,
+   * cargo, missions, ...}). Only push-capable connections with a client-side
+   * state cache (lib_v2) implement this; callers must fall back to a
+   * get_status query when absent or null.
+   */
+  getLocalState?(): Record<string, unknown> | null
 }

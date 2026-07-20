@@ -23,6 +23,29 @@ export const allTools: Tool[] = [
     }),
   },
   {
+    name: 'mine_until_full',
+    description: 'MACRO: mine repeatedly until the cargo hold is full (or the resource depletes). Runs as one bounded code loop — vastly cheaper than calling mine one turn at a time. Requires being at a mineable POI. Returns how much was mined and why it stopped.',
+    parameters: Type.Object({
+      max_mines: Type.Optional(Type.Number({ description: 'Max mine actions before stopping (default 30, cap 60)' })),
+      stop_at_pct: Type.Optional(Type.Number({ description: 'Stop when cargo reaches this % full (default 100)' })),
+    }),
+  },
+  {
+    name: 'goto_system',
+    description: 'MACRO: plot a route with find_route and jump every hop to the target system in one bounded code loop — instead of one jump per turn. Optionally docks at a POI on arrival. Verifies fuel first. Returns arrival status, hops taken, fuel remaining.',
+    parameters: Type.Object({
+      target_system: Type.String({ description: 'Destination system id (snake_case, e.g. "iron_reach")' }),
+      dock_at_poi: Type.Optional(Type.String({ description: 'POI id to travel to and dock at after arriving (e.g. "war_citadel")' })),
+    }),
+  },
+  {
+    name: 'sell_cargo',
+    description: 'MACRO: sell every cargo item at the current docked station in one bounded code loop (skips items you list in exclude). Items with no buyers are reported, not errors. Returns per-item results and total credits gained. You MUST pass exclude for anything your directive forbids selling (e.g. BoM-locked items).',
+    parameters: Type.Object({
+      exclude: Type.Optional(Type.Array(Type.String(), { description: 'item_ids to NOT sell (BoM-locked / mission cargo)' })),
+    }),
+  },
+  {
     name: 'save_credentials',
     description: 'Save your login credentials locally. Do this IMMEDIATELY after registering!',
     parameters: Type.Object({
@@ -95,6 +118,11 @@ export const allTools: Tool[] = [
 ]
 
 const LOCAL_TOOLS = new Set(['save_credentials', 'update_todo', 'read_todo', 'update_memory', 'read_memory', 'status_log', 'fleet_order', 'read_fleet_orders'])
+// Macro tools: bounded code loops over game commands — one LLM call replaces
+// dozens of per-step calls. They pace themselves (lib_v2 mutations await the
+// tick; other modes sleep between steps), so they bypass the single-action
+// cooldown gate and re-arm it when they finish.
+const MACRO_TOOLS = new Set(['mine_until_full', 'goto_system', 'sell_cargo'])
 
 const MAX_RESULT_CHARS = 4000
 
@@ -181,12 +209,32 @@ export async function executeTool(
     return executeLocalTool(name, args, ctx)
   }
 
+  if (MACRO_TOOLS.has(name)) {
+    ctx.log('tool_call', `${name}(${formatArgs(args)})`)
+    const summary = await executeMacroTool(name, args, ctx)
+    // A macro just performed real game actions: refresh passive awareness and
+    // arm the normal cooldown so the next direct action is properly paced.
+    actionCooldowns.set(ctx.profileId, { timestamp: Date.now(), wasPending: false })
+    invalidateBriefingCache(ctx.profileId, ctx.connection)
+    ctx.log('tool_result', truncate(summary, 200), summary)
+    return summary
+  }
+
   let command: string
   let commandArgs: Record<string, unknown> | undefined
   if (name === 'game') {
     command = String(args.command || '')
     commandArgs = args.args as Record<string, unknown> | undefined
     if (!command) return 'Error: missing \'command\' argument'
+    // Models sometimes flatten command args to the top level — game({command:'deposit',
+    // item_id:'x'}) instead of game({command:'deposit', args:{item_id:'x'}}). Those keys
+    // were silently dropped (observed live: 10 consecutive argless deposit calls).
+    // Fold any extra top-level keys into the command args; explicit args.args wins.
+    const extras: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(args)) {
+      if (k !== 'command' && k !== 'args' && v !== undefined) extras[k] = v
+    }
+    if (Object.keys(extras).length > 0) commandArgs = { ...extras, ...(commandArgs ?? {}) }
   } else {
     command = name
     commandArgs = Object.keys(args).length > 0 ? args : undefined
@@ -271,6 +319,15 @@ export async function executeTool(
     if (bare === 'scan' || bare.endsWith('_scan') || bare === 'attack' || bare.endsWith('_attack')) {
       if (commandArgs.id && !commandArgs.target_id) { commandArgs.target_id = commandArgs.id; delete commandArgs.id }
       if (commandArgs.target && !commandArgs.target_id) { commandArgs.target_id = commandArgs.target; delete commandArgs.target }
+    }
+    // items passed as a JSON string instead of an array (bulk deposit/withdraw) —
+    // parse it so the server sees a real array (observed live: "Parameter 'items'
+    // must be an array, but received a string").
+    if (typeof commandArgs.items === 'string') {
+      try {
+        const parsed = JSON.parse(commandArgs.items as string)
+        if (Array.isArray(parsed)) commandArgs.items = parsed
+      } catch { /* leave as-is; server error will surface it */ }
     }
     // Strip empty-string values from args — they cause invalid_target/invalid_payload errors
     for (const key of Object.keys(commandArgs)) {
@@ -639,6 +696,270 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
     default:
       return `Unknown local tool: ${name}`
   }
+}
+
+// ─── Macro tools: bounded deterministic loops over game commands ───────────
+
+const macroSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
+/** Per-step pause: lib_v2 mutations already await the game tick; other modes need real pacing. */
+function macroStepDelayMs(conn: GameConnection): number {
+  return conn.mode === 'lib_v2' ? 500 : 8000
+}
+
+/** Errors that mean "wait and retry this same step", not "the step failed". */
+const MACRO_RETRYABLE = new Set(['action_pending', 'cooldown', 'in_transit', 'rate_limited', 'action_in_progress'])
+
+/** Read {credits, cargoUsed, cargoCapacity, systemId, docked} — local cache when available, else a get_status query. */
+async function macroReadState(conn: GameConnection): Promise<{
+  credits: number | null; cargoUsed: number | null; cargoCapacity: number | null
+  systemId: string | null; docked: boolean; cargo: Array<{ item_id: string; quantity: number }>
+}> {
+  let gs: Record<string, unknown> | null = conn.getLocalState?.() ?? null
+  if (!gs) {
+    try {
+      const resp = await conn.execute('get_status')
+      const data = resp.structuredContent ?? resp.result
+      if (data && typeof data === 'object') gs = data as Record<string, unknown>
+    } catch { /* fall through with null */ }
+  }
+  const player = (gs?.player ?? {}) as Record<string, unknown>
+  const ship = (gs?.ship ?? {}) as Record<string, unknown>
+  const location = (gs?.location ?? {}) as Record<string, unknown>
+  const cargoRaw = gs?.cargo
+  const cargo: Array<{ item_id: string; quantity: number }> = Array.isArray(cargoRaw)
+    ? (cargoRaw as Array<Record<string, unknown>>)
+        .filter((c) => typeof c.item_id === 'string' || typeof c.item === 'string')
+        .map((c) => ({ item_id: String(c.item_id ?? c.item), quantity: Number(c.quantity ?? 1) }))
+    : []
+  // cargo_used/capacity: numeric fields, or the "10/60" string some shapes use
+  let used = typeof ship.cargo_used === 'number' ? ship.cargo_used : null
+  let cap = typeof ship.cargo_capacity === 'number' ? ship.cargo_capacity : (typeof ship.max_cargo === 'number' ? ship.max_cargo : null)
+  if ((used === null || cap === null) && typeof ship.cargo === 'string') {
+    const m = /^(\d+)\/(\d+)/.exec(ship.cargo)
+    if (m) { used = used ?? Number(m[1]); cap = cap ?? Number(m[2]) }
+  }
+  const systemId = (location.system_id ?? player.current_system ?? null) as string | null
+  const docked = Boolean(location.docked_at) || player.docked === true || player.is_docked === true
+  return {
+    credits: typeof player.credits === 'number' ? player.credits : null,
+    cargoUsed: used, cargoCapacity: cap, systemId: systemId ? String(systemId) : null, docked, cargo,
+  }
+}
+
+/** Execute one game action inside a macro, retrying transient pacing errors a bounded number of times. */
+async function macroAction(
+  conn: GameConnection,
+  command: string,
+  args: Record<string, unknown> | undefined,
+  maxRetries = 6,
+): Promise<{ ok: boolean; errorCode?: string; errorMessage?: string }> {
+  for (let attempt = 0; ; attempt++) {
+    const resp = await conn.execute(command, args)
+    if (!resp.error) return { ok: true }
+    if (MACRO_RETRYABLE.has(resp.error.code) && attempt < maxRetries) {
+      await macroSleep(Math.max((resp.error.retry_after ?? 10) * 1000, 5000))
+      continue
+    }
+    return { ok: false, errorCode: resp.error.code, errorMessage: resp.error.message }
+  }
+}
+
+async function executeMacroTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<string> {
+  try {
+    switch (name) {
+      case 'mine_until_full': return await macroMineUntilFull(args, ctx)
+      case 'goto_system': return await macroGotoSystem(args, ctx)
+      case 'sell_cargo': return await macroSellCargo(args, ctx)
+      default: return `Error: unknown macro tool ${name}`
+    }
+  } catch (err) {
+    return `MACRO ERROR (${name}): ${err instanceof Error ? err.message : String(err)}. State may have partially changed — verify with get_status.`
+  }
+}
+
+async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContext): Promise<string> {
+  const conn = ctx.connection
+  // Bounds sized to fill a typical hold in ONE call: ~1 unit per ~10s tick means
+  // a 70-slot hold needs ~70 mines / ~12 min (observed live: 30 mines stopped at 60/70).
+  const maxMines = Math.min(Number(args.max_mines) || 80, 120)
+  const stopPct = Math.min(Math.max(Number(args.stop_at_pct) || 100, 10), 100)
+  const deadline = Date.now() + 15 * 60_000
+  const start = await macroReadState(conn)
+  if (start.cargoCapacity === null) return 'MACRO ABORT: could not read cargo capacity — run get_status and retry.'
+
+  let mines = 0
+  let noYieldStrikes = 0
+  let stopReason = 'max_mines'
+  let lastUsed = start.cargoUsed ?? 0
+
+  while (mines < maxMines) {
+    if (!conn.isConnected()) { stopReason = 'disconnected'; break }
+    if (Date.now() > deadline) { stopReason = 'deadline (5min)'; break }
+    const st = await macroReadState(conn)
+    const used = st.cargoUsed ?? lastUsed
+    if (st.cargoCapacity && used >= (st.cargoCapacity * stopPct) / 100) { stopReason = used >= st.cargoCapacity ? 'full' : `reached ${stopPct}%`; break }
+
+    const act = await macroAction(conn, 'mine', undefined)
+    mines++
+    if (!act.ok) {
+      stopReason = `error [${act.errorCode}] ${act.errorMessage ?? ''}`.trim()
+      break
+    }
+    const after = await macroReadState(conn)
+    const afterUsed = after.cargoUsed ?? used
+    if (afterUsed <= used) {
+      noYieldStrikes++
+      if (noYieldStrikes >= 3) { stopReason = 'no yield 3x (depleted?)'; break }
+    } else {
+      noYieldStrikes = 0
+    }
+    lastUsed = afterUsed
+    ctx.log('system', `mine_until_full: ${mines} mines, cargo ${afterUsed}/${after.cargoCapacity ?? '?'}`)
+    await macroSleep(macroStepDelayMs(conn))
+  }
+
+  const end = await macroReadState(conn)
+  const minedUnits = (end.cargoUsed ?? lastUsed) - (start.cargoUsed ?? 0)
+  return `mine_until_full DONE: ${mines} mine actions, +${minedUnits} cargo units, cargo now ${end.cargoUsed ?? '?'}/${end.cargoCapacity ?? '?'}. Stopped: ${stopReason}.`
+}
+
+async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext): Promise<string> {
+  const conn = ctx.connection
+  const target = String(args.target_system || '').toLowerCase().replace(/\s+/g, '_')
+  if (!target) return 'MACRO ABORT: target_system is required.'
+  const dockPoi = args.dock_at_poi ? String(args.dock_at_poi).toLowerCase().replace(/\s+/g, '_') : null
+  // Hops take ~65s of game time each; 12 min covers the fleet's standard 8-10 hop
+  // commutes in one call (observed live: 8 min split a 9-hop route into PARTIAL+resume).
+  const deadline = Date.now() + 12 * 60_000
+
+  const start = await macroReadState(conn)
+  if (start.systemId === target) {
+    if (!dockPoi) return `goto_system DONE: already in ${target}.`
+  } else {
+    // Plot the route
+    const routeResp = await conn.execute('find_route', { target_system: target })
+    const rc = (routeResp.structuredContent ?? routeResp.result) as Record<string, unknown> | undefined
+    if (routeResp.error || !rc) return `MACRO ABORT: find_route failed${routeResp.error ? ` [${routeResp.error.code}]` : ''}. Check the system name with search_systems.`
+    if (rc.found === false) return `MACRO ABORT: no route to ${target}: ${rc.message ?? 'unreachable'}.`
+    const route = Array.isArray(rc.route) ? (rc.route as Array<Record<string, unknown>>) : []
+    const hopIds = route
+      .map((h) => String(h.system_id ?? h.id ?? h.system ?? ''))
+      .filter((id) => id && id !== start.systemId)
+    if (hopIds.length === 0) return `MACRO ABORT: route to ${target} had no parseable hops — jump manually.`
+    if (hopIds.length > 25) return `MACRO ABORT: route is ${hopIds.length} hops (cap 25) — too far for one macro; refuel/plan waypoints.`
+    const estFuel = Number(rc.estimated_fuel ?? hopIds.length)
+    const fuelAvail = Number(rc.fuel_available ?? NaN)
+    if (!Number.isNaN(fuelAvail) && estFuel > fuelAvail) {
+      return `MACRO ABORT: route needs ~${estFuel} fuel but only ${fuelAvail} available. Refuel first (fuel exemption applies).`
+    }
+
+    // Undock if needed, then jump each hop
+    if (start.docked) await macroAction(conn, 'undock', undefined)
+    let hops = 0
+    for (const hop of hopIds) {
+      if (!conn.isConnected()) return `goto_system PARTIAL: disconnected after ${hops}/${hopIds.length} hops. Verify position with get_status.`
+      if (Date.now() > deadline) return `goto_system PARTIAL: deadline (8min) after ${hops}/${hopIds.length} hops — re-run goto_system(target_system="${target}") to continue.`
+      const act = await macroAction(conn, 'jump', { target_system: hop }, 12)
+      if (!act.ok) {
+        return `goto_system PARTIAL: jump to ${hop} failed [${act.errorCode}] ${act.errorMessage ?? ''} after ${hops}/${hopIds.length} hops. Verify position with get_status.`
+      }
+      hops++
+      ctx.log('system', `goto_system: hop ${hops}/${hopIds.length} → ${hop}`)
+      await macroSleep(macroStepDelayMs(conn))
+    }
+  }
+
+  let dockNote = ''
+  if (dockPoi) {
+    const t = await macroAction(conn, 'travel', { target_poi: dockPoi }, 12)
+    if (t.ok) {
+      await macroSleep(macroStepDelayMs(conn))
+      const d = await macroAction(conn, 'dock', undefined, 6)
+      dockNote = d.ok
+        ? ` Docked at ${dockPoi}.`
+        : ` You are AT ${dockPoi} (travel complete — no further travel needed); dock skipped [${d.errorCode}]${d.errorCode === 'no_base' ? ' — this POI has no station, e.g. a belt: just start working it' : ''}.`
+    } else {
+      dockNote = ` Arrived but travel to ${dockPoi} failed [${t.errorCode}] ${t.errorMessage ?? ''}.`
+    }
+  }
+  const end = await macroReadState(conn)
+  return `goto_system DONE: now in ${end.systemId ?? '?'}.${dockNote} Credits ${end.credits ?? '?'}.`
+}
+
+// Devastator BoM lock list — sell_cargo refuses to sell these regardless of the
+// caller's exclude list. Observed live: an agent passed exclude=[] with iron_ore
+// aboard and the macro sold a locked item. Doctrine must not depend on LLM diligence.
+const SELL_CARGO_ALWAYS_EXCLUDE = new Set([
+  'shield_emitter', 'station_reactor_core', 'neutronium_ingot', 'hull_plating', 'fury_alloy',
+  'targeting_computer', 'weapon_housing', 'durasteel_plate', 'weapon_core', 'weapon_battery',
+  'capital_ship_frame', 'armor_plate', 'power_distribution_grid', 'reinforced_bulkhead',
+  'crimson_siege_plating', 'crimson_ordnance_bay', 'railgun_capacitor', 'fury_crystal',
+  'iron_ore', 'titanium_ore', 'titanium_alloy', 'steel_plate', 'fury_cannon',
+  'piercing_railgun_ii', 'railgun_ii', 'mass_driver', 'crimson_berserker_plating', 'darksteel_armor',
+  'reactive_armor_hardener', // required x1 by the live commission quote (2026-07-19) — was missing from the original 28
+])
+
+async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext): Promise<string> {
+  const conn = ctx.connection
+  const exclude = new Set(
+    (Array.isArray(args.exclude) ? args.exclude : []).map((x) => String(x).toLowerCase()),
+  )
+  for (const locked of SELL_CARGO_ALWAYS_EXCLUDE) exclude.add(locked)
+  const deadline = Date.now() + 3 * 60_000
+  const start = await macroReadState(conn)
+  if (!start.docked) return 'MACRO ABORT: not docked — dock at a station first.'
+  if (start.cargo.length === 0) return 'sell_cargo DONE: cargo is empty, nothing to sell.'
+
+  const sold: string[] = []
+  const skipped: string[] = []
+  const failed: string[] = []
+  let prevCredits = start.credits
+  for (const item of start.cargo.slice(0, 20)) {
+    if (Date.now() > deadline) { failed.push('(deadline hit — remaining items not attempted)'); break }
+    if (exclude.has(item.item_id.toLowerCase())) {
+      const isBom = SELL_CARGO_ALWAYS_EXCLUDE.has(item.item_id.toLowerCase())
+      skipped.push(`${item.item_id} x${item.quantity} (${isBom ? 'BoM-locked — never sellable via this macro' : 'excluded'})`)
+      continue
+    }
+    const act = await macroAction(conn, 'sell', { item_id: item.item_id, quantity: item.quantity }, 3)
+    if (!act.ok) {
+      failed.push(`${item.item_id} x${item.quantity} [${act.errorCode}]`)
+    } else {
+      // A no-error response is NOT proof of a fill (observed live: "sold" with
+      // zero buyers and unchanged cargo). Verify the units actually left.
+      const after = await macroReadState(conn)
+      const remaining = after.cargo.find((c) => c.item_id === item.item_id)?.quantity ?? 0
+      if (remaining < item.quantity) {
+        const soldQty = item.quantity - remaining
+        sold.push(`${item.item_id} x${soldQty}${remaining > 0 ? ` (${remaining} unsold)` : ''}`)
+        // Book the sale in the financial ledger — macro sells bypass the normal
+        // per-command booking path in executeTool (observed: a +35K macro sale
+        // left no cashflow/transaction rows). Amount = verified credit delta.
+        const delta = after.credits !== null && prevCredits !== null ? after.credits - prevCredits : null
+        if (delta !== null && delta > 0) {
+          try {
+            LedgerCollector.processCommandResult('sell', {
+              action: 'sell', item_id: item.item_id, quantity_sold: soldQty,
+              total_earned: delta, credits: after.credits,
+            }, ctx.profileId, ctx.profileName)
+          } catch { /* ledger must never break the macro */ }
+        }
+        prevCredits = after.credits ?? prevCredits
+      } else {
+        failed.push(`${item.item_id} x${item.quantity} [no buyers — cargo unchanged]`)
+      }
+    }
+    await macroSleep(macroStepDelayMs(conn))
+  }
+  const end = await macroReadState(conn)
+  const gained = end.credits !== null && start.credits !== null ? end.credits - start.credits : null
+  return [
+    `sell_cargo DONE${gained !== null ? `: +${gained.toLocaleString()} cr` : ''}. Wallet ${end.credits?.toLocaleString() ?? '?'} cr.`,
+    sold.length ? `Sold: ${sold.join(', ')}` : 'Sold: nothing',
+    skipped.length ? `Skipped (excluded): ${skipped.join(', ')}` : '',
+    failed.length ? `Not sold: ${failed.join(', ')}` : '',
+  ].filter(Boolean).join('\n')
 }
 
 function truncateResult(text: string): string {

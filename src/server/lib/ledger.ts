@@ -35,6 +35,11 @@ export class LedgerCollector {
       let r = result as R
       // Some connections nest the payload one level down ({ result: {...} })
       if (!('action' in r) && r.result && typeof r.result === 'object') r = r.result as R
+      // lib_v2 mutations resolve to the state DELTA; the command's own response
+      // payload (total_earned, fills, ...) is nested at delta.details. Without
+      // this unwrap every lib_v2 trade parsed as an empty row and was skipped
+      // (observed: financial_ledger flatlined the moment agents moved to lib_v2).
+      if (!('action' in r) && r.details && typeof r.details === 'object') r = r.details as R
 
       // Normalize command: strip spacemolt_ and v2 group prefixes; the result's own
       // `action` field is the most authoritative dispatch key when present.

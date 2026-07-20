@@ -17,3 +17,7 @@ admiral.new.exe
 .*.bun-build
 # Claude Code machine-local settings (permissions etc.) — not shared
 .claude/settings.local.json
+
+# runtime output logs
+admiral-stdout.log
+admiral-stderr.log

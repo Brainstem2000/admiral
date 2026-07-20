@@ -11,7 +11,7 @@ function sanitizeProfile<T extends { password?: string | null }>(p: T): Omit<T, 
   return { ...rest, has_password: !!password }
 }
 
-const CONNECTION_MODES = new Set(['http', 'http_v2', 'websocket', 'mcp', 'mcp_v2'])
+const CONNECTION_MODES = new Set(['http', 'http_v2', 'websocket', 'mcp', 'mcp_v2', 'lib_v2'])
 
 /**
  * Validate the numeric/enum fields that drive scheduler and LLM-loop logic.

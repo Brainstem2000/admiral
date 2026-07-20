@@ -47,14 +47,32 @@ export async function refreshBriefingData(profileId: string, conn: GameConnectio
   const startEpoch = agentEpochs.get(profileId) ?? 0
   const cache = agentCaches.get(profileId) || emptyCache()
 
-  // Run queries in parallel — these are all free query commands
-  const [statusRaw, cargoRaw, nearbyRaw, systemRaw, missionsRaw] = await Promise.all([
-    safeQuery(conn, 'get_status'),
-    safeQuery(conn, 'get_cargo'),
-    safeQuery(conn, 'get_nearby'),
-    safeQuery(conn, 'get_system'),
-    safeQuery(conn, 'get_active_missions'),
-  ])
+  // Fast path: a connection-maintained local state cache (lib_v2) covers
+  // status/cargo/missions with zero round-trips — only nearby/system/market
+  // still need the wire.
+  const localState = conn.getLocalState?.() ?? null
+
+  let statusRaw: unknown, cargoRaw: unknown, nearbyRaw: unknown, systemRaw: unknown, missionsRaw: unknown
+  if (localState) {
+    statusRaw = localState
+    cargoRaw = localState.cargo ?? null
+    // lib state's missions section is {active: [...]} — unwrap to the array the parser expects
+    const ms = localState.missions as Record<string, unknown> | unknown[] | null | undefined
+    missionsRaw = Array.isArray(ms) ? ms : (ms && typeof ms === 'object' && Array.isArray((ms as Record<string, unknown>).active)) ? (ms as Record<string, unknown>).active : null
+    ;[nearbyRaw, systemRaw] = await Promise.all([
+      safeQuery(conn, 'get_nearby'),
+      safeQuery(conn, 'get_system'),
+    ])
+  } else {
+    // Run queries in parallel — these are all free query commands
+    ;[statusRaw, cargoRaw, nearbyRaw, systemRaw, missionsRaw] = await Promise.all([
+      safeQuery(conn, 'get_status'),
+      safeQuery(conn, 'get_cargo'),
+      safeQuery(conn, 'get_nearby'),
+      safeQuery(conn, 'get_system'),
+      safeQuery(conn, 'get_active_missions'),
+    ])
+  }
 
   if (statusRaw && typeof statusRaw === 'object') cache.status = statusRaw as Record<string, unknown>
   if (Array.isArray(cargoRaw)) cache.cargo = cargoRaw
