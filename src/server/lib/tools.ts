@@ -944,6 +944,10 @@ const SELL_CARGO_ALWAYS_EXCLUDE = new Set([
   'iron_ore', 'titanium_ore', 'titanium_alloy', 'steel_plate', 'fury_cannon',
   'piercing_railgun_ii', 'railgun_ii', 'mass_driver', 'crimson_berserker_plating', 'darksteel_armor',
   'reactive_armor_hardener', // required x1 by the live commission quote (2026-07-19) — was missing from the original 28
+  // Crafting inputs for open BoM lines (emitter + hull_plating chains). Doctrine
+  // always locked these, but the code guard didn't — Bob sold 35 focused_crystal
+  // via sell_cargo(exclude=[]) on 2026-07-20 before this was added.
+  'focused_crystal', 'superconductor', 'energy_crystal', 'circuit_board',
 ])
 
 async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext): Promise<string> {
