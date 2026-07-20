@@ -85,6 +85,12 @@ export class LibV2Connection implements GameConnection {
   /** Durable re-auth credentials: clerk (preferred — re-mints a fresh single-use
    *  WS token per reconnect, no password held) or raw login as fallback. */
   private authCreds: AuthCredentials | null = null
+  /** Credits seen in the latest QUERY response (get_player/get_status). The lib's
+   *  state cache only updates from the player's OWN mutation deltas, so credits
+   *  received from another player (gifts, order fills) stay stale until the next
+   *  own-mutation — which can be never for a docked crafter. Cleared whenever a
+   *  mutation delta arrives, since that is authoritative and newer. */
+  private queryCredits: number | null = null
   private connected = false
   private offAny: (() => void) | null = null
 
@@ -191,6 +197,9 @@ export class LibV2Connection implements GameConnection {
       const merged = route.defaultArgs ? { ...route.defaultArgs, ...(args ?? {}) } : args
       const resp = await this.account.send(route.tool, route.action, merged)
       if (resp && typeof resp === 'object' && 'delta' in resp) {
+        // Own-mutation delta: the lib folds this into its state cache, which is
+        // now fresher than any query-derived credits override.
+        this.queryCredits = null
         // MutationResult: surface the tick + typed details to the LLM, and the
         // full state delta as structuredContent.
         const m = resp as { command: string; tick: number; delta: Record<string, unknown>; autoDocked?: boolean; autoUndocked?: boolean }
@@ -207,6 +216,13 @@ export class LibV2Connection implements GameConnection {
         }
       }
       const q = resp as { result: unknown; structuredContent?: unknown }
+      // Harvest credits from query responses (get_player, get_status, get_ship,
+      // get_cargo all include them) so incoming transfers become visible.
+      const scObj = q.structuredContent as Record<string, unknown> | undefined
+      const credits =
+        (scObj?.credits as number | undefined) ??
+        ((scObj?.player as Record<string, unknown> | undefined)?.credits as number | undefined)
+      if (typeof credits === 'number') this.queryCredits = credits
       return { result: q.result, structuredContent: q.structuredContent }
     } catch (err) {
       if (err instanceof SpacemoltError) {
@@ -246,7 +262,11 @@ export class LibV2Connection implements GameConnection {
     if (!this.account?.authenticated) return null
     const snap = this.account.state as Record<string, unknown>
     if (!snap || (!snap.player && !snap.ship)) return null
-    return { ...snap, has_pending_action: this.account.hasPendingAction }
+    const out: Record<string, unknown> = { ...snap, has_pending_action: this.account.hasPendingAction }
+    // Query-derived credits are fresher than the cache when the last credit
+    // change was INCOMING (gift/order fill) — see queryCredits doc comment.
+    if (this.queryCredits !== null) out.credits = this.queryCredits
+    return out
   }
 
   /**
