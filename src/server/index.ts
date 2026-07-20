@@ -16,6 +16,20 @@ import schedules from './routes/schedules'
 import { startScheduler } from './lib/scheduler'
 import { pruneOldData } from './lib/db'
 
+// Admiral manages long-running agent connections; a single escaped error must
+// never kill the whole process. Known case: @spacemolt/lib rejects/throws
+// ConnectionClosedError (ws code 1006) from its close handler when the GAME
+// server restarts — e.g. the v0.533.0 update killed admiral.exe with three of
+// these. The lib's auto-reconnect recovers the sessions on its own; the only
+// correct process-level response is to log and keep serving.
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason)
+  console.error(`[unhandledRejection] ${msg}`)
+})
+process.on('uncaughtException', (err) => {
+  console.error(`[uncaughtException] ${err?.name ?? 'Error'}: ${err?.message ?? err}`)
+})
+
 const app = new Hono()
 
 // CORS is restricted to same-origin and localhost only. Admiral stores plaintext
