@@ -7,6 +7,7 @@ import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
 import { invalidateBriefingCache } from './briefing'
 import { safeTruncate } from './text-safe'
+import { codexLookup, codexChain, priceAdvisory } from './catalog'
 
 // Extended query result cache: keyed by "profileId:command:argsJSON"
 const queryCache = new Map<string, { result: string; timestamp: number }>()
@@ -115,9 +116,27 @@ export const allTools: Tool[] = [
       progress: Type.Optional(Type.String({ description: 'Progress note when accepting or completing' })),
     }),
   },
+  {
+    name: 'codex',
+    description: 'FREE local lookup in the official game codex (items, recipes, ships, facilities, skills) — no game tick, no network. Returns stats, base_value, recipe inputs/outputs, ship/facility build materials. ALWAYS prefer this over in-game catalog/types/dry-run discovery calls.',
+    parameters: Type.Object({
+      query: Type.String({ description: 'id or name (fuzzy) to look up, e.g. "shield_emitter" or "Devastator"' }),
+      kind: Type.Optional(StringEnum(['item', 'recipe', 'ship', 'facility', 'skill'], {
+        description: 'Restrict to one kind (default: search all kinds)',
+      })),
+    }),
+  },
+  {
+    name: 'codex_chain',
+    description: 'FREE local crafting-chain analysis: the full recursive input tree to craft an item, with aggregate raw-material totals and base-value cost estimate. Use before committing to any crafting or sourcing plan.',
+    parameters: Type.Object({
+      item_id: Type.String({ description: 'Exact item id to analyze (use codex() first if unsure)' }),
+      quantity: Type.Optional(Type.Number({ description: 'How many to craft (default 1)' })),
+    }),
+  },
 ]
 
-const LOCAL_TOOLS = new Set(['save_credentials', 'update_todo', 'read_todo', 'update_memory', 'read_memory', 'status_log', 'fleet_order', 'read_fleet_orders'])
+const LOCAL_TOOLS = new Set(['save_credentials', 'update_todo', 'read_todo', 'update_memory', 'read_memory', 'status_log', 'fleet_order', 'read_fleet_orders', 'codex', 'codex_chain'])
 // Macro tools: bounded code loops over game commands — one LLM call replaces
 // dozens of per-step calls. They pace themselves (lib_v2 mutations await the
 // tick; other modes sleep between steps), so they bypass the single-action
@@ -429,6 +448,9 @@ export async function executeTool(
       if (errCode === 'unknown_command') {
         errMsg += `\n\n💡 HINT: Use help() to see all available commands, or catalog() to browse game data.`
       }
+      if (errCode === 'connection_failed') {
+        errMsg += `\n\n💡 HINT: The game connection is down. You CANNOT fix this — login and reconnection are managed by the harness, not by game commands, so do NOT call login or keep retrying. Stop issuing commands and end your turn; the connection will be restored automatically.`
+      }
       if (errCode === 'not_docked') {
         errMsg += `\n\n💡 HINT: You must be docked at a station for this action. Use get_poi() to check if your current location has a base, then dock() to dock. If there's no base here, travel(target_poi="...") to a station POI first.`
       }
@@ -463,7 +485,21 @@ export async function executeTool(
     // MCP v2 returns structuredContent (JSON) separately from result (text summary).
     // Prefer structuredContent for the LLM — it has the actual data.
     const resultData = resp.structuredContent ?? resp.result
-    const result = formatToolResult(command, resultData, resp.notifications)
+    let result = formatToolResult(command, resultData, resp.notifications)
+
+    // Price-sanity advisory on sell listings: catalog base_value vs listed price.
+    // Advisory only — scarce markets legitimately trade far above base_value.
+    if (deepBare === 'sell' || deepBare === 'create_sell_order') {
+      try {
+        const orders = Array.isArray(commandArgs?.orders)
+          ? (commandArgs.orders as Array<Record<string, unknown>>)
+          : [commandArgs ?? {}]
+        const advisories = orders
+          .map((o) => priceAdvisory(String(o.item_id ?? ''), Number(o.price_each ?? o.price ?? NaN)))
+          .filter((a): a is string => !!a)
+        if (advisories.length) result += '\n\n' + advisories.join('\n')
+      } catch { /* advisory must never break execution */ }
+    }
     ctx.log('tool_result', truncate(result, 200), result)
 
     // Detect "action pending" responses — enforce extended cooldown and signal turn exit
@@ -540,6 +576,16 @@ export async function executeTool(
 
 function executeLocalTool(name: string, args: Record<string, unknown>, ctx: ToolContext): string {
   switch (name) {
+    case 'codex': {
+      const result = codexLookup(args.kind as string | undefined, String(args.query ?? ''))
+      ctx.log('tool_result', truncate(result, 200), result)
+      return truncateResult(result)
+    }
+    case 'codex_chain': {
+      const result = codexChain(String(args.item_id ?? ''), Number(args.quantity ?? 1))
+      ctx.log('tool_result', truncate(result, 200), result)
+      return truncateResult(result)
+    }
     case 'save_credentials': {
       const creds = {
         username: String(args.username),

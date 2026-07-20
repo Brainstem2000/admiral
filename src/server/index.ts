@@ -15,6 +15,7 @@ import analytics from './routes/analytics'
 import schedules from './routes/schedules'
 import { startScheduler } from './lib/scheduler'
 import { pruneOldData } from './lib/db'
+import { startCatalogService } from './lib/catalog'
 
 // Admiral manages long-running agent connections; a single escaped error must
 // never kill the whole process. Known case: @spacemolt/lib rejects/throws
@@ -107,6 +108,7 @@ if (isDev) {
 
 // Start cron scheduler
 startScheduler()
+startCatalogService()
 
 // Prune aged logs/snapshots/intel on startup, then every 6 hours, so these
 // tables don't grow without bound.
