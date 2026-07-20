@@ -13,6 +13,7 @@ import galaxy from './routes/galaxy'
 import fleetIntel from './routes/fleet-intel'
 import analytics from './routes/analytics'
 import schedules from './routes/schedules'
+import codexRoutes from './routes/codex'
 import { startScheduler } from './lib/scheduler'
 import { pruneOldData } from './lib/db'
 import { startCatalogService } from './lib/catalog'
@@ -60,6 +61,7 @@ app.route('/api/galaxy', galaxy)
 app.route('/api/fleet-intel', fleetIntel)
 app.route('/api/analytics', analytics)
 app.route('/api/schedules', schedules)
+app.route('/api/codex', codexRoutes)
 
 // Health check
 app.get('/api/health', (c) => c.json({ ok: true }))

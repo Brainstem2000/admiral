@@ -239,6 +239,65 @@ export function codexChain(itemId: string, quantity: number): string {
     lines.join('\n') + `\n\nAGGREGATE RAW INPUTS:\n  ${rawSummary}`
 }
 
+// --- structured accessors for the dashboard Codex API (Phase 3) ---
+
+export function codexSummary(): { version: string | null; counts: Record<string, number> } {
+  return {
+    version: catalog?.version ?? null,
+    counts: {
+      items: catalog?.items.length ?? 0,
+      recipes: catalog?.recipes.length ?? 0,
+      ships: catalog?.ships.length ?? 0,
+      facilities: catalog?.facilities.length ?? 0,
+      skills: catalog?.skills.length ?? 0,
+      achievements: catalog?.achievements.length ?? 0,
+    },
+  }
+}
+
+const LIST_POOLS: Record<Kind, () => Array<Record<string, unknown> & { id: string; name: string }>> = {
+  item: () => catalog?.items as never ?? [],
+  recipe: () => catalog?.recipes as never ?? [],
+  ship: () => catalog?.ships as never ?? [],
+  facility: () => catalog?.facilities as never ?? [],
+  skill: () => catalog?.skills ?? [],
+}
+
+export function codexList(kind: string, q: string, limit = 50): Array<Record<string, unknown>> | null {
+  if (!KINDS.includes(kind as Kind)) return null
+  const pool = LIST_POOLS[kind as Kind]()
+  const ql = q.trim().toLowerCase()
+  const filtered = ql
+    ? pool.filter((e) => e.id.includes(ql) || e.name.toLowerCase().includes(ql) || String(e.category ?? '').toLowerCase().includes(ql))
+    : pool
+  // Compact list rows: enough for a browsable table without shipping 5MB.
+  return filtered.slice(0, limit).map((e) => ({
+    id: e.id, name: e.name, category: e.category,
+    ...(kind === 'item' ? { base_value: e.base_value, rarity: e.rarity, size: e.size } : {}),
+    ...(kind === 'recipe' ? { outputs: e.outputs } : {}),
+    ...(kind === 'ship' ? { class: e.class, tier: e.tier, faction: e.faction } : {}),
+    ...(kind === 'facility' ? { level: e.level, build_cost: e.build_cost } : {}),
+  }))
+}
+
+export function codexGet(kind: string, id: string): Record<string, unknown> | null {
+  if (!KINDS.includes(kind as Kind)) return null
+  const maps: Record<Kind, Map<string, unknown>> = {
+    item: itemsById, recipe: recipesById, ship: shipsById, facility: facilitiesById, skill: skillsById,
+  }
+  const entry = maps[kind as Kind].get(id) as Record<string, unknown> | undefined
+  if (!entry) return null
+  const extra: Record<string, unknown> = {}
+  if (kind === 'item') {
+    extra.produced_by = (recipesByOutput.get(id) ?? []).map((r) => ({ id: r.id, name: r.name, inputs: r.inputs, outputs: r.outputs }))
+    extra.consumed_by = (catalog?.recipes ?? [])
+      .filter((r) => r.inputs?.some((i) => i.item_id === id))
+      .slice(0, 20)
+      .map((r) => ({ id: r.id, name: r.name, outputs: r.outputs }))
+  }
+  return { ...entry, ...extra }
+}
+
 /** Price-sanity advisory for sell listings (Phase 2). Returns null when price is unremarkable. */
 export function priceAdvisory(itemId: string, priceEach: number): string | null {
   const it = itemsById.get(itemId)
