@@ -84,14 +84,24 @@ export async function fetchOpenApiSpec(
  * Fetch the OpenAPI spec from the gameserver and extract commands with params.
  */
 export async function fetchGameCommands(baseUrl: string, log?: SpecLogFn): Promise<GameCommandInfo[]> {
-  // Try versioned spec first (e.g. /api/v2/openapi.json), then unversioned fallback
   const specUrl = `${baseUrl}/openapi.json`
+  const hasVersionSuffix = /\/api\/v\d+\/?$/.test(baseUrl)
   const fallbackUrl = baseUrl.replace(/\/api\/v\d+\/?$/, '/api/openapi.json')
   const isV2Api = /\/api\/v2\/?$/.test(baseUrl)
 
-  let spec = await fetchOpenApiSpec(specUrl, log)
-  if (!spec && fallbackUrl !== specUrl) {
-    spec = await fetchOpenApiSpec(fallbackUrl, log)
+  // The v1 versioned spec endpoint returns 405 (removed server-side) — go straight
+  // to the unversioned spec for v1. v2 still serves its own spec, so keep
+  // versioned-first there.
+  const urls = !hasVersionSuffix
+    ? [specUrl]
+    : isV2Api
+      ? [specUrl, fallbackUrl]
+      : [fallbackUrl, specUrl]
+
+  let spec: Record<string, unknown> | null = null
+  for (const url of urls) {
+    spec = await fetchOpenApiSpec(url, log)
+    if (spec) break
   }
   if (!spec) return []
 
