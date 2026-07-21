@@ -41,6 +41,8 @@ export class Agent {
   readonly events = new EventEmitter()
   private connection: GameConnection | null = null
   private running = false
+  private loopActive = false
+  private everConnected = false
   private abortController: AbortController | null = null
   private restartRequested = false
   private pendingNudges: string[] = []
@@ -60,6 +62,14 @@ export class Agent {
 
   get isRunning(): boolean {
     return this.running
+  }
+
+  /** True from the moment startLLMLoop() is invoked until the loop fully exits.
+   *  Unlike isRunning (which only flips true after the loop's async startup —
+   *  model resolution, command discovery — succeeds), this also covers the
+   *  startup window, so callers can tell "a loop already owns this agent". */
+  get isLoopActive(): boolean {
+    return this.loopActive
   }
 
   get activity(): string {
@@ -202,6 +212,21 @@ export class Agent {
   }
 
   async startLLMLoop(): Promise<void> {
+    // Guard set synchronously (before the first await) so two starts in the
+    // same tick — or a second connect_llm during the async startup below —
+    // cannot stack two concurrent loops on one Agent (observed: interleaved
+    // conversation threads in one log stream, double LLM spend). Callers
+    // (agent-manager) check isLoopActive first; the throw is defense-in-depth.
+    if (this.loopActive) throw new Error('LLM loop already active for this agent')
+    this.loopActive = true
+    try {
+      await this.runLLMLoop()
+    } finally {
+      this.loopActive = false
+    }
+  }
+
+  private async runLLMLoop(): Promise<void> {
     const profile = getProfile(this.profileId)
     if (!profile) throw new Error('Profile not found')
     if (!profile.provider || !profile.model) throw new Error('No LLM provider/model configured')
@@ -277,7 +302,23 @@ export class Agent {
     if (this.abortController.signal.aborted) { this.setActivity('idle'); return }
     this.running = true
 
+    let consecutiveConnLostTurns = 0
+
     while (this.running) {
+      // Zombie-connection guard: a dead game connection cannot be fixed from
+      // inside the loop — login/reconnect is harness-managed, so LLM-issued
+      // game(login) calls can never revive a closed socket (observed: agents
+      // flailing login 450+ times after a server restart). Exit the loop and
+      // let agent-manager's bounded backoff reconnect. Armed only once the
+      // connection has been seen live, so a fresh profile mid-registration
+      // (not yet authenticated) isn't cut off before it can register.
+      if (this.connection.isConnected()) {
+        this.everConnected = true
+      } else if (this.everConnected) {
+        this.log('error', 'Game connection lost — exiting LLM loop; auto-restart will reconnect')
+        break
+      }
+
       // Check session duration limit
       const maxSessionStr = getPreference('max_session_hours')
       if (maxSessionStr) {
@@ -340,7 +381,7 @@ export class Agent {
             : maxToolRounds
 
         this.setActivity(`${phasePrefix}Waiting for LLM response...`)
-        await runAgentTurn(
+        const outcome = await runAgentTurn(
           turnModel, context, this.connection, this.profileId, profile.name,
           this.log, todo, memory,
           {
@@ -349,10 +390,26 @@ export class Agent {
             contextBudgetRatio,
             onActivity: (a) => this.setActivity(`${phasePrefix}${a}`),
             compactionModel: hasDualModel ? model : undefined,  // Always use executor for compaction
+            isConnectionDown: () => this.everConnected && !(this.connection?.isConnected() ?? false),
           },
           compaction,
         )
         turnCounter++
+
+        // Connection-loss escalation. `connection_lost` alone isn't enough to
+        // exit: http-mode blips return connection_failed while isConnected()
+        // stays true. Exit when the connection reports dead, or after 3
+        // consecutive turns of confirmed connection failures (some transports
+        // keep claiming isConnected() while the socket is gone).
+        if (outcome === 'connection_lost') {
+          consecutiveConnLostTurns++
+          if (this.everConnected && (!this.connection.isConnected() || consecutiveConnLostTurns >= 3)) {
+            this.log('error', 'Game connection lost — exiting LLM loop; auto-restart will reconnect')
+            break
+          }
+        } else {
+          consecutiveConnLostTurns = 0
+        }
 
         // Safe dock check: if pending and agent is now docked (or timeout), auto-disconnect
         if (this.pendingSafeDock) {

@@ -93,7 +93,14 @@ class AgentManager {
   async startLLM(profileId: string): Promise<void> {
     const agent = this.agents.get(profileId)
     if (!agent) throw new Error('Agent not connected')
-    if (agent.isRunning) return
+    // Guard on isLoopActive, not isRunning: `running` only flips true after the
+    // loop's async startup (model resolution, command discovery) succeeds, so a
+    // second connect_llm in that window used to stack a second concurrent loop
+    // on the same Agent (interleaved conversations, double LLM spend).
+    if (agent.isLoopActive) {
+      addLogEntry(profileId, 'system', 'connect_llm ignored — LLM loop already active')
+      return
+    }
 
     this.stopRequested.delete(profileId)
     this.resetBackoff(profileId)
@@ -114,6 +121,10 @@ class AgentManager {
       this.resetBackoff(profileId)
       return
     }
+
+    // A stale loop exiting (e.g. an old Agent that was replaced during
+    // reconnect) must not schedule a restart on top of the live loop.
+    if (this.agents.get(profileId)?.isLoopActive) return
 
     // If session expired (duration limit), don't restart
     const agent = this.agents.get(profileId)
@@ -161,11 +172,15 @@ class AgentManager {
         // Reconnect if needed
         let agent = this.agents.get(profileId)
         if (!agent || !agent.isConnected) {
+          // Stop the dead agent before replacing it so its notification
+          // handlers, briefing collector, and per-profile tool state are
+          // cleaned up rather than leaked alongside the new instance.
+          if (agent) await agent.stop().catch(() => {})
           agent = new Agent(profileId)
           this.agents.set(profileId, agent)
           await agent.connect()
         }
-        if (!agent.isRunning) {
+        if (!agent.isLoopActive) {
           addLogEntry(profileId, 'system', `Auto-restart: reconnected, resuming LLM loop`)
           const restartedAt = Date.now()
           agent.startLLMLoop().then(() => {

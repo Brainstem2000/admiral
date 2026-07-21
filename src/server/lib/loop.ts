@@ -27,7 +27,16 @@ export interface LoopOptions {
   contextBudgetRatio?: number
   onActivity?: (activity: string) => void
   compactionModel?: Model<any>  // Separate (cheaper) model for compaction summarization
+  /** Returns true when the game connection is confirmed dead (was live once,
+   *  now reports disconnected). Checked per round so a turn doesn't burn LLM
+   *  calls driving a connection the harness has to reconnect anyway. */
+  isConnectionDown?: () => boolean
 }
+
+/** How a turn ended. `connection_lost` means the game connection is dead or
+ *  repeatedly failing — the caller (agent loop) decides whether to exit so
+ *  agent-manager's bounded backoff can reconnect. */
+export type TurnOutcome = 'completed' | 'connection_lost'
 
 export interface CompactionState {
   summary: string
@@ -44,13 +53,22 @@ export async function runAgentTurn(
   memory: { value: string },
   options?: LoopOptions,
   compaction?: CompactionState,
-): Promise<void> {
+): Promise<TurnOutcome> {
   const maxRounds = options?.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS
   const summaryModel = options?.compactionModel || model
   let rounds = 0
+  let connectionFailures = 0
 
   while (rounds < maxRounds) {
-    if (options?.signal?.aborted) return
+    if (options?.signal?.aborted) return 'completed'
+
+    // Dead-connection guard: don't spend an LLM call on a connection that is
+    // already known to be down — reconnects are owned by the harness, and no
+    // tool call (including game(login)) can revive a closed socket.
+    if (options?.isConnectionDown?.()) {
+      log('system', 'Game connection is down — ending turn')
+      return 'connection_lost'
+    }
 
     await compactContext(summaryModel, context, compaction, options)
 
@@ -70,7 +88,7 @@ export async function runAgentTurn(
         estimatedTokens: totalMessageTokens(context.messages),
         error: msg,
       }, null, 2))
-      return
+      return 'completed'
     }
 
     // Log rich LLM call metadata
@@ -138,7 +156,7 @@ export async function runAgentTurn(
 
     if (toolCalls.length === 0) {
       if (reasoning) log('llm_thought', reasoning)
-      return
+      return 'completed'
     }
 
     const reason = reasoning
@@ -153,7 +171,7 @@ export async function runAgentTurn(
     let actionPending = false
     let cooldownBlocked = false
     for (const toolCall of toolCalls) {
-      if (options?.signal?.aborted) return
+      if (options?.signal?.aborted) return 'completed'
 
       // Hard-stop: once a cooldown block (or a queued action) is seen, the turn is ending. Do NOT
       // execute the remaining queued tool calls in this assistant message — they would only re-fire
@@ -183,6 +201,7 @@ export async function runAgentTurn(
 
       if (result.startsWith(ACTION_PENDING_SENTINEL)) actionPending = true
       if (result.startsWith(COOLDOWN_BLOCKED_SENTINEL)) cooldownBlocked = true
+      if (result.startsWith('Error: [connection_failed]')) connectionFailures++
       const isError = result.startsWith('Error')
       const toolResultMessage: Message = {
         role: 'toolResult',
@@ -195,10 +214,19 @@ export async function runAgentTurn(
       context.messages.push(toolResultMessage)
     }
 
+    // Connection-failure escalation: end the turn once failures are confirmed —
+    // either the connection now reports dead, or repeated rounds keep failing
+    // (some transports keep claiming isConnected() while the socket is gone).
+    // More rounds can't help; the harness owns reconnection.
+    if (connectionFailures > 0 && (options?.isConnectionDown?.() || connectionFailures >= 3)) {
+      log('system', 'Game connection failure — ending turn')
+      return 'connection_lost'
+    }
+
     // Early exit: if an action is pending, end the turn immediately instead of burning more rounds
     if (actionPending) {
       log('system', 'Action pending — ending turn early')
-      return
+      return 'completed'
     }
 
     // Early exit: a cooldown-block means the agent just acted and must wait ~a tick before it can
@@ -207,13 +235,14 @@ export async function runAgentTurn(
     // next turn proceed after the tick.
     if (cooldownBlocked) {
       log('system', 'Cooldown active — ending turn early')
-      return
+      return 'completed'
     }
 
     rounds++
   }
 
   log('system', `Reached max tool rounds (${maxRounds}), ending turn`)
+  return 'completed'
 }
 
 // --- Context compaction ---
