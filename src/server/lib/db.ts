@@ -206,6 +206,23 @@ function migrate(db: Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_fik_system ON fleet_intel_killzones(system_id);
 
+    CREATE TABLE IF NOT EXISTS fleet_intel_wrecks (
+      wreck_id TEXT PRIMARY KEY,
+      poi_id TEXT,
+      system_id TEXT,
+      wreck_type TEXT,
+      ship_class TEXT,
+      victim_name TEXT,
+      killer_name TEXT,
+      salvage_value INTEGER,
+      cargo_summary TEXT,
+      expires_at TEXT,
+      first_seen TEXT DEFAULT (datetime('now')),
+      last_seen TEXT DEFAULT (datetime('now')),
+      reported_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_fiw_poi ON fleet_intel_wrecks(poi_id);
+
     CREATE TABLE IF NOT EXISTS fleet_intel_sightings (
       username TEXT PRIMARY KEY,
       player_id TEXT,
@@ -681,13 +698,16 @@ export function pruneOldData(opts?: {
   // Player sightings age out on last_seen; like kill zones they are sparse and high-value,
   // so keep them ~4x longer than ordinary intel.
   const si = db.query('DELETE FROM fleet_intel_sightings WHERE last_seen < ?').run(cutoff(intelDays * 4)).changes
+  // Wreck observations are density-measurement data: rows outlive the wrecks themselves
+  // (that is the point), but 3 weeks is plenty for the map.
+  const wr = db.query('DELETE FROM fleet_intel_wrecks WHERE last_seen < ?').run(cutoff(21)).changes
   const ledger = db.query('DELETE FROM financial_ledger WHERE timestamp < ?').run(cutoff(ledgerDays)).changes
 
   // Hand freed pages back to the OS so the file actually shrinks after a prune. No-op unless the
   // DB uses auto_vacuum = INCREMENTAL (set at init; existing DBs adopt it after the one-time VACUUM).
   try { db.exec('PRAGMA incremental_vacuum') } catch { /* ignore */ }
 
-  return { logs, snapshots, intel: m + s + kz + si, ledger }
+  return { logs, snapshots, intel: m + s + kz + si + wr, ledger }
 }
 
 // --- Preferences CRUD ---

@@ -41,6 +41,8 @@ export class FleetIntelCollector {
       case 'get_nearby': return this.processNearby(r, reportedBy)
       case 'scan': return this.processScan(r, reportedBy)
       case 'get_map': return this.processMap(r, reportedBy)
+      case 'wrecks':
+      case 'get_wrecks': return this.processWrecks(r, reportedBy)
     }
   }
 
@@ -321,6 +323,51 @@ export class FleetIntelCollector {
     }
   }
 
+  /**
+   * WRECK-DENSITY CAPTURE: the free salvage `wrecks` query lists every wreck/container at
+   * the current POI with cargo manifests and salvage values. Rows are observations for the
+   * scavenger-viability map (density x value per POI), so they intentionally outlive the
+   * wrecks themselves. Keyed by wreck UUID; re-sightings bump last_seen.
+   */
+  private static processWrecks(r: R, reportedBy: string): void {
+    const wrecks = Array.isArray(r.wrecks) ? (r.wrecks as R[]) : []
+    if (wrecks.length === 0) return
+    const db = getDb()
+    const upsert = db.query(`
+      INSERT INTO fleet_intel_wrecks
+        (wreck_id, poi_id, system_id, wreck_type, ship_class, victim_name, killer_name, salvage_value, cargo_summary, expires_at, reported_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(wreck_id) DO UPDATE SET
+        salvage_value = excluded.salvage_value,
+        cargo_summary = excluded.cargo_summary,
+        last_seen = datetime('now'),
+        reported_by = excluded.reported_by
+    `)
+    for (const w of wrecks) {
+      if (!w || typeof w !== 'object') continue
+      const id = str(w.id || w.wreck_id || '')
+      if (!id) continue
+      const cargo = Array.isArray(w.cargo) ? (w.cargo as R[]) : []
+      const cargoSummary = cargo
+        .map(ci => `${str(ci.item_id || ci.id)}x${int(ci.quantity) || 1}`)
+        .filter(s => s !== 'x1')
+        .join(',')
+      upsert.run(
+        id,
+        str(w.poi_id || ''),
+        str(w.system_id || ''),
+        str(w.type || ''),
+        str(w.ship_class || ''),
+        str(w.victim_name || ''),
+        str(w.killer_name || ''),
+        num(w.salvage_value),
+        safeTruncate(cargoSummary, 400, '...') || null,
+        str(w.expires_at || '') || null,
+        reportedBy,
+      )
+    }
+  }
+
   private static processScan(r: R, reportedBy: string): void {
     // Scan reveals details about a specific player — could be a threat
     const target = str(r.username || r.name || '')
@@ -450,6 +497,12 @@ export class FleetIntelCollector {
     const briefing = sections.join('\n\n')
     // Cap at ~1500 chars to avoid bloating the prompt
     return safeTruncate(briefing, 1497, '...')
+  }
+
+  /** Wreck observations for the scavenger-viability density map, freshest first. */
+  static getWreckObservations(limit = 500): Array<Record<string, unknown>> {
+    return getDb().query('SELECT * FROM fleet_intel_wrecks ORDER BY last_seen DESC LIMIT ?')
+      .all(limit) as Array<Record<string, unknown>>
   }
 
   /** Remove expired threats */

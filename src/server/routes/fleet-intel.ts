@@ -21,6 +21,9 @@ fleetIntel.get('/', (c) => {
         sightings: FleetIntelCollector.getSightings(500, c.req.query('ship_class') || undefined),
       })
     }
+    if (c.req.query('wrecks') === 'true') {
+      return c.json({ wrecks: FleetIntelCollector.getWreckObservations() })
+    }
     const data = FleetIntelCollector.getAll()
     return c.json(data)
   } catch (e) {
