@@ -133,9 +133,16 @@ class AgentManager {
       return
     }
 
-    // Check if profile still wants to be running
+    // Check if profile still wants to be running. This return must NEVER be
+    // silent: Bob's stale enabled=0 flag made every connection-blip loop exit
+    // die here with no log line — four "mystery" loop deaths in one night
+    // before anyone connected the dots.
     const profile = getProfile(profileId)
     if (!profile || !profile.enabled || !profile.provider || profile.provider === 'manual' || !profile.model) {
+      const reason = !profile ? 'profile deleted'
+        : !profile.enabled ? 'profile disabled (enabled=0)'
+        : 'no LLM provider/model configured'
+      addLogEntry(profileId, 'system', `Auto-restart skipped: ${reason}`)
       return
     }
 

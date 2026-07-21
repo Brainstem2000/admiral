@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -375,6 +375,54 @@ export async function executeTool(
     command = command.replace('get_ships', 'browse_ships')
   }
 
+  // Wildlife-mission blocklist: creature-hunt missions (grazers, leviathans)
+  // repeatedly dead-ended agents on non-spawning targets — three agents burned
+  // hours on them in one night, and written bans failed three times on one
+  // agent. Deterministic rejection, fleet-wide.
+  {
+    const bare0 = command.replace(/^spacemolt_/, '').replace(/^mission_/, '')
+    if (bare0 === 'accept_mission' || bare0.endsWith('_accept_mission')) {
+      const idStr = `${commandArgs?.mission_id ?? ''} ${commandArgs?.template_id ?? ''} ${commandArgs?.id ?? ''}`.toLowerCase()
+      if (/grazer|leviathan|first_hunt|wildlife|creature|cull/.test(idStr)) {
+        const msg = 'BLOCKED by Admiral doctrine: wildlife/creature-hunt missions are banned fleet-wide (targets do not reliably spawn; multiple agents wasted hours). Choose a delivery, courier, or pirate-bounty mission instead.'
+        ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
+        ctx.log('tool_result', msg)
+        return msg
+      }
+    }
+  }
+
+  // BoM sell lock for DIRECT sells (the macro already refuses these): locked
+  // items are sellable only against a remaining Admiral quota in the DB.
+  // Agent-memory quota tracking oversold twice in one night.
+  {
+    const bare0 = command.replace(/^spacemolt_/, '').replace(/^market_/, '')
+    if (bare0 === 'sell' || bare0 === 'create_sell_order') {
+      const orders = Array.isArray(commandArgs?.orders)
+        ? (commandArgs.orders as Array<Record<string, unknown>>)
+        : [commandArgs ?? {}]
+      for (const o of orders) {
+        const itemId = String(o.item_id ?? o.id ?? '').toLowerCase()
+        const qty = Number(o.quantity ?? 0) || 0
+        if (itemId && SELL_CARGO_ALWAYS_EXCLUDE.has(itemId)) {
+          const remaining = getSellQuota(ctx.profileId, itemId)
+          if (remaining === null || remaining <= 0) {
+            const msg = `BLOCKED: ${itemId} is BoM-locked and you have no remaining Admiral sell quota for it${remaining !== null ? ' (quota exhausted)' : ''}. Locked items go to the war_citadel vault, never to market.`
+            ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
+            ctx.log('tool_result', msg)
+            return msg
+          }
+          if (qty > remaining) {
+            const msg = `BLOCKED: quota for ${itemId} has only ${remaining} remaining (you tried ${qty}). Sell at most ${Math.floor(remaining)} or leave it vaulted.`
+            ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
+            ctx.log('tool_result', msg)
+            return msg
+          }
+        }
+      }
+    }
+  }
+
   const fmtArgs = commandArgs ? formatArgs(commandArgs) : ''
   ctx.log('tool_call', `game(${command}${fmtArgs ? ', ' + fmtArgs : ''})`)
 
@@ -544,6 +592,33 @@ export async function executeTool(
     if (!isQuery) {
       try {
         LedgerCollector.processCommandResult(command, resultData, ctx.profileId, ctx.profileName)
+      } catch { /* never break game execution */ }
+      // Book player-to-player credit gifts (deposit with credits+target) —
+      // these bypassed the ledger entirely until 2026-07-21.
+      try {
+        const bareG = command.replace(/^spacemolt_/, '').replace(/^storage_/, '')
+        const giftCredits = Number(commandArgs?.credits ?? 0)
+        const giftTarget = String(commandArgs?.target ?? '')
+        if (bareG === 'deposit' && giftCredits > 0 && giftTarget && giftTarget.toLowerCase() !== 'faction') {
+          LedgerCollector.bookGift(ctx.profileId, giftTarget, giftCredits)
+        }
+      } catch { /* never break game execution */ }
+      // Decrement Admiral sell quotas on successful locked-item sells/listings
+      // (listing counts: escrowed stock has left vault control).
+      try {
+        const bareQ = command.replace(/^spacemolt_/, '').replace(/^market_/, '')
+        if (bareQ === 'sell' || bareQ === 'create_sell_order') {
+          const orders = Array.isArray(commandArgs?.orders)
+            ? (commandArgs.orders as Array<Record<string, unknown>>)
+            : [commandArgs ?? {}]
+          for (const o of orders) {
+            const itemId = String(o.item_id ?? o.id ?? '').toLowerCase()
+            const qty = Number(o.quantity ?? 0) || 0
+            if (itemId && qty > 0 && SELL_CARGO_ALWAYS_EXCLUDE.has(itemId)) {
+              decrementSellQuota(ctx.profileId, itemId, qty)
+            }
+          }
+        }
       } catch { /* never break game execution */ }
     }
 

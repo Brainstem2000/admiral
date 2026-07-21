@@ -252,6 +252,20 @@ function migrate(db: Database): void {
       WHERE order_id IS NOT NULL AND kind IN ('order_create', 'order_cancel', 'mission_reward', 'other');
   `)
 
+  // Per-agent lifetime sell allowances for BoM-locked items (Admiral surplus
+  // quotas). Enforced in tools.ts: locked items cannot be sold by ANY path
+  // unless a row here has remaining > 0. Agent-memory quota tracking failed
+  // twice in one night (armor_plate 60 sold vs 25; mass_driver 4 vs 3).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sell_quotas (
+      profile_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      remaining REAL NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (profile_id, item_id)
+    );
+  `)
+
   // Agent schedules for cron-like automation
   db.exec(`
     CREATE TABLE IF NOT EXISTS schedules (
@@ -655,6 +669,25 @@ export function pruneOldData(opts?: {
 }
 
 // --- Preferences CRUD ---
+
+// --- sell quotas (BoM-locked item allowances) ---
+
+export function getSellQuota(profileId: string, itemId: string): number | null {
+  const row = db.query('SELECT remaining FROM sell_quotas WHERE profile_id = ? AND item_id = ?')
+    .get(profileId, itemId) as { remaining: number } | null
+  return row ? row.remaining : null
+}
+
+export function decrementSellQuota(profileId: string, itemId: string, quantity: number): void {
+  db.query('UPDATE sell_quotas SET remaining = MAX(0, remaining - ?), updated_at = datetime(\'now\') WHERE profile_id = ? AND item_id = ?')
+    .run(quantity, profileId, itemId)
+}
+
+export function setSellQuota(profileId: string, itemId: string, remaining: number): void {
+  db.query(`INSERT INTO sell_quotas (profile_id, item_id, remaining) VALUES (?, ?, ?)
+    ON CONFLICT(profile_id, item_id) DO UPDATE SET remaining = excluded.remaining, updated_at = datetime('now')`)
+    .run(profileId, itemId, remaining)
+}
 
 export function getPreference(key: string): string | null {
   const row = getDb().query('SELECT value FROM preferences WHERE key = ?').get(key) as { value: string } | undefined

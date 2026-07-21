@@ -335,6 +335,21 @@ export class LedgerCollector {
     return names.length > 0 ? names.join(', ') : null
   }
 
+  /**
+   * Book a player-to-player credit gift (deposit with credits+target). Gifts
+   * bypassed the ledger entirely — a 27.2K unauthorized transfer took DB-level
+   * forensics to find. Called from tools.ts where the command args are known.
+   */
+  static bookGift(profileId: string, target: string, credits: number): void {
+    try {
+      this.insert(profileId, {
+        kind: 'transfer',
+        amount: -Math.abs(credits),
+        counterparty: target,
+      }, 'deposit', { gift: true, target, credits })
+    } catch { /* ledger must never break game execution */ }
+  }
+
   private static insert(profileId: string, row: LedgerRow, sourceCommand: string, raw: unknown): void {
     let rawRef: string | null = null
     try { rawRef = JSON.stringify(raw).slice(0, 200) } catch { /* ignore */ }
