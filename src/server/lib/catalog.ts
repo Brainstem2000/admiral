@@ -298,11 +298,19 @@ export function codexGet(kind: string, id: string): Record<string, unknown> | nu
   return { ...entry, ...extra }
 }
 
-/** Price-sanity advisory for sell listings (Phase 2). Returns null when price is unremarkable. */
-export function priceAdvisory(itemId: string, priceEach: number): string | null {
+/** Price-sanity advisory for sell listings and buys (Phase 2). Returns null when price is unremarkable. */
+export function priceAdvisory(itemId: string, priceEach: number, side: 'sell' | 'buy' = 'sell'): string | null {
   const it = itemsById.get(itemId)
   if (!it || !it.base_value || !Number.isFinite(priceEach)) return null
   const ratio = priceEach / it.base_value
+  if (side === 'buy') {
+    // Buying far above base_value burned 267K in one night (copper @150 vs base 8,
+    // nickel @500 vs base ~20, bought during a price spike). Loud warning.
+    if (ratio > 3) {
+      return `[codex advisory — OVERPAYING] ${itemId} bought at ${priceEach} cr = ${ratio.toFixed(1)}x catalog base_value (${it.base_value}). Check fleet storage, other stations, or mining before paying spike prices. Large overpays require explicit Admiral approval.`
+    }
+    return null
+  }
   if (ratio > 3) {
     return `[codex advisory] ${itemId} listed at ${priceEach} cr = ${ratio.toFixed(1)}x catalog base_value (${it.base_value}). High listings only fill in scarce markets — verify buy-side depth or expect no fills.`
   }

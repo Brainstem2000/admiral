@@ -487,15 +487,23 @@ export async function executeTool(
     const resultData = resp.structuredContent ?? resp.result
     let result = formatToolResult(command, resultData, resp.notifications)
 
-    // Price-sanity advisory on sell listings: catalog base_value vs listed price.
-    // Advisory only — scarce markets legitimately trade far above base_value.
-    if (deepBare === 'sell' || deepBare === 'create_sell_order') {
+    // Price-sanity advisory on sells AND buys: catalog base_value vs price.
+    // Advisory only — but the buy-side one is loud (267K overpay incident).
+    const PRICE_ADVISED: Record<string, 'sell' | 'buy'> = {
+      sell: 'sell', create_sell_order: 'sell', buy: 'buy', create_buy_order: 'buy',
+    }
+    const advisorySide = PRICE_ADVISED[deepBare]
+    if (advisorySide) {
       try {
         const orders = Array.isArray(commandArgs?.orders)
           ? (commandArgs.orders as Array<Record<string, unknown>>)
           : [commandArgs ?? {}]
         const advisories = orders
-          .map((o) => priceAdvisory(String(o.item_id ?? ''), Number(o.price_each ?? o.price ?? NaN)))
+          .map((o) => priceAdvisory(
+            String(o.item_id ?? o.id ?? ''),
+            Number(o.price_each ?? o.price ?? o.unit_price ?? NaN),
+            advisorySide,
+          ))
           .filter((a): a is string => !!a)
         if (advisories.length) result += '\n\n' + advisories.join('\n')
       } catch { /* advisory must never break execution */ }
