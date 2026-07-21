@@ -165,6 +165,13 @@ export class LibV2Connection implements GameConnection {
     try {
       const result = await this.account.register({ username, empire, registration_code: code })
       this.authCreds = { kind: 'login', username, password: result.password }
+      // register() alone never sets the lib's `authenticated` flag, which gates
+      // isConnected() and getLocalState() — a freshly registered agent played
+      // fine but showed disconnected with no credits on the dashboard (Cass
+      // Margin, 2026-07-21). Establish a real authenticated session now.
+      try {
+        await this.account.authenticate(this.authCreds)
+      } catch { /* fall back to next reconnect's login path */ }
       return {
         success: true,
         username,
