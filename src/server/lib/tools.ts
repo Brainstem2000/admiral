@@ -566,9 +566,11 @@ export async function executeTool(
       actionCooldowns.set(ctx.profileId, { timestamp: Date.now(), wasPending: true })
       // Sentinel prefix triggers early turn exit in loop.ts
       const pendingResult = ACTION_PENDING_SENTINEL + result + '\n\n⚠️ STOP — Your action is QUEUED and will resolve on the next game tick (~10 seconds). Do NOT call this command again. Either use query commands (get_status, get_cargo, read_todo, view_market) to check on things, or end your turn and wait.'
-      // Passively collect fleet intel
+      // Passively collect fleet intel. Pass resultData (structuredContent-preferred): under
+      // lib_v2, resp.result is a text rendering — the parsed object the collector needs
+      // (nearby players, market items, system POIs) only exists in structuredContent.
       try {
-        FleetIntelCollector.processCommandResult(command, resp.result, ctx.profileName)
+        FleetIntelCollector.processCommandResult(command, resultData, ctx.profileName)
         if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
       } catch { /* never break game execution */ }
       // Invalidate briefing cache — action changed game state; trigger async refresh
@@ -576,9 +578,10 @@ export async function executeTool(
       return truncateResult(pendingResult)
     }
 
-    // Passively collect fleet intel from game results
+    // Passively collect fleet intel from game results (resultData: see note above —
+    // lib_v2 puts the parsed object in structuredContent, resp.result is text).
     try {
-      FleetIntelCollector.processCommandResult(command, resp.result, ctx.profileName)
+      FleetIntelCollector.processCommandResult(command, resultData, ctx.profileName)
       if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
     } catch { /* never break game execution */ }
 

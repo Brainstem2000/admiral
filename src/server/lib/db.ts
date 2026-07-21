@@ -205,6 +205,25 @@ function migrate(db: Database): void {
       updated_at TEXT DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_fik_system ON fleet_intel_killzones(system_id);
+
+    CREATE TABLE IF NOT EXISTS fleet_intel_sightings (
+      username TEXT PRIMARY KEY,
+      player_id TEXT,
+      faction_tag TEXT,
+      ship_class TEXT,
+      ship_name TEXT,
+      system_id TEXT,
+      system_name TEXT,
+      poi_id TEXT,
+      poi_name TEXT,
+      docked INTEGER DEFAULT 0,
+      offline INTEGER DEFAULT 0,
+      times_seen INTEGER DEFAULT 1,
+      first_seen TEXT DEFAULT (datetime('now')),
+      last_seen TEXT DEFAULT (datetime('now')),
+      reported_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_fis_class ON fleet_intel_sightings(ship_class);
   `)
 
   // Financial snapshots for session-level tracking
@@ -659,13 +678,16 @@ export function pruneOldData(opts?: {
   // Ghost rows are pinned: ghost-only sightings never refresh updated_at (filtered at
   // capture), and a pruned phantom row could never be re-created — keep it for the UI tag.
   const kz = db.query('DELETE FROM fleet_intel_killzones WHERE updated_at < ? AND ghost = 0').run(cutoff(intelDays * 4)).changes
+  // Player sightings age out on last_seen; like kill zones they are sparse and high-value,
+  // so keep them ~4x longer than ordinary intel.
+  const si = db.query('DELETE FROM fleet_intel_sightings WHERE last_seen < ?').run(cutoff(intelDays * 4)).changes
   const ledger = db.query('DELETE FROM financial_ledger WHERE timestamp < ?').run(cutoff(ledgerDays)).changes
 
   // Hand freed pages back to the OS so the file actually shrinks after a prune. No-op unless the
   // DB uses auto_vacuum = INCREMENTAL (set at init; existing DBs adopt it after the one-time VACUUM).
   try { db.exec('PRAGMA incremental_vacuum') } catch { /* ignore */ }
 
-  return { logs, snapshots, intel: m + s + kz, ledger }
+  return { logs, snapshots, intel: m + s + kz + si, ledger }
 }
 
 // --- Preferences CRUD ---

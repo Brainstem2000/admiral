@@ -48,8 +48,27 @@ export interface ThreatIntel {
   expires_at: string | null
 }
 
+export interface PlayerSighting {
+  username: string
+  player_id: string | null
+  faction_tag: string | null
+  ship_class: string | null
+  ship_name: string | null
+  system_id: string | null
+  system_name: string | null
+  poi_id: string | null
+  poi_name: string | null
+  docked: number
+  offline: number
+  times_seen: number
+  first_seen: string
+  last_seen: string
+  reported_by: string | null
+}
+
 export interface FleetIntelData {
   market: MarketIntel[]
   systems: SystemIntel[]
   threats: ThreatIntel[]
+  sightings: PlayerSighting[]
 }

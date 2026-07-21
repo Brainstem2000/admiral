@@ -1,6 +1,6 @@
 import { getDb } from './db'
 import { safeTruncate } from './text-safe'
-import type { FleetIntelData, MarketIntel, SystemIntel, ThreatIntel, KillZone } from '../../shared/fleet-intel-types'
+import type { FleetIntelData, MarketIntel, SystemIntel, ThreatIntel, KillZone, PlayerSighting } from '../../shared/fleet-intel-types'
 
 type R = Record<string, unknown>
 
@@ -212,6 +212,14 @@ export class FleetIntelCollector {
     const systemId = str(poiObj.system_id || r.system_id || '')
     const systemName = str(poiObj.system_name || r.system_name || '') || (systemId ? humanize(systemId) : '')
 
+    // PLAYER-SIGHTING CAPTURE (ship-class census): every get_nearby lists the players at
+    // this POI with their ship_class. Recording them builds, for free, an empirical register
+    // of who flies what — the only way to learn whether capital-class hulls (Devastator etc.)
+    // actually exist in the wild, since the game exposes no fleet-wide census. Runs BEFORE the
+    // kill-zone early return: sightings matter even at peaceful POIs.
+    const nearby = Array.isArray(r.nearby) ? (r.nearby as R[]) : []
+    if (nearby.length > 0) this.recordSightings(nearby, systemId, systemName, poiId, poiName, reportedBy)
+
     // Live pirate presence here, right now (strongest signal). Ghost NPCs (permanent
     // unkillable phantoms) are excluded — a ghost-only sighting is NOT combat evidence.
     const pirates = Array.isArray(r.pirates) ? r.pirates : []
@@ -259,6 +267,60 @@ export class FleetIntelCollector {
     )
   }
 
+  /** Usernames of our own agents — self-sightings are noise, not intel. */
+  private static ownUsernames(): Set<string> {
+    const rows = getDb().query('SELECT username, name FROM profiles').all() as { username: string | null; name: string }[]
+    const set = new Set<string>()
+    for (const row of rows) {
+      if (row.username) set.add(row.username.toLowerCase())
+      // Profile display names often match the in-game username minus a suffix ("Nova Reyes - Miner")
+      if (row.name) set.add(row.name.split(' - ')[0].toLowerCase())
+    }
+    return set
+  }
+
+  private static recordSightings(
+    players: R[], systemId: string, systemName: string, poiId: string, poiName: string, reportedBy: string,
+  ): void {
+    const own = this.ownUsernames()
+    const db = getDb()
+    const upsert = db.query(`
+      INSERT INTO fleet_intel_sightings
+        (username, player_id, faction_tag, ship_class, ship_name, system_id, system_name, poi_id, poi_name, docked, offline, reported_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(username) DO UPDATE SET
+        player_id = COALESCE(NULLIF(excluded.player_id, ''), fleet_intel_sightings.player_id),
+        faction_tag = COALESCE(NULLIF(excluded.faction_tag, ''), fleet_intel_sightings.faction_tag),
+        ship_class = COALESCE(NULLIF(excluded.ship_class, ''), fleet_intel_sightings.ship_class),
+        ship_name = COALESCE(NULLIF(excluded.ship_name, ''), fleet_intel_sightings.ship_name),
+        system_id = CASE WHEN excluded.system_id != '' THEN excluded.system_id ELSE fleet_intel_sightings.system_id END,
+        system_name = CASE WHEN excluded.system_name != '' THEN excluded.system_name ELSE fleet_intel_sightings.system_name END,
+        poi_id = CASE WHEN excluded.poi_id != '' THEN excluded.poi_id ELSE fleet_intel_sightings.poi_id END,
+        poi_name = CASE WHEN excluded.poi_name != '' THEN excluded.poi_name ELSE fleet_intel_sightings.poi_name END,
+        docked = excluded.docked,
+        offline = excluded.offline,
+        times_seen = fleet_intel_sightings.times_seen + 1,
+        last_seen = datetime('now'),
+        reported_by = excluded.reported_by
+    `)
+    for (const p of players) {
+      if (!p || typeof p !== 'object') continue
+      const username = str(p.username || p.name || '')
+      if (!username || own.has(username.toLowerCase())) continue
+      upsert.run(
+        username,
+        str(p.player_id || p.id || ''),
+        str(p.faction_tag || p.clan_tag || ''),
+        str(p.ship_class || ''),
+        str(p.ship_name || ''),
+        systemId, systemName, poiId, poiName,
+        p.docked ? 1 : 0,
+        p.offline ? 1 : 0,
+        reportedBy,
+      )
+    }
+  }
+
   private static processScan(r: R, reportedBy: string): void {
     // Scan reveals details about a specific player — could be a threat
     const target = str(r.username || r.name || '')
@@ -267,6 +329,9 @@ export class FleetIntelCollector {
     const systemId = str(r.system_id || '')
     const systemName = str(r.system_name || '')
     const shipClass = str(r.ship_class || (r.ship as R)?.class_name || '')
+
+    // A scan is also the richest possible sighting — record it in the ship-class register.
+    this.recordSightings([r], systemId, systemName, str(r.poi_id || ''), str(r.poi_name || ''), reportedBy)
 
     // Only create threat if we can identify the system
     if (systemId || systemName) {
@@ -400,13 +465,30 @@ export class FleetIntelCollector {
     const market = db.query('SELECT * FROM fleet_intel_market ORDER BY updated_at DESC').all() as MarketIntel[]
     const systems = db.query('SELECT * FROM fleet_intel_systems ORDER BY updated_at DESC').all() as SystemIntel[]
     const threats = db.query("SELECT * FROM fleet_intel_threats WHERE expires_at IS NULL OR expires_at > datetime('now') ORDER BY reported_at DESC").all() as ThreatIntel[]
+    const sightings = this.getSightings()
 
     // Convert has_station integer to boolean for frontend
     for (const s of systems) {
       (s as unknown as R).has_station = Boolean((s as unknown as R).has_station)
     }
 
-    return { market, systems, threats }
+    return { market, systems, threats, sightings }
+  }
+
+  /**
+   * Player-sighting register (ship-class census), freshest first. Pass a shipClassFilter
+   * (case-insensitive substring, e.g. "devastator" or "battlecruiser") to hunt capital hulls.
+   */
+  static getSightings(limit = 200, shipClassFilter?: string): PlayerSighting[] {
+    if (shipClassFilter) {
+      return getDb().query(`
+        SELECT * FROM fleet_intel_sightings
+        WHERE ship_class LIKE '%' || ? || '%'
+        ORDER BY last_seen DESC LIMIT ?
+      `).all(shipClassFilter, limit) as PlayerSighting[]
+    }
+    return getDb().query('SELECT * FROM fleet_intel_sightings ORDER BY last_seen DESC LIMIT ?')
+      .all(limit) as PlayerSighting[]
   }
 
   /**

@@ -581,6 +581,16 @@ export class Agent {
 
     if (command === 'get_status') this.cacheGameState(result)
 
+    // Manual/API commands feed fleet intel too (LLM tool calls feed it via tools.ts).
+    // lib_v2 puts the parsed object in structuredContent; result is a text rendering.
+    try {
+      FleetIntelCollector.processCommandResult(
+        command,
+        (result as { structuredContent?: unknown }).structuredContent ?? result.result,
+        getProfile(this.profileId)?.name ?? 'manual',
+      )
+    } catch { /* intel capture must never break command execution */ }
+
     if (!options?.silent) {
       if (result.error) {
         this.log('tool_result', `Error: ${result.error.message}`, JSON.stringify(result, null, 2))
