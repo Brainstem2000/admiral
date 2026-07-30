@@ -74,3 +74,18 @@ describe('jettison gate', () => {
     expect(reachedGame()).toBe(true)
   })
 })
+
+describe('doctrine guards are shared across both command paths', () => {
+  test('checkDoctrineGuards blocks jettison and allows unrelated commands', async () => {
+    const { checkDoctrineGuards } = await import('../src/server/lib/tools')
+    expect(checkDoctrineGuards('jettison', { item_id: 'iron_ore', quantity: 3 }, 'p1'))
+      .toContain('BLOCKED by Admiral doctrine')
+    expect(checkDoctrineGuards('get_cargo', undefined, 'p1')).toBeNull()
+  })
+
+  test('checkDoctrineGuards still blocks wildlife missions', async () => {
+    const { checkDoctrineGuards } = await import('../src/server/lib/tools')
+    const out = checkDoctrineGuards('accept_mission', { mission_id: 'cull_grazer_01' }, 'p1')
+    expect(out).toContain('wildlife/creature-hunt missions are banned')
+  })
+})

@@ -11,7 +11,7 @@ import { LibV2Connection } from './connections/lib_v2'
 import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
-import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState } from './tools'
+import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
@@ -629,9 +629,29 @@ export class Agent {
     this.log('system', 'Agent loop stopped')
   }
 
-  async executeCommand(command: string, args?: Record<string, unknown>, options?: { silent?: boolean }): Promise<CommandResult> {
+  async executeCommand(
+    command: string,
+    args?: Record<string, unknown>,
+    options?: { silent?: boolean; override?: boolean },
+  ): Promise<CommandResult> {
     if (!this.connection) {
       return { error: { code: 'not_connected', message: 'Not connected' } }
+    }
+
+    // Doctrine guards apply here too. This path previously went straight to the
+    // connection, so a rule enforced on the agent tool layer was silently
+    // skipped for anything the dashboard/API sent — the fleet's own operator
+    // tooling could do what the agents were forbidden from doing. Deliberate
+    // overrides stay possible via `override: true`, which is logged loudly.
+    if (!options?.override) {
+      const refusal = checkDoctrineGuards(command, args, this.profileId)
+      if (refusal) {
+        this.log('tool_call', `manual: ${command}(${args ? JSON.stringify(args) : ''})`)
+        this.log('tool_result', refusal)
+        return { error: { code: 'blocked_by_doctrine', message: refusal } }
+      }
+    } else {
+      this.log('system', `OPERATOR OVERRIDE: doctrine guards bypassed for manual ${command}`)
     }
 
     if (!options?.silent) {

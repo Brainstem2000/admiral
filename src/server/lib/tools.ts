@@ -221,6 +221,77 @@ export interface ToolContext {
   memory: string
 }
 
+/**
+ * Deterministic Admiral doctrine guards, shared by BOTH command paths — the
+ * agent LLM tool layer (executeTool) and the manual/API path
+ * (Agent.executeCommand). Returns a refusal string, or null to allow.
+ *
+ * Every rule here earned its place by failing as prose first: wildlife missions
+ * (three ignored written bans on one agent), BoM sell quotas (agent-memory
+ * tracking oversold twice in one night), and jettison (four agents, one
+ * identical rationalization, one full rebuild). Keep them free of side effects
+ * so either caller can run them before dispatch.
+ */
+export function checkDoctrineGuards(
+  command: string,
+  commandArgs: Record<string, unknown> | undefined,
+  profileId: string,
+): string | null {
+  // Wildlife/creature-hunt missions: targets do not reliably spawn.
+  {
+    const bare = command.replace(/^spacemolt_/, '').replace(/^mission_/, '')
+    if (bare === 'accept_mission' || bare.endsWith('_accept_mission')) {
+      const idStr = `${commandArgs?.mission_id ?? ''} ${commandArgs?.template_id ?? ''} ${commandArgs?.id ?? ''}`.toLowerCase()
+      if (/grazer|leviathan|first_hunt|wildlife|creature|cull/.test(idStr)) {
+        return 'BLOCKED by Admiral doctrine: wildlife/creature-hunt missions are banned fleet-wide (targets do not reliably spawn; multiple agents wasted hours). Choose a delivery, courier, or pirate-bounty mission instead.'
+      }
+    }
+  }
+
+  // Jettison: nothing with a bid is worthless.
+  {
+    const bare = command.replace(/^spacemolt_/, '').replace(/^ship_/, '')
+    if ((bare === 'jettison' || bare.endsWith('_jettison')) && getPreference('jettison_gate') !== 'off') {
+      const items = Array.isArray(commandArgs?.items)
+        ? (commandArgs.items as Array<Record<string, unknown>>)
+            .map(i => `${i.item_id ?? i.id ?? '?'}x${i.quantity ?? '?'}`).join(', ')
+        : `${commandArgs?.item_id ?? commandArgs?.id ?? 'cargo'}${commandArgs?.quantity ? 'x' + commandArgs.quantity : ''}`
+      return (
+        `BLOCKED by Admiral doctrine: jettison is disabled fleet-wide (attempted: ${items}). ` +
+        `Nothing with a bid is worthless, and the fleet decides what is scrap — not you. ` +
+        `Instead: deposit the cargo at your next station (storage is free), gift it to an agent ` +
+        `who needs it, or sell it at a hub that actually bids. If your hold is full and you are ` +
+        `far from a station, finish the run and deposit on arrival.`
+      )
+    }
+  }
+
+  // BoM sell lock: locked items sell only against a remaining DB quota.
+  {
+    const bare = command.replace(/^spacemolt_/, '').replace(/^market_/, '')
+    if (bare === 'sell' || bare === 'create_sell_order') {
+      const orders = Array.isArray(commandArgs?.orders)
+        ? (commandArgs.orders as Array<Record<string, unknown>>)
+        : [commandArgs ?? {}]
+      for (const o of orders) {
+        const itemId = String(o.item_id ?? o.id ?? '').toLowerCase()
+        const qty = Number(o.quantity ?? 0) || 0
+        if (itemId && SELL_CARGO_ALWAYS_EXCLUDE.has(itemId)) {
+          const remaining = getSellQuota(profileId, itemId)
+          if (remaining === null || remaining <= 0) {
+            return `BLOCKED: ${itemId} is BoM-locked and you have no remaining Admiral sell quota for it${remaining !== null ? ' (quota exhausted)' : ''}. Locked items go to the war_citadel vault, never to market.`
+          }
+          if (qty > remaining) {
+            return `BLOCKED: quota for ${itemId} has only ${remaining} remaining (you tried ${qty}). Sell at most ${Math.floor(remaining)} or leave it vaulted.`
+          }
+        }
+      }
+    }
+  }
+
+  return null
+}
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
@@ -379,76 +450,14 @@ export async function executeTool(
     command = command.replace('get_ships', 'browse_ships')
   }
 
-  // Wildlife-mission blocklist: creature-hunt missions (grazers, leviathans)
-  // repeatedly dead-ended agents on non-spawning targets — three agents burned
-  // hours on them in one night, and written bans failed three times on one
-  // agent. Deterministic rejection, fleet-wide.
+  // Admiral doctrine guards — shared with the manual/API path so a rule cannot
+  // be enforced on one entry point and silently skipped on the other.
   {
-    const bare0 = command.replace(/^spacemolt_/, '').replace(/^mission_/, '')
-    if (bare0 === 'accept_mission' || bare0.endsWith('_accept_mission')) {
-      const idStr = `${commandArgs?.mission_id ?? ''} ${commandArgs?.template_id ?? ''} ${commandArgs?.id ?? ''}`.toLowerCase()
-      if (/grazer|leviathan|first_hunt|wildlife|creature|cull/.test(idStr)) {
-        const msg = 'BLOCKED by Admiral doctrine: wildlife/creature-hunt missions are banned fleet-wide (targets do not reliably spawn; multiple agents wasted hours). Choose a delivery, courier, or pirate-bounty mission instead.'
-        ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
-        ctx.log('tool_result', msg)
-        return msg
-      }
-    }
-  }
-
-  // Jettison gate: four agents jettisoned sellable cargo in one campaign, all on
-  // the same reasoning ("no local bid -> free the cargo space") — Juno (-28K
-  // vanadium), Spock (twice; triggered a full rebuild), Morg (copper, one jump
-  // from a vault), Vera (intercepted). Written doctrine failed every time
-  // because that reasoning is locally correct, so enforcement moves out of the
-  // model. Toggle: preference `jettison_gate` = 'off' re-enables the command.
-  {
-    const bare0 = command.replace(/^spacemolt_/, '').replace(/^ship_/, '')
-    if ((bare0 === 'jettison' || bare0.endsWith('_jettison')) && getPreference('jettison_gate') !== 'off') {
-      const items = Array.isArray(commandArgs?.items)
-        ? (commandArgs.items as Array<Record<string, unknown>>)
-            .map(i => `${i.item_id ?? i.id ?? '?'}x${i.quantity ?? '?'}`).join(', ')
-        : `${commandArgs?.item_id ?? commandArgs?.id ?? 'cargo'}${commandArgs?.quantity ? 'x' + commandArgs.quantity : ''}`
-      const msg =
-        `BLOCKED by Admiral doctrine: jettison is disabled fleet-wide (attempted: ${items}). ` +
-        `Nothing with a bid is worthless, and the fleet decides what is scrap — not you. ` +
-        `Instead: deposit the cargo at your next station (storage is free), gift it to an agent ` +
-        `who needs it, or sell it at a hub that actually bids. If your hold is full and you are ` +
-        `far from a station, finish the run and deposit on arrival.`
+    const refusal = checkDoctrineGuards(command, commandArgs, ctx.profileId)
+    if (refusal) {
       ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
-      ctx.log('tool_result', msg)
-      return msg
-    }
-  }
-
-  // BoM sell lock for DIRECT sells (the macro already refuses these): locked
-  // items are sellable only against a remaining Admiral quota in the DB.
-  // Agent-memory quota tracking oversold twice in one night.
-  {
-    const bare0 = command.replace(/^spacemolt_/, '').replace(/^market_/, '')
-    if (bare0 === 'sell' || bare0 === 'create_sell_order') {
-      const orders = Array.isArray(commandArgs?.orders)
-        ? (commandArgs.orders as Array<Record<string, unknown>>)
-        : [commandArgs ?? {}]
-      for (const o of orders) {
-        const itemId = String(o.item_id ?? o.id ?? '').toLowerCase()
-        const qty = Number(o.quantity ?? 0) || 0
-        if (itemId && SELL_CARGO_ALWAYS_EXCLUDE.has(itemId)) {
-          const remaining = getSellQuota(ctx.profileId, itemId)
-          if (remaining === null || remaining <= 0) {
-            const msg = `BLOCKED: ${itemId} is BoM-locked and you have no remaining Admiral sell quota for it${remaining !== null ? ' (quota exhausted)' : ''}. Locked items go to the war_citadel vault, never to market.`
-            ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
-            ctx.log('tool_result', msg)
-            return msg
-          }
-          if (qty > remaining) {
-            const msg = `BLOCKED: quota for ${itemId} has only ${remaining} remaining (you tried ${qty}). Sell at most ${Math.floor(remaining)} or leave it vaulted.`
-            ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
-            ctx.log('tool_result', msg)
-            return msg
-          }
-        }
-      }
+      ctx.log('tool_result', refusal)
+      return refusal
     }
   }
 
