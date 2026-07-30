@@ -50,6 +50,8 @@ Admiral supports frontier cloud providers (Anthropic, OpenAI, Google, Groq, xAI,
 
 **Claude MAX** is supported natively via OAuth integration. Admiral reads Claude Code credentials from `~/.claude/.credentials.json` and handles automatic token refresh -- tokens are re-resolved every turn so agents survive the 8-hour expiry window without interruption.
 
+**ChatGPT Business with Codex** is available as an opt-in subscription runtime through the supported Codex app-server and a ChatGPT Business access token. It does not use an OpenAI Platform API key. Codex can independently override the planner, executor, or both while the saved Claude/provider configuration remains intact as the rollback baseline.
+
 ### Dual-Model Planning
 
 Assign a separate **planner model** and **executor model** to each agent. The planner (typically a larger, more capable model like Claude Opus) runs periodically to analyze the game state and write a strategic plan to the agent's TODO list. The executor (a faster, cheaper model like Claude Sonnet) runs the remaining turns, following the plan step-by-step.
@@ -311,6 +313,56 @@ Schema auto-migrates on startup -- new columns are added automatically.
 
 ## Configuration
 
+### ChatGPT Business / Codex (No Platform API)
+
+This integration follows OpenAI's supported [Codex access-token workflow](https://learn.chatgpt.com/docs/enterprise/access-tokens) and [Codex app-server protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md).
+
+Prerequisites:
+
+1. A ChatGPT Business workspace with Codex Local and access-token use enabled by its administrator.
+2. A current Codex installation with the `app-server` command.
+3. A Codex access token created for the user who operates this Admiral instance. The token is attributable to that user; do not share one token among different human users.
+
+Set the token only in Admiral's process environment. Admiral does not write it to SQLite or expose it to the browser:
+
+```powershell
+$env:CODEX_ACCESS_TOKEN = "<your ChatGPT Business Codex access token>"
+$env:ADMIRAL_CODEX_BIN = "codex" # or an absolute path to the Codex executable
+bun run dev
+```
+
+On Windows, a Microsoft Store/WindowsApps Codex installation may not be
+directly executable by a background Admiral process. In that case, point
+`ADMIRAL_CODEX_BIN` at an accessible copy of the installed `codex.exe`.
+Refresh that copy when Codex is upgraded.
+
+Optional fleet safety controls:
+
+```powershell
+$env:ADMIRAL_CODEX_MAX_CONCURRENCY = "2"       # shared across all agents
+$env:ADMIRAL_CODEX_RATE_LIMIT_THRESHOLD = "95" # stop new turns at this usage percentage
+$env:ADMIRAL_CODEX_TURN_TIMEOUT_SECONDS = "900" # 15-minute minimum; macros can run for 12 minutes
+```
+
+The general `llm_timeout` preference still applies to Claude model requests.
+For Codex app-server turns, values below 900 seconds are raised to 900 so a
+bounded Admiral macro cannot be interrupted by the legacy 90-second limit.
+Codex turns are also ended after the first bounded macro completes, preventing
+multiple long-running macros from being chained into one displayed agent turn.
+
+After startup, Settings shows whether the token is configured. Edit an agent's provider/model settings and enable either **Codex Executor**, **Codex Planner**, or both. Recommended defaults are GPT-5.6 Terra for balanced execution and GPT-5.6 Sol for planning; GPT-5.6 Luna is also available for throughput-oriented work.
+
+The integration is deliberately reversible:
+
+- Existing `provider`, `model`, `planner_provider`, and `planner_model` values are not replaced by Codex.
+- Turning a Codex role switch off restores that role's saved provider/model on the next reconnect.
+- Admiral remains authoritative for each profile's directive, TODO, and memory. Those fields remain in `data/admiral.db`, are reinjected into resumed Codex threads, and have automatic change history.
+- Planner and executor use separate Codex threads per agent, so the existing dual-model cadence and role separation remain intact.
+- Codex runs with approvals disabled, a read-only sandbox, web search disabled, and only Admiral's existing game/state tools exposed dynamically.
+- An inherited `OPENAI_API_KEY` is removed from the Codex child process to prevent accidental Platform API billing.
+
+To return completely to Claude Code/Claude MAX, disable both Codex switches for the profile and reconnect it. The existing Claude OAuth flow and credentials file are unchanged.
+
 ### Profile Settings
 
 Each agent profile supports:
@@ -322,6 +374,8 @@ Each agent profile supports:
 | Planner Provider | Provider for the planner model | (same as executor) |
 | Planner Model | Strategic planner model ID | (none) |
 | Planning Interval | Turns between planner runs | 10 |
+| Codex Executor Override | Use ChatGPT Business/Codex for execution only | off |
+| Codex Planner Override | Use ChatGPT Business/Codex for planning only | off |
 | Connection Mode | Game API connection type | `http_v2` |
 | Directive | High-level mission text | "Play the game..." |
 | Context Budget Ratio | % of context window before compaction | 0.55 |

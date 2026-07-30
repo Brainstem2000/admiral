@@ -19,13 +19,20 @@ export interface Profile {
   planner_provider: string | null
   planner_model: string | null
   planning_interval: number | null
+  codex_executor_enabled: boolean
+  codex_executor_model: string | null
+  codex_planner_enabled: boolean
+  codex_planner_model: string | null
   directive: string
   todo: string
+  memory: string
   context_budget: number | null
   connection_mode: 'http' | 'http_v2' | 'websocket' | 'mcp' | 'mcp_v2' | 'lib_v2'
   server_url: string
   autoconnect: boolean
   enabled: boolean
+  sort_order: number
+  group_name: string
   created_at: string
   updated_at: string
   // Sent by the API instead of the raw password: true when a password is stored.

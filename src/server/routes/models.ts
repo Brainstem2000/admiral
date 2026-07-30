@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { getModels, getProviders } from '@mariozechner/pi-ai'
 import type { KnownProvider } from '@mariozechner/pi-ai'
 import { getProvider } from '../lib/db'
+import { CODEX_BUSINESS_PROVIDER } from '../lib/model-routing'
 
 const LOCALHOST = '127.0.0.1'
 
@@ -26,6 +27,14 @@ const LOCAL_DEFAULTS: Record<string, string> = {
 const EXTRA_ANTHROPIC_MODEL_IDS = [
   'claude-opus-4-8',
   'claude-opus-4-7',
+]
+
+// Current Codex model family. Keep the role defaults in model-routing.ts in
+// sync: Sol for planning, Terra for balanced execution, Luna for throughput.
+const CODEX_BUSINESS_MODEL_IDS = [
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'gpt-5.6-luna',
 ]
 
 // Anthropic has no live models endpoint — use the pi-ai registry plus the
@@ -54,6 +63,10 @@ models.get('/', async (c) => {
 
 async function fetchModelsForProvider(providerId: string): Promise<string[]> {
   const dbProvider = getProvider(providerId)
+
+  if (providerId === CODEX_BUSINESS_PROVIDER) {
+    return CODEX_BUSINESS_MODEL_IDS
+  }
 
   // Try fetching from live API for providers with endpoints
   if (providerId === 'ollama') {
