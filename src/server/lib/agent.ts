@@ -303,6 +303,11 @@ export class Agent {
     this.running = true
 
     let consecutiveConnLostTurns = 0
+    // Idle backoff: consecutive zero-tool-call turns escalate the inter-turn
+    // sleep (5/10/15 min, capped) instead of re-burning a full-context LLM
+    // call every TURN_INTERVAL. Nudges/fleet events abort the sleep, so a
+    // parked agent still wakes instantly when there is real work.
+    let consecutiveIdleTurns = 0
 
     while (this.running) {
       // Zombie-connection guard: a dead game connection cannot be fixed from
@@ -411,6 +416,15 @@ export class Agent {
           consecutiveConnLostTurns = 0
         }
 
+        if (outcome === 'idle') {
+          consecutiveIdleTurns++
+          if (consecutiveIdleTurns === 3) {
+            this.log('system', 'Idle backoff engaged: 3 consecutive zero-action turns — extending sleep (nudges still wake instantly).')
+          }
+        } else if (outcome === 'completed') {
+          consecutiveIdleTurns = 0
+        }
+
         // Safe dock check: if pending and agent is now docked (or timeout), auto-disconnect
         if (this.pendingSafeDock) {
           if (this.isDocked()) {
@@ -442,8 +456,13 @@ export class Agent {
 
       if (!this.running) break
       if (this.restartRequested) continue
-      this.setActivity('Sleeping between turns...')
-      await abortableSleep(TURN_INTERVAL, this.abortController.signal)
+      const idleBackoffMs = consecutiveIdleTurns >= 3
+        ? Math.min((consecutiveIdleTurns - 2) * 5 * 60_000, 15 * 60_000)
+        : 0
+      this.setActivity(idleBackoffMs > 0
+        ? `Idle backoff: sleeping ${Math.round(idleBackoffMs / 60_000)}m (nudge to wake)...`
+        : 'Sleeping between turns...')
+      await abortableSleep(idleBackoffMs || TURN_INTERVAL, this.abortController.signal)
       if (!this.running) break
       if (this.restartRequested) continue
 
@@ -486,6 +505,7 @@ export class Agent {
 
       // Drain any human nudges
       if (this.pendingNudges.length > 0) {
+        consecutiveIdleTurns = 0  // real work arrived — leave idle backoff
         const nudges = this.pendingNudges.splice(0)
         for (const n of nudges) {
           nudgeParts.push(`## Human Nudge\nYour human operator has sent you guidance: ${n}\nTake this into account for your next actions.\n`)

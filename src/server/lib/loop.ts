@@ -36,7 +36,7 @@ export interface LoopOptions {
 /** How a turn ended. `connection_lost` means the game connection is dead or
  *  repeatedly failing — the caller (agent loop) decides whether to exit so
  *  agent-manager's bounded backoff can reconnect. */
-export type TurnOutcome = 'completed' | 'connection_lost'
+export type TurnOutcome = 'completed' | 'connection_lost' | 'idle'
 
 export interface CompactionState {
   summary: string
@@ -156,7 +156,11 @@ export async function runAgentTurn(
 
     if (toolCalls.length === 0) {
       if (reasoning) log('llm_thought', reasoning)
-      return 'completed'
+      // A first-round response with zero tool calls means the whole turn did
+      // nothing — surface that so the agent loop can back off instead of
+      // re-burning a full-context LLM call every TURN_INTERVAL (observed:
+      // idle vault-keeper logging a dozen "zero tool calls" turns in a row).
+      return rounds === 0 ? 'idle' : 'completed'
     }
 
     const reason = reasoning
@@ -487,6 +491,19 @@ async function completeWithRetry(
       lastError = err instanceof Error ? err : new Error(String(err))
       if (options?.signal?.aborted) throw lastError
 
+      // Tool-pairing repair: a connection drop mid-tool-call can leave the
+      // message history with orphaned tool_use/tool_result blocks, which the
+      // API rejects with a 400 on EVERY subsequent call — an unrecoverable
+      // retry loop that resends the full context each time (observed: 5 agents
+      // x ~100 failed calls overnight). Scrub the orphans and let the retry
+      // proceed with a valid history.
+      if (/tool_use_id|tool_use.*tool_result|tool_result.*tool_use/i.test(lastError.message)) {
+        const removed = sanitizeToolPairing(context)
+        if (removed > 0) {
+          log('system', `Tool-pairing repair: removed ${removed} orphaned tool block(s)/message(s) from context; retrying.`)
+        }
+      }
+
       // Emergency compaction: if "prompt is too long", force-compact context
       const isOverflow = lastError.message.includes('prompt is too long') ||
         lastError.message.includes('too many tokens') ||
@@ -514,6 +531,45 @@ async function completeWithRetry(
   }
 
   throw lastError || new Error('LLM call failed after retries')
+}
+
+/**
+ * Enforce tool_use/tool_result pairing across the message history. Returns the
+ * number of removed messages/blocks. Two failure shapes are repaired:
+ *  - a toolResult whose toolCallId has no preceding assistant toolCall block
+ *  - an assistant toolCall block with no toolResult anywhere after it
+ * Messages left with no content are dropped entirely.
+ */
+function sanitizeToolPairing(context: Context): number {
+  let removed = 0
+  const callIds = new Set<string>()
+  const resultIds = new Set<string>()
+  for (const msg of context.messages as any[]) {
+    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      for (const b of msg.content) if (b.type === 'toolCall' && b.id) callIds.add(b.id)
+    } else if (msg.role === 'toolResult' && msg.toolCallId) {
+      resultIds.add(msg.toolCallId)
+    }
+  }
+  const kept: any[] = []
+  for (const msg of context.messages as any[]) {
+    if (msg.role === 'toolResult') {
+      if (!msg.toolCallId || !callIds.has(msg.toolCallId)) { removed++; continue }
+      kept.push(msg)
+    } else if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      const orphanCalls = msg.content.filter((b: any) => b.type === 'toolCall' && b.id && !resultIds.has(b.id))
+      if (orphanCalls.length > 0) {
+        removed += orphanCalls.length
+        msg.content = msg.content.filter((b: any) => !(b.type === 'toolCall' && b.id && !resultIds.has(b.id)))
+        if (msg.content.length === 0) { removed++; continue }
+      }
+      kept.push(msg)
+    } else {
+      kept.push(msg)
+    }
+  }
+  context.messages = kept
+  return removed
 }
 
 /**
