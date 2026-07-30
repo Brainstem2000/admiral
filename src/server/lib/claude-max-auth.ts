@@ -29,8 +29,28 @@ let cachedCredentials: ClaudeOAuthCredentials | null = null
 let refreshInFlight: Promise<ClaudeOAuthCredentials> | null = null
 
 function readCredentialsFile(): CredentialsFile | null {
+  const main = readCredentialsAt(CREDENTIALS_PATH)
+  // Self-heal: a failed atomic rename (see writeCredentialsFile) can leave the
+  // freshest credentials stranded in a `.credentials.json.<pid>.tmp` next to a
+  // stale main file whose refresh token has already been rotated server-side.
+  // If any orphaned tmp holds a newer token, prefer it and promote it back.
+  const orphan = newestOrphanTmp()
+  if (orphan && (!main || orphan.creds.claudeAiOauth.expiresAt > main.claudeAiOauth.expiresAt)) {
+    try {
+      fs.copyFileSync(orphan.path, CREDENTIALS_PATH)
+      fs.unlinkSync(orphan.path)
+      console.warn(`[claude-max-auth] promoted orphaned credential tmp ${path.basename(orphan.path)} over stale main file`)
+    } catch (err) {
+      console.warn(`[claude-max-auth] could not promote orphaned tmp (using it in-memory): ${err}`)
+    }
+    return orphan.creds
+  }
+  return main
+}
+
+function readCredentialsAt(p: string): CredentialsFile | null {
   try {
-    const raw = fs.readFileSync(CREDENTIALS_PATH, 'utf-8')
+    const raw = fs.readFileSync(p, 'utf-8')
     const data = JSON.parse(raw) as CredentialsFile
     if (data?.claudeAiOauth?.accessToken && data?.claudeAiOauth?.refreshToken) {
       return data
@@ -41,18 +61,49 @@ function readCredentialsFile(): CredentialsFile | null {
   }
 }
 
-function writeCredentialsFile(creds: ClaudeOAuthCredentials): void {
+function newestOrphanTmp(): { path: string; creds: CredentialsFile } | null {
   try {
-    const existing = readCredentialsFile() || { claudeAiOauth: {} }
-    existing.claudeAiOauth = creds
-    // Write atomically (temp file + rename) with owner-only perms so a crash
-    // mid-write can't corrupt Claude Code's real credential file, and the
-    // refresh token isn't left world-readable.
-    const tmp = `${CREDENTIALS_PATH}.${process.pid}.tmp`
-    fs.writeFileSync(tmp, JSON.stringify(existing), { encoding: 'utf-8', mode: 0o600 })
-    fs.renameSync(tmp, CREDENTIALS_PATH)
+    const dir = path.dirname(CREDENTIALS_PATH)
+    const base = path.basename(CREDENTIALS_PATH)
+    let best: { path: string; creds: CredentialsFile } | null = null
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.startsWith(base + '.') || !name.endsWith('.tmp')) continue
+      const p = path.join(dir, name)
+      const creds = readCredentialsAt(p)
+      if (!creds) continue
+      if (!best || creds.claudeAiOauth.expiresAt > best.creds.claudeAiOauth.expiresAt) {
+        best = { path: p, creds }
+      }
+    }
+    return best
   } catch {
-    // Best-effort — don't crash if we can't write back
+    return null
+  }
+}
+
+function writeCredentialsFile(creds: ClaudeOAuthCredentials): void {
+  const tmp = `${CREDENTIALS_PATH}.${process.pid}.tmp`
+  try {
+    const existing = readCredentialsAt(CREDENTIALS_PATH) || ({ claudeAiOauth: {} } as CredentialsFile)
+    existing.claudeAiOauth = creds
+    // Write to a temp file first so a crash mid-write can't corrupt Claude
+    // Code's real credential file (owner-only perms — refresh token inside).
+    fs.writeFileSync(tmp, JSON.stringify(existing), { encoding: 'utf-8', mode: 0o600 })
+    try {
+      fs.renameSync(tmp, CREDENTIALS_PATH)
+    } catch {
+      // On Windows the rename can fail with EPERM if another process (Claude
+      // Code itself) has the destination open. Losing this write is NOT
+      // acceptable: the refresh token was already rotated server-side, so a
+      // stranded tmp means every future refresh gets invalid_grant (fleet-wide
+      // outage 2026-07-24). Fall back to copy + delete.
+      fs.copyFileSync(tmp, CREDENTIALS_PATH)
+      fs.unlinkSync(tmp)
+    }
+  } catch (err) {
+    // Last resort: leave the tmp in place (readCredentialsFile self-heals from
+    // it) but SAY SO — silently swallowing this is what hid the outage.
+    console.error(`[claude-max-auth] FAILED to persist refreshed credentials (tmp left at ${tmp}): ${err}`)
   }
 }
 
