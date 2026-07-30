@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
 import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, reorderProfiles } from '../lib/db'
 import { agentManager } from '../lib/agent-manager'
+import { resolveProfileModelRouting } from '../lib/model-routing'
+import type { Profile } from '../../shared/types'
 
 const profiles = new Hono()
 
@@ -9,6 +11,31 @@ const profiles = new Hono()
 function sanitizeProfile<T extends { password?: string | null }>(p: T): Omit<T, 'password'> & { has_password: boolean } {
   const { password, ...rest } = p
   return { ...rest, has_password: !!password }
+}
+
+/**
+ * Surface the models actually driving the agent. `provider`/`model` are the
+ * rollback baseline and stay untouched when a Codex overlay is active, so
+ * reading them alone reports the wrong engine (observed: dashboard and the
+ * fleet-watch script showing claude-max for Codex-routed agents). Attach the
+ * resolved routing as `effective_*` fields — additive, so existing consumers
+ * are unaffected.
+ */
+function withEffectiveRouting<T extends Record<string, unknown>>(p: T) {
+  try {
+    const routing = resolveProfileModelRouting(p as unknown as Profile)
+    return {
+      ...p,
+      effective_provider: routing.executor.provider,
+      effective_model: routing.executor.model,
+      effective_planner_provider: routing.planner?.provider ?? null,
+      effective_planner_model: routing.planner?.model ?? null,
+      model_overlay: routing.executor.provider !== p.provider || (routing.planner ? routing.planner.provider !== (p.planner_provider ?? p.provider) : false),
+    }
+  } catch {
+    // No baseline configured yet (profile mid-creation) — report as-is.
+    return p
+  }
 }
 
 const CONNECTION_MODES = new Set(['http', 'http_v2', 'websocket', 'mcp', 'mcp_v2', 'lib_v2'])
@@ -48,7 +75,7 @@ profiles.get('/', (c) => {
       updateProfile(p.id, { group_name: liveFaction })
       p.group_name = liveFaction
     }
-    return sanitizeProfile({ ...p, ...status })
+    return withEffectiveRouting(sanitizeProfile({ ...p, ...status }))
   }))
 })
 
@@ -109,7 +136,7 @@ profiles.get('/:id', (c) => {
   const profile = getProfile(c.req.param('id'))
   if (!profile) return c.json({ error: 'Not found' }, 404)
   const status = agentManager.getStatus(c.req.param('id'))
-  return c.json(sanitizeProfile({ ...profile, ...status }))
+  return c.json(withEffectiveRouting(sanitizeProfile({ ...profile, ...status })))
 })
 
 // PUT /api/profiles/:id
