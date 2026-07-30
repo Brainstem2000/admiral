@@ -396,6 +396,31 @@ export async function executeTool(
     }
   }
 
+  // Jettison gate: four agents jettisoned sellable cargo in one campaign, all on
+  // the same reasoning ("no local bid -> free the cargo space") — Juno (-28K
+  // vanadium), Spock (twice; triggered a full rebuild), Morg (copper, one jump
+  // from a vault), Vera (intercepted). Written doctrine failed every time
+  // because that reasoning is locally correct, so enforcement moves out of the
+  // model. Toggle: preference `jettison_gate` = 'off' re-enables the command.
+  {
+    const bare0 = command.replace(/^spacemolt_/, '').replace(/^ship_/, '')
+    if ((bare0 === 'jettison' || bare0.endsWith('_jettison')) && getPreference('jettison_gate') !== 'off') {
+      const items = Array.isArray(commandArgs?.items)
+        ? (commandArgs.items as Array<Record<string, unknown>>)
+            .map(i => `${i.item_id ?? i.id ?? '?'}x${i.quantity ?? '?'}`).join(', ')
+        : `${commandArgs?.item_id ?? commandArgs?.id ?? 'cargo'}${commandArgs?.quantity ? 'x' + commandArgs.quantity : ''}`
+      const msg =
+        `BLOCKED by Admiral doctrine: jettison is disabled fleet-wide (attempted: ${items}). ` +
+        `Nothing with a bid is worthless, and the fleet decides what is scrap — not you. ` +
+        `Instead: deposit the cargo at your next station (storage is free), gift it to an agent ` +
+        `who needs it, or sell it at a hub that actually bids. If your hold is full and you are ` +
+        `far from a station, finish the run and deposit on arrival.`
+      ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
+      ctx.log('tool_result', msg)
+      return msg
+    }
+  }
+
   // BoM sell lock for DIRECT sells (the macro already refuses these): locked
   // items are sellable only against a remaining Admiral quota in the DB.
   // Agent-memory quota tracking oversold twice in one night.
