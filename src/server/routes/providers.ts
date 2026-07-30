@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { listProviders, getProvider, upsertProvider } from '../lib/db'
 import { validateApiKey, detectLocalProviders } from '../lib/providers'
+import { getCodexBusinessStatus } from '../lib/codex-business-config'
 
 const providers = new Hono()
 
@@ -11,13 +12,32 @@ function sanitizeProvider(p: { id: string; api_key: string; base_url: string; st
   return { ...rest, api_key: '', has_key: !!api_key }
 }
 
-providers.get('/', (c) => c.json(listProviders().map(sanitizeProvider)))
+providers.get('/', (c) => {
+  const codex = getCodexBusinessStatus()
+  return c.json(listProviders().map(provider => {
+    if (provider.id === 'codex-business') {
+      return {
+        ...sanitizeProvider(provider),
+        status: codex.configured ? 'valid' : 'unreachable',
+        base_url: codex.configured
+          ? `Codex app-server (${codex.binary})`
+          : 'Set CODEX_ACCESS_TOKEN before starting Admiral',
+        has_key: codex.configured,
+      }
+    }
+    return sanitizeProvider(provider)
+  }))
+})
 
 providers.put('/', async (c) => {
   const { id, api_key, base_url } = await c.req.json()
   if (!id) return c.json({ error: 'Missing provider id' }, 400)
 
   const existing = getProvider(id)
+
+  if (id === 'codex-business') {
+    return c.json({ error: 'Codex Business authentication is configured only through CODEX_ACCESS_TOKEN' }, 400)
+  }
 
   // Reject non-http(s) base URLs. The custom/local provider flow fetches this URL
   // with the stored API key attached, so an unvalidated value is an SSRF /

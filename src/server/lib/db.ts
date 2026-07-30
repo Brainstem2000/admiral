@@ -129,6 +129,73 @@ function migrate(db: Database): void {
   if (!profileCols.some(c => c.name === 'planning_interval')) {
     db.exec('ALTER TABLE profiles ADD COLUMN planning_interval INTEGER DEFAULT NULL')
   }
+  if (!profileCols.some(c => c.name === 'codex_executor_enabled')) {
+    db.exec('ALTER TABLE profiles ADD COLUMN codex_executor_enabled INTEGER DEFAULT 0')
+  }
+  if (!profileCols.some(c => c.name === 'codex_executor_model')) {
+    db.exec('ALTER TABLE profiles ADD COLUMN codex_executor_model TEXT DEFAULT NULL')
+  }
+  if (!profileCols.some(c => c.name === 'codex_planner_enabled')) {
+    db.exec('ALTER TABLE profiles ADD COLUMN codex_planner_enabled INTEGER DEFAULT 0')
+  }
+  if (!profileCols.some(c => c.name === 'codex_planner_model')) {
+    db.exec('ALTER TABLE profiles ADD COLUMN codex_planner_model TEXT DEFAULT NULL')
+  }
+
+  // Codex app-server threads are isolated by profile and role. Removing this
+  // mapping is sufficient to start a clean thread; Admiral state remains in
+  // profiles and is injected again as the authoritative prompt.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS codex_sessions (
+      profile_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('planner', 'executor')),
+      thread_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      tool_schema_hash TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (profile_id, role),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+
+    -- Automatic recovery history for the three pieces of durable agent state.
+    -- Provider switches never write these fields, but the history gives us a
+    -- second guardrail against an accidental future overwrite.
+    CREATE TABLE IF NOT EXISTS profile_state_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id TEXT NOT NULL,
+      field TEXT NOT NULL CHECK (field IN ('directive', 'todo', 'memory')),
+      value TEXT NOT NULL DEFAULT '',
+      changed_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_profile_state_history
+      ON profile_state_history(profile_id, field, id DESC);
+
+    CREATE TRIGGER IF NOT EXISTS preserve_profile_directive
+      BEFORE UPDATE OF directive ON profiles
+      WHEN OLD.directive IS NOT NEW.directive
+      BEGIN
+        INSERT INTO profile_state_history(profile_id, field, value)
+        VALUES (OLD.id, 'directive', COALESCE(OLD.directive, ''));
+      END;
+
+    CREATE TRIGGER IF NOT EXISTS preserve_profile_todo
+      BEFORE UPDATE OF todo ON profiles
+      WHEN OLD.todo IS NOT NEW.todo
+      BEGIN
+        INSERT INTO profile_state_history(profile_id, field, value)
+        VALUES (OLD.id, 'todo', COALESCE(OLD.todo, ''));
+      END;
+
+    CREATE TRIGGER IF NOT EXISTS preserve_profile_memory
+      BEFORE UPDATE OF memory ON profiles
+      WHEN OLD.memory IS NOT NEW.memory
+      BEGIN
+        INSERT INTO profile_state_history(profile_id, field, value)
+        VALUES (OLD.id, 'memory', COALESCE(OLD.memory, ''));
+      END;
+  `)
 
   // Galaxy map cache (single-row table)
   db.exec(`
@@ -397,7 +464,7 @@ function migrate(db: Database): void {
 
   // Seed default providers
   const defaultProviders = [
-    'claude-max', 'anthropic', 'openai', 'groq', 'google', 'xai',
+    'claude-max', 'codex-business', 'anthropic', 'openai', 'groq', 'google', 'xai',
     'mistral', 'minimax', 'nvidia', 'openrouter', 'ollama', 'lmstudio', 'custom',
   ]
   const upsert = db.query(
@@ -433,6 +500,8 @@ function rowToProfile(row: Record<string, unknown>): Profile {
     ...row,
     autoconnect: !!row.autoconnect,
     enabled: !!row.enabled,
+    codex_executor_enabled: !!row.codex_executor_enabled,
+    codex_planner_enabled: !!row.codex_planner_enabled,
   } as Profile
 }
 
@@ -448,12 +517,14 @@ export function getProfile(id: string): Profile | undefined {
 
 export function createProfile(profile: Omit<Profile, 'created_at' | 'updated_at'>): Profile {
   getDb().query(
-    `INSERT INTO profiles (id, name, username, password, empire, player_id, provider, model, planner_provider, planner_model, planning_interval, directive, todo, memory, connection_mode, server_url, autoconnect, enabled, context_budget, sort_order, group_name)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO profiles (id, name, username, password, empire, player_id, provider, model, planner_provider, planner_model, planning_interval, codex_executor_enabled, codex_executor_model, codex_planner_enabled, codex_planner_model, directive, todo, memory, connection_mode, server_url, autoconnect, enabled, context_budget, sort_order, group_name)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     profile.id, profile.name, profile.username, profile.password,
     profile.empire, profile.player_id, profile.provider, profile.model,
     profile.planner_provider ?? null, profile.planner_model ?? null, profile.planning_interval ?? null,
+    profile.codex_executor_enabled ? 1 : 0, profile.codex_executor_model ?? null,
+    profile.codex_planner_enabled ? 1 : 0, profile.codex_planner_model ?? null,
     profile.directive, profile.todo || '', profile.memory || '', profile.connection_mode, profile.server_url,
     profile.autoconnect ? 1 : 0, profile.enabled ? 1 : 0, profile.context_budget ?? null,
     profile.sort_order ?? 0, profile.group_name || '',
@@ -465,6 +536,7 @@ export function updateProfile(id: string, updates: Partial<Profile>): Profile | 
   const allowed = [
     'name', 'username', 'password', 'empire', 'player_id',
     'provider', 'model', 'planner_provider', 'planner_model', 'planning_interval',
+    'codex_executor_enabled', 'codex_executor_model', 'codex_planner_enabled', 'codex_planner_model',
     'directive', 'connection_mode', 'server_url',
     'autoconnect', 'enabled', 'todo', 'memory', 'context_budget',
     'sort_order', 'group_name',
@@ -476,7 +548,7 @@ export function updateProfile(id: string, updates: Partial<Profile>): Profile | 
     if (key in updates) {
       sets.push(`${key} = ?`)
       let val = (updates as Record<string, unknown>)[key]
-      if (key === 'autoconnect' || key === 'enabled') val = val ? 1 : 0
+      if (key === 'autoconnect' || key === 'enabled' || key === 'codex_executor_enabled' || key === 'codex_planner_enabled') val = val ? 1 : 0
       vals.push(val)
     }
   }
@@ -492,6 +564,46 @@ export function updateProfile(id: string, updates: Partial<Profile>): Profile | 
 
 export function deleteProfile(id: string): void {
   getDb().query('DELETE FROM profiles WHERE id = ?').run(id)
+}
+
+export interface CodexSession {
+  profile_id: string
+  role: 'planner' | 'executor'
+  thread_id: string
+  model: string
+  tool_schema_hash: string
+  created_at: string
+  updated_at: string
+}
+
+export function getCodexSession(profileId: string, role: CodexSession['role']): CodexSession | undefined {
+  return getDb().query(
+    'SELECT * FROM codex_sessions WHERE profile_id = ? AND role = ?'
+  ).get(profileId, role) as CodexSession | undefined
+}
+
+export function upsertCodexSession(
+  profileId: string,
+  role: CodexSession['role'],
+  threadId: string,
+  model: string,
+  toolSchemaHash: string,
+): void {
+  getDb().query(
+    `INSERT INTO codex_sessions (profile_id, role, thread_id, model, tool_schema_hash)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(profile_id, role) DO UPDATE SET
+       thread_id = excluded.thread_id,
+       model = excluded.model,
+       tool_schema_hash = excluded.tool_schema_hash,
+       updated_at = datetime('now')`
+  ).run(profileId, role, threadId, model, toolSchemaHash)
+}
+
+export function deleteCodexSession(profileId: string, role: CodexSession['role']): void {
+  getDb().query(
+    'DELETE FROM codex_sessions WHERE profile_id = ? AND role = ?'
+  ).run(profileId, role)
 }
 
 export function reorderProfiles(orderedIds: string[]): void {

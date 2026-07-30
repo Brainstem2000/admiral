@@ -20,6 +20,12 @@ export interface Profile {
   planner_provider: string | null
   planner_model: string | null
   planning_interval: number | null
+  // Additive ChatGPT Business/Codex overlays. The provider/model fields above
+  // remain the rollback baseline and are never overwritten by these switches.
+  codex_executor_enabled: boolean
+  codex_executor_model: string | null
+  codex_planner_enabled: boolean
+  codex_planner_model: string | null
   directive: string
   todo: string
   memory: string

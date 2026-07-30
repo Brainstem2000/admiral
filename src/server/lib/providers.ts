@@ -1,5 +1,6 @@
 import { getProvider, upsertProvider } from './db'
 import { isClaudeMaxAvailable, getClaudeMaxInfo } from './claude-max-auth'
+import { getCodexBusinessStatus, isCodexBusinessConfigured } from './codex-business-config'
 
 const LOCALHOST = '127.0.0.1'
 
@@ -60,6 +61,16 @@ export async function detectLocalProviders(customUrls?: Record<string, string>):
     results.push({ id: 'claude-max', status: 'valid', baseUrl: `Claude MAX (${info.subscriptionType || 'subscription'})` })
   } else {
     results.push({ id: 'claude-max', status: 'unreachable', baseUrl: 'No Claude Code credentials found' })
+  }
+
+  // ChatGPT Business access tokens are injected through the environment and
+  // intentionally never stored in Admiral's API-key table.
+  const codex = getCodexBusinessStatus()
+  if (codex.configured) {
+    upsertProvider('codex-business', '', '', 'valid')
+    results.push({ id: 'codex-business', status: 'valid', baseUrl: `Codex app-server (${codex.binary})` })
+  } else {
+    results.push({ id: 'codex-business', status: 'unreachable', baseUrl: 'CODEX_ACCESS_TOKEN is not set' })
   }
 
   return results
@@ -152,6 +163,9 @@ export async function validateApiKey(provider: string, apiKey: string): Promise<
       case 'claude-max':
         // Claude MAX uses OAuth tokens from local Claude Code installation
         return isClaudeMaxAvailable() ? 'valid' : 'invalid'
+      case 'codex-business':
+        // No API key is accepted or persisted for this provider.
+        return isCodexBusinessConfigured() ? 'valid' : 'invalid'
       default:
         // For unknown providers, assume valid if non-empty (can't probe).
         return apiKey.length > 0 ? 'valid' : 'invalid'

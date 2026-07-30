@@ -130,13 +130,39 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   const [editPlannerProvider, setEditPlannerProvider] = useState('')
   const [editPlannerModel, setEditPlannerModel] = useState('')
   const [editPlanningInterval, setEditPlanningInterval] = useState(5)
+  const [editCodexExecutorEnabled, setEditCodexExecutorEnabled] = useState(false)
+  const [editCodexExecutorModel, setEditCodexExecutorModel] = useState('gpt-5.6-terra')
+  const [editCodexPlannerEnabled, setEditCodexPlannerEnabled] = useState(false)
+  const [editCodexPlannerModel, setEditCodexPlannerModel] = useState('gpt-5.6-sol')
   const [editUsername, setEditUsername] = useState('')
   const [editPassword, setEditPassword] = useState('')
   const editNameRef = useRef<HTMLInputElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
 
   const isManual = !profile.provider || profile.provider === 'manual' || !profile.model
-  const availableProviders = ['manual', ...providers.filter(p => p.status === 'valid' || p.has_key).map(p => p.id)]
+  const codexBusinessProvider = providers.find(p => p.id === 'codex-business')
+  const codexBusinessConfigured = codexBusinessProvider?.status === 'valid'
+  const availableProviders = [
+    'manual',
+    ...providers
+      .filter(p => p.id !== 'codex-business' && (p.status === 'valid' || p.has_key))
+      .map(p => p.id),
+  ]
+
+  function openProviderEditor() {
+    setEditing('provider')
+    setEditProvider(profile.provider || '')
+    setEditModel(profile.model || '')
+    setEditContextBudget(profile.context_budget ?? null)
+    setEditPlannerEnabled(!!profile.planner_model)
+    setEditPlannerProvider(profile.planner_provider || '')
+    setEditPlannerModel(profile.planner_model || '')
+    setEditPlanningInterval(profile.planning_interval ?? 5)
+    setEditCodexExecutorEnabled(!!profile.codex_executor_enabled)
+    setEditCodexExecutorModel(profile.codex_executor_model || 'gpt-5.6-terra')
+    setEditCodexPlannerEnabled(!!profile.codex_planner_enabled)
+    setEditCodexPlannerModel(profile.codex_planner_model || 'gpt-5.6-sol')
+  }
 
   // Auto-open name edit for new profiles
   useEffect(() => {
@@ -360,7 +386,17 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   async function handleSaveProvider() {
     const newProvider = editProvider || null
     const newModel = editProvider === 'manual' ? null : (editModel || null)
-    const providerChanged = newProvider !== (profile.provider || null) || newModel !== (profile.model || null)
+    const providerChanged =
+      newProvider !== (profile.provider || null) ||
+      newModel !== (profile.model || null) ||
+      editPlannerEnabled !== !!profile.planner_model ||
+      (editPlannerEnabled && editPlannerProvider !== (profile.planner_provider || '')) ||
+      (editPlannerEnabled && editPlannerModel !== (profile.planner_model || '')) ||
+      (editPlannerEnabled || editCodexPlannerEnabled) && editPlanningInterval !== (profile.planning_interval ?? 5) ||
+      editCodexExecutorEnabled !== profile.codex_executor_enabled ||
+      editCodexExecutorModel !== (profile.codex_executor_model || 'gpt-5.6-terra') ||
+      editCodexPlannerEnabled !== profile.codex_planner_enabled ||
+      editCodexPlannerModel !== (profile.codex_planner_model || 'gpt-5.6-sol')
     setEditing(null)
     await saveProfileField({
       provider: newProvider,
@@ -368,7 +404,11 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       context_budget: editContextBudget,
       planner_provider: editPlannerEnabled ? (editPlannerProvider || null) : null,
       planner_model: editPlannerEnabled ? (editPlannerModel || null) : null,
-      planning_interval: editPlannerEnabled ? editPlanningInterval : null,
+      planning_interval: (editPlannerEnabled || editCodexPlannerEnabled) ? editPlanningInterval : null,
+      codex_executor_enabled: editCodexExecutorEnabled,
+      codex_executor_model: editCodexExecutorModel || null,
+      codex_planner_enabled: editCodexPlannerEnabled,
+      codex_planner_model: editCodexPlannerModel || null,
     }, providerChanged)
   }
 
@@ -539,6 +579,75 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
     }
   }, [profile.id])
 
+  function renderCodexOverlayControls() {
+    if (!codexBusinessProvider || !editProvider || editProvider === 'manual') return null
+
+    return (
+      <div className="border-t border-primary/25 pt-2 space-y-2">
+        <div>
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-primary uppercase tracking-[1.5px]">ChatGPT Business Override</span>
+            <span className={`text-[9px] ${codexBusinessConfigured ? 'text-[hsl(var(--smui-green))]' : 'text-[hsl(var(--smui-orange))]'}`}>
+              {codexBusinessConfigured ? 'token ready' : 'token not configured'}
+            </span>
+          </div>
+          <p className="text-[9px] text-muted-foreground mt-0.5">
+            Opt-in overlay. Turning it off restores the saved provider/models above without changing directives, TODO, or memory.
+          </p>
+        </div>
+
+        <div className="space-y-1">
+          <label className="flex items-center justify-between cursor-pointer">
+            <span className="text-[10px] text-muted-foreground uppercase tracking-[1px]">Codex Executor</span>
+            <input
+              type="checkbox"
+              checked={editCodexExecutorEnabled}
+              disabled={!codexBusinessConfigured && !editCodexExecutorEnabled}
+              onChange={e => setEditCodexExecutorEnabled(e.target.checked)}
+              className="accent-[hsl(var(--smui-primary))]"
+            />
+          </label>
+          {editCodexExecutorEnabled && (
+            <ModelPicker provider="codex-business" value={editCodexExecutorModel} onChange={setEditCodexExecutorModel} />
+          )}
+        </div>
+
+        <div className="space-y-1">
+          <label className="flex items-center justify-between cursor-pointer">
+            <span className="text-[10px] text-muted-foreground uppercase tracking-[1px]">Codex Planner</span>
+            <input
+              type="checkbox"
+              checked={editCodexPlannerEnabled}
+              disabled={!codexBusinessConfigured && !editCodexPlannerEnabled}
+              onChange={e => setEditCodexPlannerEnabled(e.target.checked)}
+              className="accent-[hsl(var(--smui-primary))]"
+            />
+          </label>
+          {editCodexPlannerEnabled && (
+            <div className="space-y-1.5">
+              <ModelPicker provider="codex-business" value={editCodexPlannerModel} onChange={setEditCodexPlannerModel} />
+              <div>
+                <div className="flex items-center justify-between mb-0.5">
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-[1px]">Plan Every</span>
+                  <span className="text-[10px] text-muted-foreground tabular-nums">{editPlanningInterval} turns</span>
+                </div>
+                <input
+                  type="range"
+                  min={1}
+                  max={20}
+                  step={1}
+                  value={editPlanningInterval}
+                  onChange={e => setEditPlanningInterval(parseInt(e.target.value, 10))}
+                  className="w-full h-1.5 accent-[hsl(var(--smui-primary))] cursor-pointer"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col h-full">
       {/* Header bar */}
@@ -697,11 +806,17 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
           <div className="relative" data-tour="provider-model">
             <span
               className="text-[10px] text-[hsl(var(--smui-purple))] cursor-pointer hover:text-foreground transition-colors"
-              onClick={() => { setEditing('provider'); setEditProvider(profile.provider || ''); setEditModel(profile.model || ''); setEditContextBudget(profile.context_budget ?? null); setEditPlannerEnabled(!!(profile.planner_model)); setEditPlannerProvider(profile.planner_provider || ''); setEditPlannerModel(profile.planner_model || ''); setEditPlanningInterval(profile.planning_interval ?? 5) }}
+              onClick={openProviderEditor}
             >
               {profile.provider}/{profile.model}
               {profile.planner_model && (
                 <span className="text-[hsl(var(--smui-frost-2))] ml-1">+planner</span>
+              )}
+              {!!profile.codex_executor_enabled && (
+                <span className="text-primary ml-1">+Codex exec</span>
+              )}
+              {!!profile.codex_planner_enabled && (
+                <span className="text-primary ml-1">+Codex planner</span>
               )}
               <span className="text-muted-foreground/60 ml-1.5">
                 budget:{profile.context_budget != null && !isNaN(profile.context_budget) ? `${Math.round(profile.context_budget * 100)}%` : '55%'}
@@ -782,6 +897,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
                       )}
                     </div>
                   )}
+                  {renderCodexOverlayControls()}
                   <div className="flex justify-end gap-1.5 pt-1 border-t border-border/50">
                     <Button variant="ghost" size="sm" onClick={() => setEditing(null)} className="h-6 text-[10px] px-2">
                       Cancel
@@ -801,7 +917,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
           <div className="relative" data-tour="provider-model">
             <span
               className="text-[10px] text-muted-foreground/50 italic cursor-pointer hover:text-foreground transition-colors"
-              onClick={() => { setEditing('provider'); setEditProvider(profile.provider || ''); setEditModel(profile.model || ''); setEditContextBudget(profile.context_budget ?? null); setEditPlannerEnabled(!!(profile.planner_model)); setEditPlannerProvider(profile.planner_provider || ''); setEditPlannerModel(profile.planner_model || ''); setEditPlanningInterval(profile.planning_interval ?? 5) }}
+              onClick={openProviderEditor}
             >
               {isManual && profile.provider ? 'manual' : 'no provider'}
             </span>
@@ -880,6 +996,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
                       )}
                     </div>
                   )}
+                  {renderCodexOverlayControls()}
                   <div className="flex justify-end gap-1.5 pt-1 border-t border-border/50">
                     <Button variant="ghost" size="sm" onClick={() => setEditing(null)} className="h-6 text-[10px] px-2">
                       Cancel

@@ -143,6 +143,10 @@ const LOCAL_TOOLS = new Set(['save_credentials', 'update_todo', 'read_todo', 'up
 // cooldown gate and re-arm it when they finish.
 const MACRO_TOOLS = new Set(['mine_until_full', 'goto_system', 'sell_cargo'])
 
+export function isMacroTool(name: string): boolean {
+  return MACRO_TOOLS.has(name)
+}
+
 const MAX_RESULT_CHARS = 4000
 
 // Cooldown tracking for action commands to prevent spam loops (e.g. mine → "Action pending" → mine → ...)
@@ -208,7 +212,7 @@ const QUERY_COMMANDS = new Set([
 
 export type LogFn = (type: string, summary: string, detail?: string) => void
 
-interface ToolContext {
+export interface ToolContext {
   connection: GameConnection
   profileId: string
   profileName: string

@@ -9,9 +9,11 @@ import { McpConnection } from './connections/mcp'
 import { McpV2Connection } from './connections/mcp_v2'
 import { LibV2Connection } from './connections/lib_v2'
 import { resolveModel, resolveApiKey } from './model'
+import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
 import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
+import { runCodexAgentTurn } from './codex-app-server'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { safeTruncate } from './text-safe'
@@ -235,17 +237,21 @@ export class Agent {
     this._sessionExpired = false
     this.abortController = new AbortController()
 
-    this.log('system', `Starting LLM loop with ${profile.provider}/${profile.model}`)
+    const routing = resolveProfileModelRouting(profile)
+    const executorResolved = isCodexBusinessRole(routing.executor)
+      ? null
+      : await resolveModel(`${routing.executor.provider}/${routing.executor.model}`)
+    const plannerResolved = routing.planner && !isCodexBusinessRole(routing.planner)
+      ? await resolveModel(`${routing.planner.provider}/${routing.planner.model}`)
+      : null
+    const hasDualModel = !!routing.planner
 
-    const { model } = await resolveModel(`${profile.provider}/${profile.model}`)
-
-    // Resolve planner model if dual-model is configured
-    let plannerResolved: { model: typeof model } | null = null
-    const hasDualModel = !!(profile.planner_model)
-    if (hasDualModel) {
-      const pp = profile.planner_provider || profile.provider
-      plannerResolved = await resolveModel(`${pp}/${profile.planner_model}`)
-      this.log('system', `Dual-model: planner=${pp}/${profile.planner_model}, executor=${profile.provider}/${profile.model}, every ${profile.planning_interval ?? 5} turns`)
+    this.log('system', `Starting LLM loop with executor=${routing.executor.provider}/${routing.executor.model}`)
+    if (profile.codex_executor_enabled || profile.codex_planner_enabled) {
+      this.log('system', `Codex overlay active; rollback baseline remains ${profile.provider}/${profile.model}`)
+    }
+    if (routing.planner) {
+      this.log('system', `Dual-model: planner=${routing.planner.provider}/${routing.planner.model}, executor=${routing.executor.provider}/${routing.executor.model}, every ${routing.planningInterval} turns`)
     }
 
     // Fetch game commands - MCP v2 uses tool discovery, others use OpenAPI
@@ -283,7 +289,7 @@ export class Agent {
     const compaction: CompactionState = { summary: '' }
     const todo = { value: profile.todo || '' }
     const memory = { value: profile.memory || '' }
-    const planningInterval = profile.planning_interval ?? 5
+    const planningInterval = routing.planningInterval
     let turnCounter = 0
     const sessionStartedAt = Date.now()
 
@@ -291,6 +297,7 @@ export class Agent {
     let cachedPrompt = systemPrompt
     let cachedPromptPhase: 'planning' | 'executing' | undefined = initialPhase
     let cachedPromptDirective = profile.directive || ''
+    let cachedPromptTodo = profile.todo || ''
     let cachedPromptMemory = profile.memory || ''
     let cachedPromptBriefing = buildSituationalBriefing(this.profileId)
 
@@ -366,11 +373,9 @@ export class Agent {
         const contextBudgetRatio = freshForBudget?.context_budget ?? undefined
 
         // Dual-model phase selection
-        const isPlanningTurn = hasDualModel && plannerResolved && (turnCounter % planningInterval === 0)
-        const turnModel = isPlanningTurn ? plannerResolved!.model : model
-        // Re-resolve API key each turn for OAuth providers (tokens expire)
-        const turnProvider = isPlanningTurn ? (profile.planner_provider || profile.provider) : profile.provider
-        const turnApiKey = await resolveApiKey(turnProvider!)
+        const isPlanningTurn = hasDualModel && (turnCounter % planningInterval === 0)
+        const turnRole = isPlanningTurn ? routing.planner! : routing.executor
+        const turnResolved = isPlanningTurn ? plannerResolved : executorResolved
         const phasePrefix = isPlanningTurn ? '[Planning] ' : (hasDualModel ? '[Executing] ' : '')
 
         // Planning turns get fewer tool rounds — Opus should set strategy, not do exhaustive research.
@@ -386,19 +391,42 @@ export class Agent {
             : maxToolRounds
 
         this.setActivity(`${phasePrefix}Waiting for LLM response...`)
-        const outcome = await runAgentTurn(
-          turnModel, context, this.connection, this.profileId, profile.name,
-          this.log, todo, memory,
-          {
-            signal: this.abortController.signal, apiKey: turnApiKey, maxToolRounds: turnMaxToolRounds, llmTimeoutMs,
-            maxTokens: isPlanningTurn ? 4096 : 2048,
-            contextBudgetRatio,
-            onActivity: (a) => this.setActivity(`${phasePrefix}${a}`),
-            compactionModel: hasDualModel ? model : undefined,  // Always use executor for compaction
-            isConnectionDown: () => this.everConnected && !(this.connection?.isConnected() ?? false),
-          },
-          compaction,
-        )
+        const outcome = isCodexBusinessRole(turnRole)
+          ? await runCodexAgentTurn({
+              role: isPlanningTurn ? 'planner' : 'executor',
+              model: turnRole.model,
+              context,
+              connection: this.connection,
+              profileId: this.profileId,
+              profileName: profile.name,
+              log: this.log,
+              todo,
+              memory,
+              options: {
+                signal: this.abortController.signal,
+                maxToolRounds: turnMaxToolRounds,
+                llmTimeoutMs,
+                onActivity: (a) => this.setActivity(`${phasePrefix}${a}`),
+                isConnectionDown: () => this.everConnected && !(this.connection?.isConnected() ?? false),
+              },
+            })
+          : await runAgentTurn(
+              turnResolved!.model, context, this.connection, this.profileId, profile.name,
+              this.log, todo, memory,
+              {
+                // Re-resolve API keys each turn for OAuth providers (tokens expire).
+                signal: this.abortController.signal,
+                apiKey: await resolveApiKey(turnRole.provider),
+                maxToolRounds: turnMaxToolRounds,
+                llmTimeoutMs,
+                maxTokens: isPlanningTurn ? 4096 : 2048,
+                contextBudgetRatio,
+                onActivity: (a) => this.setActivity(`${phasePrefix}${a}`),
+                compactionModel: hasDualModel ? executorResolved?.model : undefined,
+                isConnectionDown: () => this.everConnected && !(this.connection?.isConnected() ?? false),
+              },
+              compaction,
+            )
         turnCounter++
 
         // Connection-loss escalation. `connection_lost` alone isn't enough to
@@ -565,17 +593,19 @@ export class Agent {
       // Refresh system prompt only when inputs have changed (memory, phase, directive)
       const freshProfile = getProfile(this.profileId)
       if (freshProfile) {
-        const nextIsPlanningTurn = hasDualModel && plannerResolved && (turnCounter % planningInterval === 0)
+        const nextIsPlanningTurn = hasDualModel && (turnCounter % planningInterval === 0)
         const phase = hasDualModel ? (nextIsPlanningTurn ? 'planning' as const : 'executing' as const) : undefined
         const currentDirective = freshProfile.directive || ''
+        const currentTodo = freshProfile.todo || ''
         const currentMemory = freshProfile.memory || ''
         const memoryDirty = memoryDirtyFlags.get(this.profileId) ?? false
 
         const currentBriefing = buildSituationalBriefing(this.profileId)
-        if (phase !== cachedPromptPhase || currentDirective !== cachedPromptDirective || memoryDirty || currentMemory !== cachedPromptMemory || currentBriefing !== cachedPromptBriefing) {
+        if (phase !== cachedPromptPhase || currentDirective !== cachedPromptDirective || currentTodo !== cachedPromptTodo || memoryDirty || currentMemory !== cachedPromptMemory || currentBriefing !== cachedPromptBriefing) {
           cachedPrompt = buildSystemPrompt(freshProfile, commandList, phase, this.profileId)
           cachedPromptPhase = phase
           cachedPromptDirective = currentDirective
+          cachedPromptTodo = currentTodo
           cachedPromptMemory = currentMemory
           cachedPromptBriefing = currentBriefing
           memoryDirtyFlags.delete(this.profileId)

@@ -14,6 +14,7 @@ const DEFAULT_LOCAL_URLS: Record<string, string> = {
 
 const PROVIDER_INFO: Record<string, { label: string; description: string; isLocal: boolean; keyPlaceholder: string }> = {
   'claude-max': { label: 'Claude MAX', description: 'Claude Code subscription (OAuth)', isLocal: false, keyPlaceholder: '' },
+  'codex-business': { label: 'ChatGPT Business (Codex)', description: 'Codex app-server access token', isLocal: false, keyPlaceholder: '' },
   anthropic: { label: 'Anthropic', description: 'Claude models', isLocal: false, keyPlaceholder: 'sk-ant-...' },
   openai: { label: 'OpenAI', description: 'GPT models', isLocal: false, keyPlaceholder: 'sk-...' },
   groq: { label: 'Groq', description: 'Fast inference', isLocal: false, keyPlaceholder: 'gsk_...' },
@@ -71,9 +72,12 @@ export function ProviderSetup({ providers: initialProviders, registrationCode, o
 
   // Group providers
   const claudeMaxProvider = providers.find(p => p.id === 'claude-max')
-  const cloudProviders = providers.filter(p => !PROVIDER_INFO[p.id]?.isLocal && p.id !== 'claude-max')
+  const codexBusinessProvider = providers.find(p => p.id === 'codex-business')
+  const cloudProviders = providers.filter(p => !PROVIDER_INFO[p.id]?.isLocal && p.id !== 'claude-max' && p.id !== 'codex-business')
   const localProviders = providers.filter(p => PROVIDER_INFO[p.id]?.isLocal || p.id === 'custom')
-  const validProviders = providers.filter(p => p.status === 'valid' || p.has_key)
+  // Codex is a reversible per-role overlay, never a replacement for the saved
+  // default/baseline provider.
+  const validProviders = providers.filter(p => p.id !== 'codex-business' && (p.status === 'valid' || p.has_key))
 
   // Close on Escape
   useEffect(() => {
@@ -459,6 +463,26 @@ export function ProviderSetup({ providers: initialProviders, registrationCode, o
                         : 'Not detected — requires Claude Code login'}
                     </span>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {/* ChatGPT Business/Codex - environment access token, no API key input */}
+            {codexBusinessProvider && (
+              <div className="mb-3">
+                <div className="border border-border/60 bg-background/30 px-3 py-2">
+                  <div className="flex items-center gap-2.5">
+                    <div className={statusDot(codexBusinessProvider.status)} />
+                    <span className="text-xs font-medium text-foreground">ChatGPT Business (Codex)</span>
+                    <span className="text-[10px] text-muted-foreground">
+                      {codexBusinessProvider.status === 'valid'
+                        ? 'Access token configured; enable per role on an agent'
+                        : 'Set CODEX_ACCESS_TOKEN before starting Admiral'}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground mt-1.5 ml-4">
+                    Subscription app-server path only. Admiral does not store this token or use an OpenAI Platform API key.
+                  </p>
                 </div>
               </div>
             )}
