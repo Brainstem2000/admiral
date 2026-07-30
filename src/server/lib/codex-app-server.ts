@@ -59,6 +59,12 @@ interface ActiveTurn {
   toolContext: ToolContext
   maxToolCalls: number
   toolCalls: number
+  /**
+   * Tool calls the model issued that we refused to run (turn already ending:
+   * macro in flight, action pending, cooldown, abort, budget spent). These
+   * prove the model WANTED to act, so the turn must not be scored as idle.
+   */
+  skippedToolCalls: number
   actionPending: boolean
   cooldownBlocked: boolean
   connectionFailures: number
@@ -432,6 +438,7 @@ class CodexAppServer {
       active.toolCalls >= active.maxToolCalls
     ) {
       result = 'Skipped — this Admiral turn is ending. Reissue the call on a later turn if it is still needed.'
+      active.skippedToolCalls++
     } else {
       active.toolCalls++
       if (shouldEndCodexTurnAfterTool(toolName)) active.macroStarted = true
@@ -507,7 +514,18 @@ class CodexAppServer {
       }
       const connectionLost = active.connectionFailures >= 3 ||
         (active.connectionFailures > 0 && active.isConnectionDown?.())
-      active.resolve(connectionLost ? 'connection_lost' : active.toolCalls === 0 ? 'idle' : 'completed')
+      // 'idle' means the model CHOSE to do nothing — it drives the harness
+      // idle backoff (5/10/15min sleeps). A turn that was cut short still did
+      // work or wanted to, so only score idle when the model executed nothing,
+      // requested nothing that we refused, and nothing was left in flight.
+      const didNothing =
+        active.toolCalls === 0 &&
+        active.skippedToolCalls === 0 &&
+        !active.abortRequested &&
+        !active.macroStarted &&
+        !active.actionPending &&
+        active.inFlightTools.size === 0
+      active.resolve(connectionLost ? 'connection_lost' : didNothing ? 'idle' : 'completed')
     }
   }
 
@@ -601,6 +619,7 @@ export async function runCodexAgentTurn(params: RunCodexTurnParams): Promise<Tur
         },
         maxToolCalls,
         toolCalls: 0,
+        skippedToolCalls: 0,
         actionPending: false,
         cooldownBlocked: false,
         connectionFailures: 0,

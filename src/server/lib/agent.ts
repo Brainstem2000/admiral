@@ -445,9 +445,19 @@ export class Agent {
         }
 
         if (outcome === 'idle') {
-          consecutiveIdleTurns++
-          if (consecutiveIdleTurns === 3) {
-            this.log('system', 'Idle backoff engaged: 3 consecutive zero-action turns — extending sleep (nudges still wake instantly).')
+          // A macro (mine_until_full, goto_system, ...) keeps producing game
+          // events for many turns after the tool call that started it. Turns
+          // taken while it runs legitimately have nothing to add — that is
+          // waiting, not idling, so they must not trigger the backoff or the
+          // agent sleeps 15min past the macro's completion.
+          const macroRunning = this.hasWorkInFlight()
+          if (macroRunning) {
+            consecutiveIdleTurns = 0
+          } else {
+            consecutiveIdleTurns++
+            if (consecutiveIdleTurns === 3) {
+              this.log('system', 'Idle backoff engaged: 3 consecutive zero-action turns — extending sleep (nudges still wake instantly).')
+            }
           }
         } else if (outcome === 'completed') {
           consecutiveIdleTurns = 0
@@ -670,6 +680,20 @@ export class Agent {
   }
 
   /** Check if the agent is currently docked at a station. */
+  /**
+   * True when the game still owes this agent activity — a running macro or an
+   * in-transit ship. Used to distinguish "waiting on work already started"
+   * from "genuinely out of work" for the idle backoff.
+   */
+  private hasWorkInFlight(): boolean {
+    const gs = this._gameState as Record<string, unknown> | null
+    if (!gs) return false
+    const loc = gs.location as Record<string, unknown> | undefined
+    if (loc?.in_transit === true) return true
+    const activity = this._activity || ''
+    return /mine_until_full|goto_system|sell_cargo|deliver|Executing tool/i.test(activity)
+  }
+
   private isDocked(): boolean {
     const gs = this._gameState
     if (!gs) return false
