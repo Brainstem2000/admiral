@@ -192,10 +192,15 @@ export class Agent {
       checkEventTriggers(this.profileId, n as Record<string, unknown>).catch(() => {})
     })
 
-    // Login if credentials exist
-    if (profile.username && profile.password) {
+    // Login if we have ANY way to authenticate. A Clerk API key is sufficient on
+    // its own — it mints a fresh WS token from the username alone, no password
+    // involved (see LibV2Connection.login). Gating on `password` too meant a
+    // clerk-owned character with no stored password silently skipped login
+    // entirely: the loop then started UNAUTHENTICATED, the LLM saw a blank slate
+    // and tried to `register` its own username, which fails as username_taken.
+    if (profile.username && (profile.password || process.env.SPACEMOLT_CLERK_API_KEY)) {
       this.log('connection', `Logging in as ${profile.username}...`)
-      const result = await this.connection.login(profile.username, profile.password)
+      const result = await this.connection.login(profile.username, profile.password ?? '')
       if (result.success) {
         this.log('connection', `Logged in as ${profile.username}`)
       } else {
