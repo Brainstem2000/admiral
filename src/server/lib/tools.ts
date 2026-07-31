@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -232,6 +232,44 @@ export interface ToolContext {
  * identical rationalization, one full rebuild). Keep them free of side effects
  * so either caller can run them before dispatch.
  */
+/**
+ * Mirror any view_storage response into the DB storage ledger.
+ *
+ * Every agent is told to keep a prose STORAGE LEDGER in memory, and every agent
+ * drifts — the fleet lost a gas_harvester_i across three stations once, and
+ * Nova's Confederacy Central Command depot (1,148 nickel ore, a spare mining
+ * laser, 3 parked ships) sat forgotten while we hunted the same materials. This
+ * makes the ledger machine-kept: view_storage is a FREE query agents already run
+ * constantly, so the table stays warm at zero extra cost and can never disagree
+ * with what the game actually reported.
+ */
+export function recordStorageFromCommand(command: string, data: unknown, profileId: string): void {
+  const bare = command.replace(/^spacemolt_/, '').replace(/^storage_/, '')
+  if (bare !== 'view_storage' && !bare.endsWith('_view_storage')) return
+  const sc = data as {
+    base_id?: string
+    items?: Array<{ item_id?: string; name?: string; quantity?: number }>
+    ships?: Array<{ ship_id?: string; class_id?: string; custom_name?: string; modules?: number }>
+  } | null
+  const station = sc?.base_id
+  if (!station || !Array.isArray(sc?.items)) return // shape we don't recognise — record nothing
+  recordStorageSnapshot(
+    profileId,
+    station,
+    sc.items
+      .filter((i) => i?.item_id && typeof i.quantity === 'number')
+      .map((i) => ({ item_id: i.item_id!, item_name: i.name ?? '', quantity: i.quantity! })),
+    (sc.ships ?? [])
+      .filter((s) => s?.ship_id)
+      .map((s) => ({
+        ship_id: s.ship_id!,
+        class: s.class_id ?? '',
+        custom_name: s.custom_name ?? '',
+        module_count: typeof s.modules === 'number' ? s.modules : 0,
+      })),
+  )
+}
+
 export function checkDoctrineGuards(
   command: string,
   commandArgs: Record<string, unknown> | undefined,
@@ -638,6 +676,7 @@ export async function executeTool(
       try {
         FleetIntelCollector.processCommandResult(command, resultData, ctx.profileName)
         if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
+        recordStorageFromCommand(command, resultData, ctx.profileId)
       } catch { /* never break game execution */ }
       // Invalidate briefing cache — action changed game state; trigger async refresh
       invalidateBriefingCache(ctx.profileId, ctx.connection)
@@ -649,6 +688,7 @@ export async function executeTool(
     try {
       FleetIntelCollector.processCommandResult(command, resultData, ctx.profileName)
       if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
+      recordStorageFromCommand(command, resultData, ctx.profileId)
     } catch { /* never break game execution */ }
 
     // Book credit movements from the resolved result — ONLY here, on the resolved success

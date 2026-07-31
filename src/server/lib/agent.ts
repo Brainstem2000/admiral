@@ -11,7 +11,7 @@ import { LibV2Connection } from './connections/lib_v2'
 import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
-import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards } from './tools'
+import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
@@ -668,6 +668,11 @@ export class Agent {
         command,
         (result as { structuredContent?: unknown }).structuredContent ?? result.result,
         getProfile(this.profileId)?.name ?? 'manual',
+      )
+      recordStorageFromCommand(
+        command,
+        (result as { structuredContent?: unknown }).structuredContent ?? result.result,
+        this.profileId,
       )
     } catch { /* intel capture must never break command execution */ }
 
