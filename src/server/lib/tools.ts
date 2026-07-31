@@ -289,6 +289,34 @@ export function checkDoctrineGuards(
     }
   }
 
+  // BoM gift lock: gifting is the doctrine-approved way to move material between
+  // agents (the jettison guard explicitly recommends it), and send_gift reaches
+  // the game through the REST fallback — so it never passes the market sell lock
+  // above. Without this, "gift it to a friendly trader" walks BoM material out of
+  // the fleet with no quota check at all. Fleet-internal gifts stay unrestricted.
+  {
+    const bare = command.replace(/^spacemolt_/, '').replace(/^social_/, '')
+    if (bare === 'send_gift' || bare.endsWith('_send_gift')) {
+      const itemId = String(commandArgs?.item_id ?? '').toLowerCase()
+      if (itemId && SELL_CARGO_ALWAYS_EXCLUDE.has(itemId)) {
+        const recipient = String(commandArgs?.recipient ?? '').trim().toLowerCase()
+        const fleet = new Set<string>()
+        for (const p of listProfiles()) {
+          if (p.username) fleet.add(p.username.toLowerCase())
+          if (p.player_id) fleet.add(p.player_id.toLowerCase())
+        }
+        const isFleetFaction = recipient.startsWith('faction:')
+        if (!recipient || (!fleet.has(recipient) && !isFleetFaction)) {
+          return (
+            `BLOCKED: ${itemId} is BoM-locked and "${commandArgs?.recipient ?? ''}" is not a fleet agent. ` +
+            `Devastator material moves between OUR agents or into the war_citadel vault — never to an outside player. ` +
+            `Gift it to a fleet callsign, or deposit it to storage instead.`
+          )
+        }
+      }
+    }
+  }
+
   return null
 }
 
