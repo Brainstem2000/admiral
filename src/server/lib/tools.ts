@@ -305,7 +305,7 @@ export async function executeTool(
 
   if (MACRO_TOOLS.has(name)) {
     ctx.log('tool_call', `${name}(${formatArgs(args)})`)
-    const summary = await executeMacroTool(name, args, ctx)
+    const summary = await executeMacroTool(name, args, ctx, reason)
     // A macro just performed real game actions: refresh passive awareness and
     // arm the normal cooldown so the next direct action is properly paced.
     actionCooldowns.set(ctx.profileId, { timestamp: Date.now(), wasPending: false })
@@ -935,12 +935,37 @@ async function macroAction(
   }
 }
 
-async function executeMacroTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<string> {
+/**
+ * Progress narrator for long-running macros.
+ *
+ * A macro is ONE tool call that can run for many minutes (a 25-hop
+ * goto_system is ~21 minutes at ~60s/hop). The model does not speak while it
+ * runs, so the LLM log lane shows one line and then dead air — which reads as
+ * a hung agent. It is worse for Codex-routed agents, whose turn ends at the
+ * macro, so they emit exactly one thought per journey.
+ *
+ * Narration is logged as `llm_thought` so it lands in the same lane as the
+ * model's own reasoning, and carries the model's stated intent (`reason`)
+ * beside live progress. Throttled by wall time so fast macros
+ * (mine_until_full fires several times a minute) cannot flood the lane.
+ */
+function makeMacroNarrator(ctx: ToolContext, macro: string, reason?: string, minIntervalMs = 15_000) {
+  const intent = (reason || '').trim().replace(/\s+/g, ' ').slice(0, 140)
+  let last = 0
+  return (progress: string, force = false): void => {
+    const now = Date.now()
+    if (!force && now - last < minIntervalMs) return
+    last = now
+    ctx.log('llm_thought', intent ? `[${macro} ${progress}] ${intent}` : `[${macro} ${progress}]`)
+  }
+}
+
+async function executeMacroTool(name: string, args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
   try {
     switch (name) {
-      case 'mine_until_full': return await macroMineUntilFull(args, ctx)
-      case 'goto_system': return await macroGotoSystem(args, ctx)
-      case 'sell_cargo': return await macroSellCargo(args, ctx)
+      case 'mine_until_full': return await macroMineUntilFull(args, ctx, reason)
+      case 'goto_system': return await macroGotoSystem(args, ctx, reason)
+      case 'sell_cargo': return await macroSellCargo(args, ctx, reason)
       default: return `Error: unknown macro tool ${name}`
     }
   } catch (err) {
@@ -948,8 +973,9 @@ async function executeMacroTool(name: string, args: Record<string, unknown>, ctx
   }
 }
 
-async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContext): Promise<string> {
+async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
   const conn = ctx.connection
+  const narrate = makeMacroNarrator(ctx, 'mine_until_full', reason)
   // Bounds sized to fill a typical hold in ONE call: ~1 unit per ~10s tick means
   // a 70-slot hold needs ~70 mines / ~12 min (observed live: 30 mines stopped at 60/70).
   const maxMines = Math.min(Number(args.max_mines) || 80, 120)
@@ -986,6 +1012,7 @@ async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContex
     }
     lastUsed = afterUsed
     ctx.log('system', `mine_until_full: ${mines} mines, cargo ${afterUsed}/${after.cargoCapacity ?? '?'}`)
+    narrate(`${mines} mines, cargo ${afterUsed}/${after.cargoCapacity ?? '?'}`)
     await macroSleep(macroStepDelayMs(conn))
   }
 
@@ -994,7 +1021,8 @@ async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContex
   return `mine_until_full DONE: ${mines} mine actions, +${minedUnits} cargo units, cargo now ${end.cargoUsed ?? '?'}/${end.cargoCapacity ?? '?'}. Stopped: ${stopReason}.`
 }
 
-async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext): Promise<string> {
+async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
+  const narrate = makeMacroNarrator(ctx, 'goto_system', reason)
   const conn = ctx.connection
   const target = String(args.target_system || '').toLowerCase().replace(/\s+/g, '_')
   if (!target) return 'MACRO ABORT: target_system is required.'
@@ -1036,6 +1064,7 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext):
       }
       hops++
       ctx.log('system', `goto_system: hop ${hops}/${hopIds.length} → ${hop}`)
+      narrate(`hop ${hops}/${hopIds.length} → ${hop}`, true)
       await macroSleep(macroStepDelayMs(conn))
     }
   }
@@ -1074,7 +1103,8 @@ const SELL_CARGO_ALWAYS_EXCLUDE = new Set([
   'focused_crystal', 'superconductor', 'energy_crystal', 'circuit_board',
 ])
 
-async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext): Promise<string> {
+async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
+  const narrate = makeMacroNarrator(ctx, 'sell_cargo', reason)
   const conn = ctx.connection
   const exclude = new Set(
     (Array.isArray(args.exclude) ? args.exclude : []).map((x) => String(x).toLowerCase()),
@@ -1107,6 +1137,7 @@ async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext): 
       if (remaining < item.quantity) {
         const soldQty = item.quantity - remaining
         sold.push(`${item.item_id} x${soldQty}${remaining > 0 ? ` (${remaining} unsold)` : ''}`)
+        narrate(`sold ${item.item_id} x${soldQty}`)
         // Book the sale in the financial ledger — macro sells bypass the normal
         // per-command booking path in executeTool (observed: a +35K macro sale
         // left no cashflow/transaction rows). Amount = verified credit delta.
