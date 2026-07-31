@@ -204,16 +204,53 @@ Re-seed any time with `seed_ledger.py` (free queries, safe to re-run).
 
 ---
 
+## 7b. Shutdown state — where everyone is parked
+
+All 11 agents safe-docked at stations, all LLM loops stopped, server shut down.
+
+| agent | parked at | credits |
+|---|---|---|
+| Nova Reyes | Krynn / **War Citadel** | 11,993 |
+| Morg'Thar | Krynn / **War Citadel** | **9** ⚠️ |
+| CyberSpock | Krynn / **War Citadel** | 7,158 |
+| Grit Vane | Krynn / **War Citadel** | 41,778 |
+| CyberSapper | Iron Reach / Iron Reach Mining Colony | 18,451 |
+| Ledger Voss | Iron Reach / Iron Reach Mining Colony | 16,698 |
+| Bob Comet | Haven / Grand Exchange | 97,281 |
+| Cass Margin | Alpha Centauri / Colonial Station | 612,988 |
+| Juno Freight | Ironhearth / Ironhearth Station | 413,236 |
+| Vera Lane | Market Prime / Market Prime Exchange | 565,989 |
+| Zibal Prospector | Last Light / Ramen's Rest | 30,770 |
+
+**⚠️ FIRST ACTION ON RESUME — fund Morg.** He is on **9 credits**. He is the vault
+keeper *and* the commissioning agent; he spent down on copper-wire mill batches
+(legitimate — `sensor_array` input for survey scanners). Grit is docked at the
+same station with 41,778. Once connections are back:
+
+```
+send_gift(recipient="Morg'Thar", credits=20000)   # from Grit Vane
+```
+
+This could not be done at shutdown — the game connections had already closed.
+
+Nothing was left exposed at a belt or nebula.
+
 ## 8. Resume checklist
 
 1. `cd C:\dev\admiral` — **this is the live tree**, not the OneDrive path.
 2. `python <scratchpad>/start_admiral.py` (brings up server + reconnects all 11).
-3. Re-seed the ledger: `python seed_ledger.py`.
-4. Verify BoM against the **live** catalog, not this document.
-5. **Nova's haul (§2)** — closes `targeting_computer` → 15/17.
-6. Craft 5 survey scanners (§4) and fit them; that is the real constraint on the
+   Do **not** hand-roll the launcher; it injects three secrets from the registry.
+3. **Fund Morg immediately** (§7b) — he is on 9 credits.
+4. Re-seed the ledger: `python seed_ledger.py`.
+5. Verify BoM against the **live** catalog, not this document.
+6. **Nova's haul (§2)** — closes `targeting_computer` → 15/17.
+7. Craft 5 survey scanners (§4) and fit them; that is the real constraint on the
    polonium hunt.
-7. Resume Operation Deep Vein; reconfirm the autonomy grant.
+8. Resume Operation Deep Vein; reconfirm the autonomy grant.
+
+Merge or close PR #3 (`devastator-endgame-tooling`) before starting new work —
+the branch carries the transfer fix, the storage ledger, and the clerk-auth fix
+that the fleet is now running on.
 
 State file with full history:
 `<scratchpad>/fleet-watch-state-v2.json` → `resume_brief`, `decisions_2026_07_31`.
