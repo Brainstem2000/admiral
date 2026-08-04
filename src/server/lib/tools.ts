@@ -1094,7 +1094,7 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
   const conn = ctx.connection
   const target = String(args.target_system || '').toLowerCase().replace(/\s+/g, '_')
   if (!target) return 'MACRO ABORT: target_system is required.'
-  const dockPoi = args.dock_at_poi ? String(args.dock_at_poi).toLowerCase().replace(/\s+/g, '_') : null
+  let dockPoi = args.dock_at_poi ? String(args.dock_at_poi).toLowerCase().replace(/\s+/g, '_') : null
   // Hops take ~65s of game time each; 12 min covers the fleet's standard 8-10 hop
   // commutes in one call (observed live: 8 min split a 9-hop route into PARTIAL+resume).
   const deadline = Date.now() + 12 * 60_000
@@ -1139,7 +1139,22 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
 
   let dockNote = ''
   if (dockPoi) {
-    const t = await macroAction(conn, 'travel', { target_poi: dockPoi }, 12)
+    let t = await macroAction(conn, 'travel', { target_poi: dockPoi }, 12)
+    // Agents routinely pass the STATION/base id where a POI id is wanted — the
+    // citadel is base `crimson_war_citadel` but POI `war_citadel`, and two agents
+    // burned round trips on it in one session. The empire prefix is the whole
+    // difference, so on a not-found retry once without it rather than stranding
+    // them a hop short of the vault.
+    if (!t.ok && /not_found|no_poi|invalid/i.test(`${t.errorCode ?? ''}`)) {
+      const stripped = dockPoi.replace(/^(crimson|nebula|solarian|voidborn|outerrim)_/, '')
+      if (stripped !== dockPoi) {
+        const retry = await macroAction(conn, 'travel', { target_poi: stripped }, 12)
+        if (retry.ok) {
+          dockPoi = stripped
+          t = retry
+        }
+      }
+    }
     if (t.ok) {
       await macroSleep(macroStepDelayMs(conn))
       const d = await macroAction(conn, 'dock', undefined, 6)
