@@ -25,6 +25,10 @@ import fs from 'fs'
 import path from 'path'
 
 const TURN_INTERVAL = 2000
+/** How often a push-capable agent re-reads get_status purely to refresh its
+ *  wallet. get_status costs no game tick, so this is free; 60s keeps the
+ *  dashboard honest without adding meaningful traffic. */
+const WALLET_REFRESH_MS = 60_000
 const PROMPT_PATH = path.join(process.cwd(), 'prompt.md')
 
 let _promptMd: string | null = null
@@ -50,6 +54,7 @@ export class Agent {
   private pendingNudges: string[] = []
   private _activity: string = 'idle'
   private _gameState: Record<string, unknown> | null = null
+  private lastWalletRefresh = 0
   private _sessionExpired = false
   pendingSafeDock = false
   safeDockTurnsRemaining = 0
@@ -517,6 +522,21 @@ export class Agent {
         // dashboard-facing snapshot for free, no get_status round-trip.
         this._gameState = localState
         this.enrichFactionInfo()
+
+        // ...but that cache only advances on the player's OWN mutation deltas.
+        // Credits arriving from OUTSIDE (gifts, sell-order fills, bounties) never
+        // land in it, so a docked idle agent can report a wallet that is hours
+        // stale — Nova sat on the dashboard showing 29cr while actually holding
+        // 28,874 after an incoming transfer. get_status is a FREE query (no game
+        // tick), so refresh it periodically to keep the wallet honest. Push-capable
+        // connections still take their events from onNotification, not from here.
+        if (Date.now() - this.lastWalletRefresh > WALLET_REFRESH_MS) {
+          this.lastWalletRefresh = Date.now()
+          try {
+            const fresh = await this.connection.execute('get_status')
+            if (!fresh.error) this.cacheGameState(fresh)
+          } catch { /* a stale wallet must never break the turn loop */ }
+        }
       }
       if (!this.connection.supportsNotifications()) {
         this.setActivity('Polling for events...')
