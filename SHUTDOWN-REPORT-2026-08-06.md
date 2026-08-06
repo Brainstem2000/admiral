@@ -172,3 +172,57 @@ profile change when you next commission.
 
 Also noted: the yard fee has drifted again to **1,828,721** (total 1,874,221),
 up 66,216 since this morning — faster than the ~36,000/day I estimated.
+
+
+---
+
+## 9. Actions taken after the changelog review (2026-08-06, post-shutdown)
+
+The game's changelog is at `https://game.spacemolt.com/api/changelog` (JSON, paginated
+— the HTML page at spacemolt.com/changelog is JS-rendered and does not fetch). 400
+releases pulled, 0.370.1 → 0.552.0.
+
+**Wildlife ban LIFTED.** The hard block in `checkDoctrineGuards` is removed. It
+assumed targets do not reliably spawn; 0.536.0 says herds gather where ore/gas is
+still RICH and thin out in mined fields — our agents were hunting stripped belts.
+0.528.0 adds creature concentrates refining into `titanium_alloy`, `superconductor`,
+`focused_crystal`, `silicate_composite` — exactly our shortfalls — and `adamant_tooth`
+(8 needed for the mass drivers) drops from an adamant-grinder. A HUNTING DOCTRINE
+block with proper technique is now on all 11 agents.
+
+**@spacemolt/lib is already the latest published version (12.1.0).** There is no
+upgrade available, so the lib_v2 error-parsing gap cannot be closed that way.
+**Morg has therefore been switched to `http_v2`** — he is the commissioning agent and
+must see real `missing_materials` errors rather than `Malformed action_error frame`.
+Losing push notifications on one stationary agent costs effectively nothing.
+
+**Code committed** to branch `inventory-accounting` (commit cd4c314). Working tree
+still has stray JSON artifacts and `admiral.backup.exe` from earlier sessions —
+untracked, not committed, safe to delete.
+
+### Changelog findings still unactioned — for next session
+
+* **0.550.0 — facility rent at NPC stations now covers the whole station running
+  cost**, not just power and life support, and is still climbing (capped 50%/day).
+  "Check `rent_per_cycle` before committing to a long build." **This directly changes
+  the Enhanced Driver Workshop economics and must be checked before spending 1.1M.**
+* **0.463.0 — mining respects deposit density.** `get_poi` returns `supported_power`
+  per deposit; total fitted mining power above it is CAPPED, and depleted nodes throw
+  `deposit_too_sparse`. No agent has ever read this field. Grit runs laser III (22) +
+  rad harvester (8) = 30 total. Deposits also regenerate (common ~1 week, rare 2-3
+  days), so Goldcrest and Bunda refill — spread out rather than queue on one spot.
+* **0.530.0 — `get_action_log` `event_type` accepts an ARRAY**, and the response
+  carries `next_since_id`. Our ingestion makes one call per category and computes the
+  cursor by hand; both could be tightened.
+* **0.498.0 — `yard_margin` is refunded in full on cancel**, and the "sourcing" state
+  belongs to the CREDITS-ONLY path (the yard buys your materials). That is why
+  `provide_materials=true` is all-or-none.
+
+### Recommended opening for next session — all free queries, no ticks
+
+1. `rent_per_cycle` at War Citadel — gates the 1,125,000cr workshop decision.
+2. `supported_power` on Bunda Belt and Goldcrest — are we mining at a capped rate?
+3. Market sweep from Sol for `piercing_railgun_ii`, `mass_driver`, `adamantite_bar`,
+   `adamant_tooth`.
+4. `get_nearby` at a RICH belt to confirm creatures actually spawn before committing
+   anyone to the hunting route.
