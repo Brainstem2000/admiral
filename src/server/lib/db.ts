@@ -369,6 +369,46 @@ function migrate(db: Database): void {
     );
   `)
 
+  // Fleet-wide storage ledger: what each agent holds at each station.
+  //
+  // The directives make every agent keep a prose STORAGE LEDGER in memory, but
+  // prose drifts — Nova's Confederacy Central Command depot (1,148 nickel ore,
+  // 263 iron ore, a spare mining laser, 3 parked ships) sat forgotten while the
+  // fleet hunted the same materials elsewhere. This table is the machine-kept
+  // version: every view_storage response any agent makes updates it, so it costs
+  // no extra game calls and can never disagree with what the game actually said.
+  //
+  // A snapshot REPLACES that (profile, station) pair wholesale rather than
+  // merging — an item absent from a fresh read is genuinely gone, and merging
+  // would resurrect it forever.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS storage_inventory (
+      profile_id TEXT NOT NULL,
+      station_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      item_name TEXT DEFAULT '',
+      quantity INTEGER NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (profile_id, station_id, item_id),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_stinv_item ON storage_inventory(item_id);
+    CREATE INDEX IF NOT EXISTS idx_stinv_station ON storage_inventory(station_id);
+
+    CREATE TABLE IF NOT EXISTS storage_ships (
+      profile_id TEXT NOT NULL,
+      station_id TEXT NOT NULL,
+      ship_id TEXT NOT NULL,
+      class TEXT DEFAULT '',
+      custom_name TEXT DEFAULT '',
+      module_count INTEGER DEFAULT 0,
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (profile_id, station_id, ship_id),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_stships_station ON storage_ships(station_id);
+  `)
+
   // Agent schedules for cron-like automation
   db.exec(`
     CREATE TABLE IF NOT EXISTS schedules (
@@ -835,6 +875,71 @@ export function getSellQuota(profileId: string, itemId: string): number | null {
 export function decrementSellQuota(profileId: string, itemId: string, quantity: number): void {
   db.query('UPDATE sell_quotas SET remaining = MAX(0, remaining - ?), updated_at = datetime(\'now\') WHERE profile_id = ? AND item_id = ?')
     .run(quantity, profileId, itemId)
+}
+
+// ── Storage ledger ────────────────────────────────────────────────────────────
+
+export interface StorageItem { item_id: string; item_name?: string; quantity: number }
+export interface StorageShip { ship_id: string; class?: string; custom_name?: string; module_count?: number }
+export interface StorageRow extends StorageItem { profile_id: string; station_id: string; updated_at: string }
+
+/**
+ * Replace this agent's recorded holdings at one station with a fresh snapshot.
+ * Wholesale replace, not merge: an item missing from a new read has actually
+ * left the station, and merging would keep it on the books forever.
+ */
+export function recordStorageSnapshot(
+  profileId: string,
+  stationId: string,
+  items: StorageItem[],
+  ships: StorageShip[] = [],
+): void {
+  const tx = db.transaction(() => {
+    db.query('DELETE FROM storage_inventory WHERE profile_id = ? AND station_id = ?').run(profileId, stationId)
+    const ins = db.query(`INSERT INTO storage_inventory (profile_id, station_id, item_id, item_name, quantity)
+      VALUES (?, ?, ?, ?, ?)`)
+    for (const it of items) {
+      if (!it.item_id || !(it.quantity > 0)) continue
+      ins.run(profileId, stationId, it.item_id, it.item_name ?? '', it.quantity)
+    }
+    db.query('DELETE FROM storage_ships WHERE profile_id = ? AND station_id = ?').run(profileId, stationId)
+    const insShip = db.query(`INSERT INTO storage_ships (profile_id, station_id, ship_id, class, custom_name, module_count)
+      VALUES (?, ?, ?, ?, ?, ?)`)
+    for (const s of ships) {
+      if (!s.ship_id) continue
+      insShip.run(profileId, stationId, s.ship_id, s.class ?? '', s.custom_name ?? '', s.module_count ?? 0)
+    }
+  })
+  tx()
+}
+
+/** Everything one agent holds, newest-read first. Omit stationId for all stations. */
+export function getStorageForProfile(profileId: string, stationId?: string): StorageRow[] {
+  const sql = stationId
+    ? 'SELECT * FROM storage_inventory WHERE profile_id = ? AND station_id = ? ORDER BY station_id, item_id'
+    : 'SELECT * FROM storage_inventory WHERE profile_id = ? ORDER BY station_id, item_id'
+  const args = stationId ? [profileId, stationId] : [profileId]
+  return db.query(sql).all(...args) as StorageRow[]
+}
+
+/** Who in the fleet holds this item, and where. The "find my gas harvester" query. */
+export function findItemAcrossFleet(itemId: string): StorageRow[] {
+  return db.query(`SELECT * FROM storage_inventory WHERE item_id = ? AND quantity > 0
+    ORDER BY quantity DESC`).all(itemId) as StorageRow[]
+}
+
+/** Fleet-wide total per item across every agent and station. */
+export function getFleetItemTotals(): Array<{ item_id: string; total: number; locations: number }> {
+  return db.query(`SELECT item_id, SUM(quantity) AS total, COUNT(*) AS locations
+    FROM storage_inventory WHERE quantity > 0 GROUP BY item_id ORDER BY total DESC`)
+    .all() as Array<{ item_id: string; total: number; locations: number }>
+}
+
+export function getStorageShips(profileId?: string): Array<Record<string, unknown>> {
+  const sql = profileId
+    ? 'SELECT * FROM storage_ships WHERE profile_id = ? ORDER BY station_id'
+    : 'SELECT * FROM storage_ships ORDER BY profile_id, station_id'
+  return (profileId ? db.query(sql).all(profileId) : db.query(sql).all()) as Array<Record<string, unknown>>
 }
 
 export function setSellQuota(profileId: string, itemId: string, remaining: number): void {

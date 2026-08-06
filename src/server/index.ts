@@ -11,6 +11,7 @@ import commands from './routes/commands'
 import preferences from './routes/preferences'
 import galaxy from './routes/galaxy'
 import fleetIntel from './routes/fleet-intel'
+import inventory from './routes/inventory'
 import analytics from './routes/analytics'
 import schedules from './routes/schedules'
 import codexRoutes from './routes/codex'
@@ -59,6 +60,7 @@ app.route('/api/commands', commands)
 app.route('/api/preferences', preferences)
 app.route('/api/galaxy', galaxy)
 app.route('/api/fleet-intel', fleetIntel)
+app.route('/api/inventory', inventory)
 app.route('/api/analytics', analytics)
 app.route('/api/schedules', schedules)
 app.route('/api/codex', codexRoutes)

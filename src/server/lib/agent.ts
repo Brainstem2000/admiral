@@ -11,7 +11,7 @@ import { LibV2Connection } from './connections/lib_v2'
 import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
-import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards } from './tools'
+import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
@@ -192,10 +192,15 @@ export class Agent {
       checkEventTriggers(this.profileId, n as Record<string, unknown>).catch(() => {})
     })
 
-    // Login if credentials exist
-    if (profile.username && profile.password) {
+    // Login if we have ANY way to authenticate. A Clerk API key is sufficient on
+    // its own — it mints a fresh WS token from the username alone, no password
+    // involved (see LibV2Connection.login). Gating on `password` too meant a
+    // clerk-owned character with no stored password silently skipped login
+    // entirely: the loop then started UNAUTHENTICATED, the LLM saw a blank slate
+    // and tried to `register` its own username, which fails as username_taken.
+    if (profile.username && (profile.password || process.env.SPACEMOLT_CLERK_API_KEY)) {
       this.log('connection', `Logging in as ${profile.username}...`)
-      const result = await this.connection.login(profile.username, profile.password)
+      const result = await this.connection.login(profile.username, profile.password ?? '')
       if (result.success) {
         this.log('connection', `Logged in as ${profile.username}`)
       } else {
@@ -668,6 +673,11 @@ export class Agent {
         command,
         (result as { structuredContent?: unknown }).structuredContent ?? result.result,
         getProfile(this.profileId)?.name ?? 'manual',
+      )
+      recordStorageFromCommand(
+        command,
+        (result as { structuredContent?: unknown }).structuredContent ?? result.result,
+        this.profileId,
       )
     } catch { /* intel capture must never break command execution */ }
 

@@ -1,6 +1,7 @@
 import { Account, ACTIONS, ClerkSource, GENERATED_SPEC_VERSION, SpacemoltError } from '@spacemolt/lib'
 import type { AuthCredentials } from '@spacemolt/lib'
 import type { GameConnection, LoginResult, RegisterResult, CommandResult, NotificationHandler } from './interface'
+import { USER_AGENT } from './interface'
 
 /**
  * Connection backed by the official @spacemolt/lib WebSocket-v2 client.
@@ -46,6 +47,27 @@ const LEGACY_ALIASES: Record<string, Route> = {
   faction_deposit_items: { tool: 'spacemolt_storage', action: 'deposit' },
   faction_withdraw_items: { tool: 'spacemolt_storage', action: 'withdraw' },
 }
+
+/**
+ * Commands that exist on the live REST v1 server but have NO route in the lib's
+ * generated WS catalog. They reach the game through executeViaRest(), so they
+ * must also be advertised in getCommandList() — otherwise the LLM never learns
+ * they exist and the fallback is dead code.
+ *
+ * Keep this list minimal and re-check it whenever @spacemolt/lib is upgraded: an
+ * entry that gains a real WS route should be deleted (the route index wins, and
+ * a stale line here would just duplicate it in the prompt).
+ */
+const REST_ONLY_COMMANDS: Array<{ name: string; params: string; summary: string }> = [
+  {
+    name: 'send_gift',
+    params: 'recipient: string, item_id?: string, quantity?: number, credits?: number, ship_id?: string, source?: string, message?: string',
+    summary:
+      'Gift credits, items, or a ship to another player/empire/faction. recipient = username, player id, empire alias, or "faction:TAG". ' +
+      'Provide EXACTLY ONE of item_id+quantity / credits / ship_id. source="storage" gifts items straight from your station storage (default "cargo"). ' +
+      'Item and credit gifts require YOU to be docked at a base with storage service, but the recipient does NOT need to be online, docked, or anywhere near you — delivery is async. Ships transfer remotely from wherever they are parked.',
+  },
+]
 
 /** Reverse index: flat command name -> (tool, action). Built once per process. */
 let routeIndex: Map<string, Route> | null = null
@@ -93,6 +115,12 @@ export class LibV2Connection implements GameConnection {
   private queryCredits: number | null = null
   private connected = false
   private offAny: (() => void) | null = null
+  /** Password-backed REST session for the v1 fallback (see executeViaRest).
+   *  Clerk auth is WS-only — the REST API accepts an X-Session-Id obtained from
+   *  POST /session + POST /login, so the fallback keeps its own session. */
+  private restCreds: { username: string; password: string } | null = null
+  private restSession: { id: string; expires_at?: string } | null = null
+  private restSessionPromise: Promise<void> | null = null
 
   constructor(serverUrl: string) {
     this.httpBaseUrl = serverUrl.replace(/\/$/, '')
@@ -119,6 +147,10 @@ export class LibV2Connection implements GameConnection {
 
   async login(username: string, password: string): Promise<LoginResult> {
     if (!this.account) return { success: false, error: 'not connected' }
+
+    // Keep the password for the REST v1 fallback even when clerk auth wins below
+    // — the fallback cannot use clerk credentials (WS-only).
+    if (password) this.restCreds = { username, password }
 
     // Preferred path: a Clerk API key in the environment. The key mints a fresh
     // single-use WS token per (re)connect — no game password is used or stored
@@ -165,6 +197,7 @@ export class LibV2Connection implements GameConnection {
     try {
       const result = await this.account.register({ username, empire, registration_code: code })
       this.authCreds = { kind: 'login', username, password: result.password }
+      this.restCreds = { username, password: result.password }
       // register() alone never sets the lib's `authenticated` flag, which gates
       // isConnected() and getLocalState() — a freshly registered agent played
       // fine but showed disconnected with no credits on the dashboard (Cass
@@ -190,6 +223,16 @@ export class LibV2Connection implements GameConnection {
     }
     const route = buildRouteIndex().get(command)
     if (!route) {
+      // The lib's catalog is generated against a pinned spec that can lag the
+      // live server (v0.547.0 lib vs v0.549.1 server as of 2026-07-31), so real
+      // server commands can have no WS route at all — `send_gift` is the one
+      // that matters: its absence took cross-agent credit/material transfer
+      // down fleet-wide, since trade_offer needs both players at the same POI.
+      // Fall back to the REST v1 endpoint before declaring the command unknown.
+      if (this.restCreds) {
+        const viaRest = await this.executeViaRest(command, args)
+        if (viaRest) return viaRest
+      }
       return {
         error: {
           code: 'unknown_command',
@@ -239,6 +282,116 @@ export class LibV2Connection implements GameConnection {
     }
   }
 
+  /**
+   * Establish (or reuse) a REST v1 session: POST /session for a session id, then
+   * POST /login to bind this player to it. Concurrent callers coalesce onto one
+   * in-flight attempt so a burst of fallback commands can't open N sessions.
+   */
+  private async ensureRestSession(): Promise<void> {
+    // Sessions last ~30 min; re-mint just before expiry so a long-idle agent's
+    // first gift doesn't have to burn a 401 round-trip to discover it lapsed.
+    if (this.restSession && !this.isRestSessionExpiring()) return
+    if (this.restSession) this.restSession = null
+    if (!this.restSessionPromise) {
+      this.restSessionPromise = this.createRestSession().finally(() => {
+        this.restSessionPromise = null
+      })
+    }
+    return this.restSessionPromise
+  }
+
+  private isRestSessionExpiring(): boolean {
+    const exp = this.restSession?.expires_at
+    if (!exp) return false // server didn't say; rely on the 401 retry path
+    const t = new Date(exp).getTime()
+    return Number.isNaN(t) || t - Date.now() < 60_000
+  }
+
+  private async createRestSession(): Promise<void> {
+    if (!this.restCreds) throw new Error('no REST credentials')
+    const headers = { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT }
+    const sResp = await fetch(`${this.httpBaseUrl}/api/v1/session`, { method: 'POST', headers })
+    if (!sResp.ok) throw new Error(`session ${sResp.status}`)
+    const sData = await sResp.json() as { session?: { id: string; expires_at?: string } }
+    if (!sData.session?.id) throw new Error('no session in response')
+
+    const lResp = await fetch(`${this.httpBaseUrl}/api/v1/login`, {
+      method: 'POST',
+      headers: { ...headers, 'X-Session-Id': sData.session.id },
+      body: JSON.stringify(this.restCreds),
+    })
+    const lData = await lResp.json().catch(() => ({})) as { error?: { message?: string } }
+    if (!lResp.ok || lData.error) {
+      throw new Error(`login failed: ${lData.error?.message ?? lResp.status}`)
+    }
+    this.restSession = sData.session
+  }
+
+  /**
+   * Run one command against the REST v1 API. Returns null when the server has no
+   * such endpoint (404) so the caller can report `unknown_command` truthfully.
+   *
+   * Retry policy mirrors the bounded-retry invariant: a session that is rejected
+   * up front (401 / session_invalid) is re-minted and the call retried EXACTLY
+   * once. Any other failure is surfaced as-is — a mutation that may already have
+   * executed is never replayed.
+   */
+  private async executeViaRest(
+    command: string,
+    args?: Record<string, unknown>,
+    isRetry = false,
+  ): Promise<CommandResult | null> {
+    try {
+      await this.ensureRestSession()
+    } catch (err) {
+      return { error: { code: 'connection_failed', message: `REST fallback auth failed: ${err instanceof Error ? err.message : String(err)}` } }
+    }
+
+    let resp: Response
+    try {
+      resp = await fetch(`${this.httpBaseUrl}/api/v1/${command}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': USER_AGENT,
+          'X-Session-Id': this.restSession!.id,
+        },
+        body: JSON.stringify(args ?? {}),
+      })
+    } catch (err) {
+      return { error: { code: 'connection_failed', message: err instanceof Error ? err.message : String(err) } }
+    }
+
+    if (resp.status === 404) return null // not a server command either
+
+    if (resp.status === 401 && !isRetry) {
+      this.restSession = null
+      return this.executeViaRest(command, args, true)
+    }
+
+    const data = await resp.json().catch(() => null) as (CommandResult & { session?: { id: string; expires_at?: string } }) | null
+    if (!data) return { error: { code: 'http_error', message: `HTTP ${resp.status}` } }
+    // Responses carry a refreshed session — keep the newer expiry.
+    if (data.session?.id) this.restSession = data.session
+
+    if (data.error && (data.error.code === 'session_invalid' || data.error.code === 'not_authenticated') && !isRetry) {
+      this.restSession = null
+      return this.executeViaRest(command, args, true)
+    }
+
+    // A REST mutation changed server-side state the WS state cache knows nothing
+    // about (credits sent, items moved). Drop the query-credits override so the
+    // next query re-reads truth rather than serving a pre-gift number.
+    if (!data.error) this.queryCredits = null
+
+    if (Array.isArray(data.notifications)) {
+      for (const n of data.notifications) {
+        for (const handler of this.notificationHandlers) handler(n)
+      }
+    }
+    return data
+  }
+
   onNotification(handler: NotificationHandler): void {
     this.notificationHandlers.push(handler)
   }
@@ -250,6 +403,8 @@ export class LibV2Connection implements GameConnection {
     this.account?.close()
     this.account = null
     this.connected = false
+    this.restSession = null
+    this.restCreds = null
   }
 
   isConnected(): boolean {
@@ -291,10 +446,18 @@ export class LibV2Connection implements GameConnection {
       const kind = def.kind === 'mutation' ? 'action' : 'query'
       lines.push(`- ${def.action}(${params}) [${kind}] — ${def.summary}`)
     }
+    // REST-v1-only commands (no WS route in this lib build) — see REST_ONLY_COMMANDS.
+    const routes = buildRouteIndex()
+    for (const c of REST_ONLY_COMMANDS) {
+      if (routes.has(c.name)) continue // lib caught up; the real route already listed it
+      lines.push(`- ${c.name}(${c.params}) [action] — ${c.summary}`)
+    }
     return lines.join('\n')
   }
 
   get commandCount(): number {
-    return Object.keys(ACTIONS).length
+    const routes = buildRouteIndex()
+    const extra = REST_ONLY_COMMANDS.filter((c) => !routes.has(c.name)).length
+    return Object.keys(ACTIONS).length + extra
   }
 }
