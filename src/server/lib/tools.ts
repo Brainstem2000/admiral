@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -244,15 +244,28 @@ export interface ToolContext {
  * with what the game actually reported.
  */
 export function recordStorageFromCommand(command: string, data: unknown, profileId: string): void {
-  const bare = command.replace(/^spacemolt_/, '').replace(/^storage_/, '')
-  if (bare !== 'view_storage' && !bare.endsWith('_view_storage')) return
   const sc = data as {
+    action?: string
     base_id?: string
     items?: Array<{ item_id?: string; name?: string; quantity?: number }>
     ships?: Array<{ ship_id?: string; class_id?: string; custom_name?: string; modules?: number }>
   } | null
+  // Match on what the GAME says it did, not on what we were called.
+  //
+  // This gate used to test the command name only, and it never once fired in
+  // production: agents reach storage through `view(target=storage)`, not
+  // `view_storage`. 54 calls to the former and 0 to the latter in a single day,
+  // so every row in the ledger came from manual refreshes and the table silently
+  // rotted for days. The response payload always carries `action: view_storage`
+  // whichever spelling was used, so trust that and keep the name check only as a
+  // fallback for responses that omit it.
+  const bare = command.replace(/^spacemolt_/, '').replace(/^storage_/, '')
+  const byName = bare === 'view_storage' || bare.endsWith('_view_storage')
+  if (sc?.action !== 'view_storage' && !byName) return
   const station = sc?.base_id
   if (!station || !Array.isArray(sc?.items)) return // shape we don't recognise — record nothing
+  // A real snapshot supersedes any "we know something moved but not where" flag.
+  clearStorageDirty(profileId)
   recordStorageSnapshot(
     profileId,
     station,
@@ -270,21 +283,54 @@ export function recordStorageFromCommand(command: string, data: unknown, profile
   )
 }
 
+/**
+ * Mirror any cargo-bearing response into the DB cargo ledger.
+ *
+ * Station storage alone is blind to everything in flight. A hauler carrying 200
+ * thorium between systems showed as owning nothing, so the fleet re-mined
+ * material it was already carrying and deliveries appeared to arrive from
+ * nowhere. `get_cargo` and `get_ship` are FREE queries agents run constantly, so
+ * this stays warm at zero tick cost.
+ */
+export function recordCargoFromCommand(command: string, data: unknown, profileId: string): void {
+  const sc = data as {
+    action?: string
+    cargo?: Array<{ item_id?: string; name?: string; quantity?: number }>
+    ship?: { id?: string }
+  } | null
+  if (!Array.isArray(sc?.cargo)) return // no cargo block — not a response we can use
+  const bare = command.replace(/^spacemolt_/, '').replace(/^ship_/, '')
+  const looksRight =
+    sc?.action === 'get_cargo' || sc?.action === 'get_ship' ||
+    bare === 'get_cargo' || bare === 'get_ship' || bare === 'view' ||
+    bare.endsWith('_get_cargo') || bare.endsWith('_get_ship')
+  if (!looksRight) return
+  recordCargoSnapshot(
+    profileId,
+    sc.cargo
+      .filter((i) => i?.item_id && typeof i.quantity === 'number')
+      .map((i) => ({ item_id: i.item_id!, item_name: i.name ?? '', quantity: i.quantity! })),
+    sc.ship?.id ?? '',
+  )
+}
+
 export function checkDoctrineGuards(
   command: string,
   commandArgs: Record<string, unknown> | undefined,
   profileId: string,
 ): string | null {
-  // Wildlife/creature-hunt missions: targets do not reliably spawn.
-  {
-    const bare = command.replace(/^spacemolt_/, '').replace(/^mission_/, '')
-    if (bare === 'accept_mission' || bare.endsWith('_accept_mission')) {
-      const idStr = `${commandArgs?.mission_id ?? ''} ${commandArgs?.template_id ?? ''} ${commandArgs?.id ?? ''}`.toLowerCase()
-      if (/grazer|leviathan|first_hunt|wildlife|creature|cull/.test(idStr)) {
-        return 'BLOCKED by Admiral doctrine: wildlife/creature-hunt missions are banned fleet-wide (targets do not reliably spawn; multiple agents wasted hours). Choose a delivery, courier, or pirate-bounty mission instead.'
-      }
-    }
-  }
+  // Wildlife hunts: LIFTED 2026-08-06. The original ban assumed targets did not
+  // reliably spawn. The changelog says otherwise — herds gather where the ore or
+  // gas is still RICH and thin out in mined-over fields (0.536.0), so agents were
+  // hunting exhausted belts and blaming the game. Creature drops now also refine
+  // into titanium_alloy, superconductor, focused_crystal and silicate_composite
+  // (0.528.0) — precisely the lines the Devastator is short of — and adamant_tooth
+  // comes off an adamant-grinder, which is the cheap route to the mass drivers.
+  //
+  // The block is simply gone — the failure mode was method, not the feature.
+  // Technique guidance lives in the HUNTING DOCTRINE directive block instead:
+  // find herds with get_nearby in RICH fields, scan before engaging, and do not
+  // hunt a belt you have already mined thin.
 
   // Jettison: nothing with a bid is worthless.
   {
@@ -677,6 +723,7 @@ export async function executeTool(
         FleetIntelCollector.processCommandResult(command, resultData, ctx.profileName)
         if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
         recordStorageFromCommand(command, resultData, ctx.profileId)
+        recordCargoFromCommand(command, resultData, ctx.profileId)
       } catch { /* never break game execution */ }
       // Invalidate briefing cache — action changed game state; trigger async refresh
       invalidateBriefingCache(ctx.profileId, ctx.connection)
@@ -689,6 +736,7 @@ export async function executeTool(
       FleetIntelCollector.processCommandResult(command, resultData, ctx.profileName)
       if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
       recordStorageFromCommand(command, resultData, ctx.profileId)
+      recordCargoFromCommand(command, resultData, ctx.profileId)
     } catch { /* never break game execution */ }
 
     // Book credit movements from the resolved result — ONLY here, on the resolved success
@@ -1178,6 +1226,12 @@ const SELL_CARGO_ALWAYS_EXCLUDE = new Set([
   'capital_ship_frame', 'armor_plate', 'power_distribution_grid', 'reinforced_bulkhead',
   'crimson_siege_plating', 'crimson_ordnance_bay', 'railgun_capacitor', 'fury_crystal',
   'iron_ore', 'titanium_ore', 'titanium_alloy', 'steel_plate', 'fury_cannon',
+  // Enhanced Driver Workshop feedstock. Added 2026-08-05 after agents sold the very
+  // ore the build needs — 64 sell events in 90 min — because the funding mandate
+  // asked for credits. Fleet iron stayed flat near 12,000 while Morg bought steel
+  // plate back at 150 against a base value of 18. An 8x loss per unit, in a loop.
+  'copper_ore', 'copper_wiring', 'copper_piping', 'vanadium_ore', 'tungsten_ore',
+  'tungsten_rod', 'control_node', 'barrel_assembly',
   'piercing_railgun_ii', 'railgun_ii', 'mass_driver', 'crimson_berserker_plating', 'darksteel_armor',
   'reactive_armor_hardener', // required x1 by the live commission quote (2026-07-19) — was missing from the original 28
   // Crafting inputs for open BoM lines (emitter + hull_plating chains). Doctrine

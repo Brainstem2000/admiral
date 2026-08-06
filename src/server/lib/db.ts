@@ -407,6 +407,60 @@ function migrate(db: Database): void {
       FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_stships_station ON storage_ships(station_id);
+
+    -- Ship holds. Storage alone loses sight of everything in transit: a hauler
+    -- carrying 200 thorium between systems showed as owning nothing, so deliveries
+    -- appeared to materialise out of nowhere and the fleet repeatedly re-mined
+    -- material it was already carrying. One row set per profile (an agent flies one
+    -- ship at a time); replaced wholesale like the storage snapshot.
+    CREATE TABLE IF NOT EXISTS cargo_inventory (
+      profile_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      item_name TEXT DEFAULT '',
+      quantity INTEGER NOT NULL,
+      ship_id TEXT DEFAULT '',
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (profile_id, item_id),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_cargo_item ON cargo_inventory(item_id);
+
+    -- Mirror of the game's own action log. Snapshots are only true at the instant
+    -- they are read; this is the event stream between them. Reconciliation against
+    -- live truth showed 89.7% snapshot accuracy, and most of the miss was simply
+    -- age — a transfer six minutes old already made the ledger wrong.
+    CREATE TABLE IF NOT EXISTS action_events (
+      profile_id TEXT NOT NULL,
+      event_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      category TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      data TEXT NOT NULL DEFAULT '{}',
+      PRIMARY KEY (profile_id, event_id),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_evt_created ON action_events(created_at);
+    CREATE INDEX IF NOT EXISTS idx_evt_type ON action_events(event_type);
+
+    -- Per (agent, category) high-water mark so ingestion is incremental.
+    CREATE TABLE IF NOT EXISTS action_cursor (
+      profile_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      last_event_id INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (profile_id, category)
+    );
+
+    -- Storage events (deposit/withdraw) carry NO station id, and Admiral has no
+    -- position history to place them with. Rather than guess a station and be
+    -- silently wrong, we mark the agent's storage dirty and let the next
+    -- view_storage settle it. Honest staleness beats confident fiction.
+    CREATE TABLE IF NOT EXISTS storage_dirty (
+      profile_id TEXT NOT NULL,
+      reason TEXT DEFAULT '',
+      since TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (profile_id)
+    );
   `)
 
   // Agent schedules for cron-like automation
@@ -922,17 +976,142 @@ export function getStorageForProfile(profileId: string, stationId?: string): Sto
   return db.query(sql).all(...args) as StorageRow[]
 }
 
-/** Who in the fleet holds this item, and where. The "find my gas harvester" query. */
-export function findItemAcrossFleet(itemId: string): StorageRow[] {
-  return db.query(`SELECT * FROM storage_inventory WHERE item_id = ? AND quantity > 0
-    ORDER BY quantity DESC`).all(itemId) as StorageRow[]
+/**
+ * Replace one agent's ship hold. Like the storage snapshot this REPLACES rather
+ * than merges — an item absent from a fresh read has been sold, deposited or
+ * spent, and merging would resurrect it forever.
+ */
+export function recordCargoSnapshot(profileId: string, items: StorageItem[], shipId = ''): void {
+  const tx = db.transaction(() => {
+    db.query('DELETE FROM cargo_inventory WHERE profile_id = ?').run(profileId)
+    const ins = db.query(`INSERT INTO cargo_inventory (profile_id, item_id, item_name, quantity, ship_id)
+      VALUES (?, ?, ?, ?, ?)`)
+    for (const it of items) {
+      if (!it.item_id || !(it.quantity > 0)) continue
+      ins.run(profileId, it.item_id, it.item_name ?? '', it.quantity, shipId)
+    }
+  })
+  tx()
 }
 
-/** Fleet-wide total per item across every agent and station. */
-export function getFleetItemTotals(): Array<{ item_id: string; total: number; locations: number }> {
-  return db.query(`SELECT item_id, SUM(quantity) AS total, COUNT(*) AS locations
-    FROM storage_inventory WHERE quantity > 0 GROUP BY item_id ORDER BY total DESC`)
-    .all() as Array<{ item_id: string; total: number; locations: number }>
+export interface ActionEvent {
+  event_id: number
+  created_at: string
+  category: string
+  event_type: string
+  data: Record<string, unknown>
+}
+
+/**
+ * Insert events idempotently (PK collision = already seen).
+ *
+ * Returns the event_ids that were genuinely NEW. Callers apply ledger deltas from
+ * this list and nothing else — deriving "which were new" from a count and array
+ * order silently double-counts the moment the feed returns anything out of order.
+ */
+export function recordActionEvents(profileId: string, category: string, events: ActionEvent[]): number[] {
+  const inserted: number[] = []
+  const tx = db.transaction(() => {
+    const ins = db.query(`INSERT OR IGNORE INTO action_events
+      (profile_id, event_id, created_at, category, event_type, data) VALUES (?, ?, ?, ?, ?, ?)`)
+    let maxId = 0
+    for (const e of events) {
+      if (!Number.isFinite(e.event_id)) continue
+      const r = ins.run(profileId, e.event_id, e.created_at ?? '', category,
+        e.event_type ?? '?', JSON.stringify(e.data ?? {}))
+      if (r.changes > 0) inserted.push(e.event_id)
+      if (e.event_id > maxId) maxId = e.event_id
+    }
+    if (maxId > 0) {
+      db.query(`INSERT INTO action_cursor (profile_id, category, last_event_id) VALUES (?, ?, ?)
+        ON CONFLICT(profile_id, category) DO UPDATE SET
+          last_event_id = MAX(last_event_id, excluded.last_event_id), updated_at = datetime('now')`)
+        .run(profileId, category, maxId)
+    }
+  })
+  tx()
+  return inserted
+}
+
+export function getActionCursor(profileId: string, category: string): number {
+  const r = db.query('SELECT last_event_id FROM action_cursor WHERE profile_id = ? AND category = ?')
+    .get(profileId, category) as { last_event_id?: number } | undefined
+  return r?.last_event_id ?? 0
+}
+
+/** Events for one agent after a timestamp, oldest first — the snapshot overlay. */
+export function getEventsSince(profileId: string, sinceIso: string): ActionEvent[] {
+  const rows = db.query(`SELECT event_id, created_at, category, event_type, data
+    FROM action_events WHERE profile_id = ? AND created_at > ? ORDER BY event_id ASC`)
+    .all(profileId, sinceIso) as Array<Record<string, string | number>>
+  return rows.map(r => ({
+    event_id: Number(r.event_id), created_at: String(r.created_at),
+    category: String(r.category), event_type: String(r.event_type),
+    data: JSON.parse(String(r.data)) as Record<string, unknown>,
+  }))
+}
+
+export function markStorageDirty(profileId: string, reason: string): void {
+  db.query(`INSERT INTO storage_dirty (profile_id, reason) VALUES (?, ?)
+    ON CONFLICT(profile_id) DO UPDATE SET reason = excluded.reason`).run(profileId, reason)
+}
+
+export function clearStorageDirty(profileId: string): void {
+  db.query('DELETE FROM storage_dirty WHERE profile_id = ?').run(profileId)
+}
+
+export function getStorageDirty(): Array<{ profile_id: string; reason: string; since: string }> {
+  return db.query('SELECT * FROM storage_dirty').all() as
+    Array<{ profile_id: string; reason: string; since: string }>
+}
+
+/** Item-movement history for one item, newest first — "where did it all go". */
+export function getItemHistory(itemId: string, limit = 60): Array<Record<string, unknown>> {
+  return db.query(`SELECT profile_id, created_at, event_type, data FROM action_events
+    WHERE data LIKE ? ORDER BY event_id DESC LIMIT ?`)
+    .all(`%"${itemId}"%`, limit) as Array<Record<string, unknown>>
+}
+
+/** What one agent is currently carrying. */
+export function getCargoForProfile(profileId: string): StorageRow[] {
+  return db.query(`SELECT profile_id, '(cargo)' AS station_id, item_id, item_name, quantity, updated_at
+    FROM cargo_inventory WHERE profile_id = ? ORDER BY item_id`).all(profileId) as StorageRow[]
+}
+
+/**
+ * Who in the fleet holds this item, and where — station storage AND ship holds.
+ *
+ * `station_id` is '(cargo)' for a ship hold. Callers that care whether an item is
+ * actually usable must check this: crafting and supply_commission pull only from
+ * the acting agent's own storage at that one station, so a fleet-wide total is
+ * not the same as an actionable quantity.
+ */
+export function findItemAcrossFleet(itemId: string): StorageRow[] {
+  return db.query(`
+    SELECT profile_id, station_id, item_id, item_name, quantity, updated_at
+      FROM storage_inventory WHERE item_id = ? AND quantity > 0
+    UNION ALL
+    SELECT profile_id, '(cargo)' AS station_id, item_id, item_name, quantity, updated_at
+      FROM cargo_inventory WHERE item_id = ? AND quantity > 0
+    ORDER BY quantity DESC`).all(itemId, itemId) as StorageRow[]
+}
+
+/** Fleet-wide total per item across every agent, station and ship hold. */
+export function getFleetItemTotals(): Array<{
+  item_id: string; total: number; locations: number; in_cargo: number
+}> {
+  return db.query(`
+    SELECT item_id,
+           SUM(quantity)                       AS total,
+           COUNT(*)                            AS locations,
+           SUM(CASE WHEN src = 'cargo' THEN quantity ELSE 0 END) AS in_cargo
+      FROM (
+        SELECT item_id, quantity, 'store' AS src FROM storage_inventory WHERE quantity > 0
+        UNION ALL
+        SELECT item_id, quantity, 'cargo' AS src FROM cargo_inventory   WHERE quantity > 0
+      )
+     GROUP BY item_id ORDER BY total DESC`)
+    .all() as Array<{ item_id: string; total: number; locations: number; in_cargo: number }>
 }
 
 export function getStorageShips(profileId?: string): Array<Record<string, unknown>> {
