@@ -13,6 +13,19 @@ src/frontend/dist/
 admiral
 admiral.exe
 admiral.new.exe
+admiral.backup.exe
+
+# ad-hoc game-data dumps in the repo root
+/morg_*.json
+/edw_*.json
+/devastator.json
+/fleet_inventory.json
+/full_inventory.json
+/profiles.json
+/profiles2.json
+/recipe_*.json
+/railgun_recipes.json
+/piercing_railgun_ii.json
 *.bun-build
 .*.bun-build
 # Claude Code machine-local settings (permissions etc.) — not shared
