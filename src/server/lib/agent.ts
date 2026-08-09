@@ -11,7 +11,7 @@ import { LibV2Connection } from './connections/lib_v2'
 import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
-import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand } from './tools'
+import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
@@ -20,11 +20,21 @@ import { safeTruncate } from './text-safe'
 import { LedgerCollector } from './ledger'
 import { startBriefingCollector, stopBriefingCollector, clearBriefingCache, buildSituationalBriefing, buildFactionBriefing, getCachedSystemName } from './briefing'
 import { checkEventTriggers } from './event-watcher'
+import { ingestActionLog } from './action-log'
 import { EventEmitter } from 'events'
 import fs from 'fs'
 import path from 'path'
 
 const TURN_INTERVAL = 2000
+/** How often a push-capable agent re-reads get_status purely to refresh its
+ *  wallet. get_status costs no game tick, so this is free; 60s keeps the
+ *  dashboard honest without adding meaningful traffic. */
+const WALLET_REFRESH_MS = 60_000
+/** How often to pull the game's action log into the inventory ledger. get_action_log
+ *  is a free query and `since_id` makes it incremental, so this is cheap. Snapshots
+ *  alone measured 89.7% accurate against live truth; the event feed closes the gap
+ *  between reads. */
+const ACTION_LOG_MS = 90_000
 const PROMPT_PATH = path.join(process.cwd(), 'prompt.md')
 
 let _promptMd: string | null = null
@@ -50,6 +60,8 @@ export class Agent {
   private pendingNudges: string[] = []
   private _activity: string = 'idle'
   private _gameState: Record<string, unknown> | null = null
+  private lastWalletRefresh = 0
+  private lastActionLog = 0
   private _sessionExpired = false
   pendingSafeDock = false
   safeDockTurnsRemaining = 0
@@ -517,6 +529,36 @@ export class Agent {
         // dashboard-facing snapshot for free, no get_status round-trip.
         this._gameState = localState
         this.enrichFactionInfo()
+
+        // ...but that cache only advances on the player's OWN mutation deltas.
+        // Credits arriving from OUTSIDE (gifts, sell-order fills, bounties) never
+        // land in it, so a docked idle agent can report a wallet that is hours
+        // stale — Nova sat on the dashboard showing 29cr while actually holding
+        // 28,874 after an incoming transfer. get_status is a FREE query (no game
+        // tick), so refresh it periodically to keep the wallet honest. Push-capable
+        // connections still take their events from onNotification, not from here.
+        if (Date.now() - this.lastWalletRefresh > WALLET_REFRESH_MS) {
+          this.lastWalletRefresh = Date.now()
+          try {
+            const fresh = await this.connection.execute('get_status')
+            if (!fresh.error) this.cacheGameState(fresh)
+          } catch { /* a stale wallet must never break the turn loop */ }
+        }
+
+        // Pull the game's action log into the inventory ledger. Snapshots alone
+        // measured 89.7% accurate against live truth and decay from the instant
+        // they are taken; this closes the gap between reads. Free query, cursored.
+        if (Date.now() - this.lastActionLog > ACTION_LOG_MS) {
+          this.lastActionLog = Date.now()
+          try {
+            const r = await ingestActionLog(this.profileId, this.connection)
+            if (r.added > 0) {
+              this.log('system', `ledger: +${r.added} action events` +
+                (r.cargoApplied ? `, ${r.cargoApplied} cargo moves` : '') +
+                (r.dirty ? ', storage marked stale' : ''))
+            }
+          } catch { /* ledger upkeep must never break the turn loop */ }
+        }
       }
       if (!this.connection.supportsNotifications()) {
         this.setActivity('Polling for events...')
@@ -674,11 +716,9 @@ export class Agent {
         (result as { structuredContent?: unknown }).structuredContent ?? result.result,
         getProfile(this.profileId)?.name ?? 'manual',
       )
-      recordStorageFromCommand(
-        command,
-        (result as { structuredContent?: unknown }).structuredContent ?? result.result,
-        this.profileId,
-      )
+      const payload = (result as { structuredContent?: unknown }).structuredContent ?? result.result
+      recordStorageFromCommand(command, payload, this.profileId)
+      recordCargoFromCommand(command, payload, this.profileId)
     } catch { /* intel capture must never break command execution */ }
 
     if (!options?.silent) {
