@@ -1,0 +1,1862 @@
+[
+ {
+  "agent": "CyberSapper",
+  "section": "## HUNTING DOCTRINE \u2014 THE BAN IS LIFTED (2026-08-06)",
+  "chars": 1847,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## \ud83d\udcbc PROCUREMENT CAPS \u2014 RESTORED AND TIGHTENED (INVIOLABLE)",
+  "chars": 1679,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## SILVER HUNT CANCELLED \u2014 THE PLATINUM ROUTE SOLVES IT",
+  "chars": 1921,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## OPERATION SOL FORGE \u2014 v5, THE ADMIRAL HAS DECIDED (2026-08-06)",
+  "chars": 2997,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## GOLD RUSH \u2014 CONFIRMED DEPOSIT AT GOLDCREST",
+  "chars": 1761,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## OPERATION HOT ROCK v4 \u2014 THE CHAIN IS FACILITY-GATED (SUPERSEDES v3)",
+  "chars": 3254,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## MINING DISCIPLINE \u2014 NEVER USE mine_until_full AT A MIXED DEPOSIT",
+  "chars": 1438,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## AMENDMENT \u2014 KEEP THE URANIUM, DO NOT SELL IT",
+  "chars": 784,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## FUNDING v2 \u2014 THE ORE LOCK IS NOW SPECIFIC (AUDITED 2026-08-06)",
+  "chars": 2930,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## OPERATION HOT ROCK v3 \u2014 AUDITED REQUIREMENT (SUPERSEDES ALL PRIOR)",
+  "chars": 3196,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## WAR CITADEL EQUIPMENT PICKUP",
+  "chars": 589,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## EQUIPMENT DOCTRINE \u2014 UPGRADE RELENTLESSLY, THIS IS STANDING",
+  "chars": 1891,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## SHIPS \u2014 FLY THE RIGHT HULL, AND NEVER STRAND YOUR MODULES",
+  "chars": 1235,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## GAME KNOWLEDGE \u2014 FREE REFERENCES YOU ARE NOT USING",
+  "chars": 1159,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## STOP MAKING THESE CALLS \u2014 THEY CAN NEVER SUCCEED",
+  "chars": 903,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## COMMAND AUTHORITY \u2014 READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW",
+  "chars": 2079,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## \u2699\ufe0f MACRO TOOLS \u2014 USE THESE INSTEAD OF STEP-BY-STEP LOOPS (EFFICIENCY RULE)",
+  "chars": 1389,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## \ud83d\udcd2 STORAGE LEDGER \u2014 KNOW WHAT YOU OWN AND WHERE (STANDING DISCIPLINE)",
+  "chars": 836,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## \u2696\ufe0f DUAL MANDATE \u2014 DEVASTATOR SOURCING AND INCOME ARE ONE LOOP, NOT TWO",
+  "chars": 1565,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## \ud83d\udd01 ANTI-IDLE DOCTRINE \u2014 NO VERIFY-AND-HOLD LOOPS (INVIOLABLE)",
+  "chars": 2116,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## PRIME DIRECTIVE",
+  "chars": 65,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## \ud83d\udd0d VERIFICATION DOCTRINE \u2014 TOOL RESULTS ARE GROUND TRUTH (INVIOLABLE, FLEET-WIDE)",
+  "chars": 3623,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## \ud83d\udeab ANTI-CASCADE DOCTRINE \u2014 FLEET-WIDE (INVIOLABLE)",
+  "chars": 1969,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## \ud83d\udd12 INVIOLABLE RULE \u2014 NO BoM SALES (SESSION-DEFINING)",
+  "chars": 1634,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## \ud83d\udcb0 RESERVE DOCTRINE \u2014 INVIOLABLE FINANCIAL FLOOR (fleet-wide standard)",
+  "chars": 3713,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## \ud83d\udc64 CHARACTER \u2014 CyberSapper",
+  "chars": 654,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## \ud83c\udfaf JOB \u2014 LONG-HAUL FREIGHT TRADER, FRONTIER/DEEP-RANGE CORRIDOR (user-approved re-task 2",
+  "chars": 1708,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## \ud83c\udfdb\ufe0f FACTION STORAGE \u2014 WHAT ACTUALLY WORKS (READ ONCE, TRUST IT)",
+  "chars": 1649,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## \ud83d\udcac FACTION CHAT \u2014 FOUR MESSAGE TYPES ONLY",
+  "chars": 749,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSapper",
+  "section": "## YOUR QUOTA:",
+  "chars": 521,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## HUNTING DOCTRINE \u2014 THE BAN IS LIFTED (2026-08-06)",
+  "chars": 1847,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \ud83d\udcbc PROCUREMENT CAPS \u2014 RESTORED AND TIGHTENED (INVIOLABLE)",
+  "chars": 1679,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## SILVER HUNT CANCELLED \u2014 THE PLATINUM ROUTE SOLVES IT",
+  "chars": 1921,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## OPERATION SOL FORGE \u2014 v5, THE ADMIRAL HAS DECIDED (2026-08-06)",
+  "chars": 2997,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## GOLD RUSH \u2014 CONFIRMED DEPOSIT AT GOLDCREST",
+  "chars": 1761,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## OPERATION HOT ROCK v4 \u2014 THE CHAIN IS FACILITY-GATED (SUPERSEDES v3)",
+  "chars": 3254,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## MINING DISCIPLINE \u2014 NEVER USE mine_until_full AT A MIXED DEPOSIT",
+  "chars": 1438,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## AMENDMENT \u2014 KEEP THE URANIUM, DO NOT SELL IT",
+  "chars": 784,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## FUNDING v2 \u2014 THE ORE LOCK IS NOW SPECIFIC (AUDITED 2026-08-06)",
+  "chars": 2930,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## OPERATION HOT ROCK v3 \u2014 AUDITED REQUIREMENT (SUPERSEDES ALL PRIOR)",
+  "chars": 3196,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## RAD HARVESTER BUILD HOLD \u2014 DO NOT LEAVE WAR CITADEL",
+  "chars": 510,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## WAR CITADEL POWER SUPPLY \u2014 BOB",
+  "chars": 494,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## WAR CITADEL EQUIPMENT PICKUP",
+  "chars": 589,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## EQUIPMENT DOCTRINE \u2014 UPGRADE RELENTLESSLY, THIS IS STANDING",
+  "chars": 1891,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## SHIPS \u2014 FLY THE RIGHT HULL, AND NEVER STRAND YOUR MODULES",
+  "chars": 1235,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## GAME KNOWLEDGE \u2014 FREE REFERENCES YOU ARE NOT USING",
+  "chars": 1206,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## STOP MAKING THESE CALLS \u2014 THEY CAN NEVER SUCCEED",
+  "chars": 903,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## COMMAND AUTHORITY \u2014 READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW",
+  "chars": 2079,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \u26a1 ONE ORDER \u2014 NOTHING ELSE EXISTS UNTIL DONE (Admiral, pinned after 3 ignored cycles)",
+  "chars": 388,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \u2699\ufe0f MACRO TOOLS \u2014 USE THESE INSTEAD OF STEP-BY-STEP LOOPS (EFFICIENCY RULE)",
+  "chars": 1389,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \ud83d\udcd2 STORAGE LEDGER \u2014 KNOW WHAT YOU OWN AND WHERE (STANDING DISCIPLINE)",
+  "chars": 836,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \u2696\ufe0f DUAL MANDATE \u2014 DEVASTATOR SOURCING AND INCOME ARE ONE LOOP, NOT TWO",
+  "chars": 1581,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \ud83d\udd01 ANTI-IDLE \u2014 NO VERIFY-AND-HOLD LOOPS (INVIOLABLE)",
+  "chars": 659,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## PRIME DIRECTIVE",
+  "chars": 46,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \ud83d\udd0d VERIFICATION DOCTRINE \u2014 TOOL RESULTS ARE GROUND TRUTH (INVIOLABLE, FLEET-WIDE)",
+  "chars": 3623,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \ud83d\udeab ANTI-CASCADE DOCTRINE \u2014 FLEET-WIDE (INVIOLABLE)",
+  "chars": 1969,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \ud83d\udd12 INVIOLABLE RULE \u2014 NO BoM SALES (SESSION-DEFINING)",
+  "chars": 1634,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \ud83d\udcb0 RESERVE DOCTRINE \u2014 INVIOLABLE FINANCIAL FLOOR (fleet-wide standard)",
+  "chars": 3713,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \ud83d\udc64 CHARACTER \u2014 Bob Comet",
+  "chars": 541,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \ud83c\udfaf JOB \u2014 Shield Emitter Hunter",
+  "chars": 932,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \ud83d\udd2d SCOUTING & FLEET INTELLIGENCE \u2014 STANDING MANDATE (Admiral 2026-07-21)",
+  "chars": 2461,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \ud83d\udea8 PURCHASE CAPS \u2014 SHIELD EMITTER INCIDENT RULE (Admiral 2026-07-22, INVIOLABLE)",
+  "chars": 1344,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \ud83c\udfdb\ufe0f FACTION STORAGE \u2014 WHAT ACTUALLY WORKS (READ ONCE, TRUST IT)",
+  "chars": 1649,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## \ud83d\udcac FACTION CHAT \u2014 FOUR MESSAGE TYPES ONLY",
+  "chars": 749,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Bob Comet",
+  "section": "## YOUR QUOTA:",
+  "chars": 430,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## HUNTING DOCTRINE \u2014 THE BAN IS LIFTED (2026-08-06)",
+  "chars": 1847,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## \ud83d\udcbc PROCUREMENT CAPS \u2014 RESTORED AND TIGHTENED (INVIOLABLE)",
+  "chars": 1679,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## SILVER HUNT CANCELLED \u2014 THE PLATINUM ROUTE SOLVES IT",
+  "chars": 1921,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## OPERATION SOL FORGE \u2014 v5, THE ADMIRAL HAS DECIDED (2026-08-06)",
+  "chars": 2997,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## GOLD RUSH \u2014 CONFIRMED DEPOSIT AT GOLDCREST",
+  "chars": 1761,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## OPERATION HOT ROCK v4 \u2014 THE CHAIN IS FACILITY-GATED (SUPERSEDES v3)",
+  "chars": 3254,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## MINING DISCIPLINE \u2014 NEVER USE mine_until_full AT A MIXED DEPOSIT",
+  "chars": 1438,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## AMENDMENT \u2014 KEEP THE URANIUM, DO NOT SELL IT",
+  "chars": 784,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## FUNDING v2 \u2014 THE ORE LOCK IS NOW SPECIFIC (AUDITED 2026-08-06)",
+  "chars": 2930,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## OPERATION HOT ROCK v3 \u2014 AUDITED REQUIREMENT (SUPERSEDES ALL PRIOR)",
+  "chars": 3196,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## WAR CITADEL POWER SUPPLY \u2014 NOVA",
+  "chars": 491,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## WAR CITADEL EQUIPMENT PICKUP",
+  "chars": 589,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## EQUIPMENT DOCTRINE \u2014 UPGRADE RELENTLESSLY, THIS IS STANDING",
+  "chars": 1891,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## SHIPS \u2014 FLY THE RIGHT HULL, AND NEVER STRAND YOUR MODULES",
+  "chars": 1235,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## GAME KNOWLEDGE \u2014 FREE REFERENCES YOU ARE NOT USING",
+  "chars": 1231,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## STOP MAKING THESE CALLS \u2014 THEY CAN NEVER SUCCEED",
+  "chars": 903,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## COMMAND AUTHORITY \u2014 READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW",
+  "chars": 2079,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## \u2699\ufe0f MACRO TOOLS \u2014 USE THESE INSTEAD OF STEP-BY-STEP LOOPS (EFFICIENCY RULE)",
+  "chars": 1389,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## \ud83d\udcd2 STORAGE LEDGER \u2014 KNOW WHAT YOU OWN AND WHERE (STANDING DISCIPLINE)",
+  "chars": 836,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## \u2696\ufe0f DUAL MANDATE \u2014 DEVASTATOR SOURCING AND INCOME ARE ONE LOOP, NOT TWO",
+  "chars": 1578,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## \ud83d\udd01 ANTI-IDLE \u2014 NO VERIFY-AND-HOLD LOOPS (INVIOLABLE)",
+  "chars": 659,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## PRIME DIRECTIVE",
+  "chars": 46,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## \ud83d\udd0d VERIFICATION DOCTRINE \u2014 TOOL RESULTS ARE GROUND TRUTH (INVIOLABLE, FLEET-WIDE)",
+  "chars": 3623,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## \ud83d\udeab ANTI-CASCADE DOCTRINE \u2014 FLEET-WIDE (INVIOLABLE)",
+  "chars": 2076,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## \ud83d\udd12 INVIOLABLE RULE \u2014 NO BoM SALES (SESSION-DEFINING)",
+  "chars": 1634,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## \ud83d\udcb0 RESERVE DOCTRINE \u2014 INVIOLABLE FINANCIAL FLOOR (fleet-wide standard)",
+  "chars": 3713,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## \ud83d\udc64 CHARACTER - Nova Reyes",
+  "chars": 1630,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## \ud83c\udfaf JOB \u2014 Missions Specialist",
+  "chars": 697,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## \ud83c\udfdb\ufe0f FACTION STORAGE \u2014 WHAT ACTUALLY WORKS (READ ONCE, TRUST IT)",
+  "chars": 1649,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## \ud83d\udcac FACTION CHAT \u2014 FOUR MESSAGE TYPES ONLY",
+  "chars": 749,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Nova Reyes",
+  "section": "## YOUR QUOTA:",
+  "chars": 340,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## HUNTING DOCTRINE \u2014 THE BAN IS LIFTED (2026-08-06)",
+  "chars": 1847,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## \ud83d\udcbc PROCUREMENT CAPS \u2014 RESTORED AND TIGHTENED (INVIOLABLE)",
+  "chars": 1679,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## SILVER HUNT CANCELLED \u2014 THE PLATINUM ROUTE SOLVES IT",
+  "chars": 1921,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## OPERATION SOL FORGE \u2014 v5, THE ADMIRAL HAS DECIDED (2026-08-06)",
+  "chars": 2997,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## GOLD RUSH \u2014 CONFIRMED DEPOSIT AT GOLDCREST",
+  "chars": 1761,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## OPERATION HOT ROCK v4 \u2014 THE CHAIN IS FACILITY-GATED (SUPERSEDES v3)",
+  "chars": 3254,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## MINING DISCIPLINE \u2014 NEVER USE mine_until_full AT A MIXED DEPOSIT",
+  "chars": 1438,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## AMENDMENT \u2014 KEEP THE URANIUM, DO NOT SELL IT",
+  "chars": 784,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## FUNDING v2 \u2014 THE ORE LOCK IS NOW SPECIFIC (AUDITED 2026-08-06)",
+  "chars": 2930,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## OPERATION HOT ROCK v3 \u2014 AUDITED REQUIREMENT (SUPERSEDES ALL PRIOR)",
+  "chars": 3196,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## CRAFT JOB SAFETY \u2014 NEVER CANCEL BY POLLING",
+  "chars": 444,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## WAR CITADEL POWER MONITOR \u2014 MORG",
+  "chars": 461,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## WAR CITADEL QUARTERMASTER \u2014 STATIONARY OUTBOUND EQUIPMENT",
+  "chars": 1045,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## EQUIPMENT DOCTRINE \u2014 UPGRADE RELENTLESSLY, THIS IS STANDING",
+  "chars": 1891,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## SHIPS \u2014 FLY THE RIGHT HULL, AND NEVER STRAND YOUR MODULES",
+  "chars": 1235,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## VAULT KEEPER \u2014 YOU DO NOT ROAM",
+  "chars": 1461,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## GAME KNOWLEDGE \u2014 FREE REFERENCES YOU ARE NOT USING",
+  "chars": 1293,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## STOP MAKING THESE CALLS \u2014 THEY CAN NEVER SUCCEED",
+  "chars": 903,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## COMMAND AUTHORITY \u2014 READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW",
+  "chars": 2079,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## \u2699\ufe0f MACRO TOOLS \u2014 USE THESE INSTEAD OF STEP-BY-STEP LOOPS (EFFICIENCY RULE)",
+  "chars": 1389,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## \ud83d\udcd2 STORAGE LEDGER \u2014 KNOW WHAT YOU OWN AND WHERE (STANDING DISCIPLINE)",
+  "chars": 836,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## \u2696\ufe0f DUAL MANDATE \u2014 DEVASTATOR SOURCING AND INCOME ARE ONE LOOP, NOT TWO",
+  "chars": 1594,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## \ud83d\udd01 ANTI-IDLE DOCTRINE \u2014 NO VERIFY-AND-HOLD LOOPS (INVIOLABLE)",
+  "chars": 2456,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## PRIME DIRECTIVE",
+  "chars": 45,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## \ud83d\udd0d VERIFICATION DOCTRINE \u2014 TOOL RESULTS ARE GROUND TRUTH (INVIOLABLE, FLEET-WIDE)",
+  "chars": 3623,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## \ud83d\udeab ANTI-CASCADE DOCTRINE \u2014 FLEET-WIDE (INVIOLABLE)",
+  "chars": 1969,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## \ud83d\udd12 INVIOLABLE RULE \u2014 NO BoM SALES (SESSION-DEFINING)",
+  "chars": 1634,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## \ud83d\udcb0 RESERVE DOCTRINE \u2014 INVIOLABLE FINANCIAL FLOOR (fleet-wide standard)",
+  "chars": 3713,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## \ud83d\udc64 CHARACTER - Morg'Thar",
+  "chars": 1255,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## \ud83c\udfdb\ufe0f FACTION STORAGE \u2014 WHAT ACTUALLY WORKS (READ ONCE, TRUST IT)",
+  "chars": 1649,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Morg'Thar",
+  "section": "## \ud83d\udcac FACTION CHAT \u2014 FOUR MESSAGE TYPES ONLY",
+  "chars": 749,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## HUNTING DOCTRINE \u2014 THE BAN IS LIFTED (2026-08-06)",
+  "chars": 1847,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## \ud83d\udcbc PROCUREMENT CAPS \u2014 RESTORED AND TIGHTENED (INVIOLABLE)",
+  "chars": 1679,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## SILVER HUNT CANCELLED \u2014 THE PLATINUM ROUTE SOLVES IT",
+  "chars": 1921,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## OPERATION SOL FORGE \u2014 v5, THE ADMIRAL HAS DECIDED (2026-08-06)",
+  "chars": 2997,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## GOLD RUSH \u2014 CONFIRMED DEPOSIT AT GOLDCREST",
+  "chars": 1761,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## OPERATION HOT ROCK v4 \u2014 THE CHAIN IS FACILITY-GATED (SUPERSEDES v3)",
+  "chars": 3254,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## MINING DISCIPLINE \u2014 NEVER USE mine_until_full AT A MIXED DEPOSIT",
+  "chars": 1438,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## AMENDMENT \u2014 KEEP THE URANIUM, DO NOT SELL IT",
+  "chars": 784,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## FUNDING v2 \u2014 THE ORE LOCK IS NOW SPECIFIC (AUDITED 2026-08-06)",
+  "chars": 2930,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## OPERATION HOT ROCK v3 \u2014 AUDITED REQUIREMENT (SUPERSEDES ALL PRIOR)",
+  "chars": 3196,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## WAR CITADEL EQUIPMENT PICKUP",
+  "chars": 589,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## EQUIPMENT DOCTRINE \u2014 UPGRADE RELENTLESSLY, THIS IS STANDING",
+  "chars": 1891,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## SHIPS \u2014 FLY THE RIGHT HULL, AND NEVER STRAND YOUR MODULES",
+  "chars": 1235,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## GAME KNOWLEDGE \u2014 FREE REFERENCES YOU ARE NOT USING",
+  "chars": 1156,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## STOP MAKING THESE CALLS \u2014 THEY CAN NEVER SUCCEED",
+  "chars": 903,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## COMMAND AUTHORITY \u2014 READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW",
+  "chars": 2079,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## PRODUCTION CHIEF \u2014 SOLE PURPOSE DIRECTIVE (rebuilt entity, algorithm rev B)",
+  "chars": 1591,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## \ud83d\udd0d VERIFICATION DOCTRINE \u2014 TOOL RESULTS ARE GROUND TRUTH (INVIOLABLE, FLEET-WIDE)",
+  "chars": 3623,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## \ud83d\udeab ANTI-CASCADE DOCTRINE \u2014 FLEET-WIDE (INVIOLABLE)",
+  "chars": 1969,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## \ud83d\udd12 INVIOLABLE RULE \u2014 NO BoM SALES (SESSION-DEFINING)",
+  "chars": 1634,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## \ud83d\udcb0 RESERVE DOCTRINE \u2014 INVIOLABLE FINANCIAL FLOOR (fleet-wide standard)",
+  "chars": 3713,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## \ud83d\udc64 CHARACTER \u2014 CyberSpock",
+  "chars": 540,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## \ud83c\udfaf JOB \u2014 SHIELD EMITTER PRODUCTION CHIEF (reassigned by Admiral 2026-07-22)",
+  "chars": 1997,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## \ud83c\udfdb\ufe0f FACTION STORAGE \u2014 WHAT ACTUALLY WORKS (READ ONCE, TRUST IT)",
+  "chars": 1649,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## \ud83d\udcac FACTION CHAT \u2014 FOUR MESSAGE TYPES ONLY",
+  "chars": 749,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## WHEN BLOCKED PROTOCOL (added by Admiral 2026-07-20 after overnight shutdown)",
+  "chars": 1130,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "CyberSpock",
+  "section": "## YOUR QUOTA:",
+  "chars": 526,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## HUNTING DOCTRINE \u2014 THE BAN IS LIFTED (2026-08-06)",
+  "chars": 1847,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \ud83d\udcbc PROCUREMENT CAPS \u2014 RESTORED AND TIGHTENED (INVIOLABLE)",
+  "chars": 1679,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## SILVER HUNT CANCELLED \u2014 THE PLATINUM ROUTE SOLVES IT",
+  "chars": 1921,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## OPERATION SOL FORGE \u2014 v5, THE ADMIRAL HAS DECIDED (2026-08-06)",
+  "chars": 2997,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## GOLD RUSH \u2014 CONFIRMED DEPOSIT AT GOLDCREST",
+  "chars": 1761,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## OPERATION HOT ROCK v4 \u2014 THE CHAIN IS FACILITY-GATED (SUPERSEDES v3)",
+  "chars": 3254,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## MINING DISCIPLINE \u2014 NEVER USE mine_until_full AT A MIXED DEPOSIT",
+  "chars": 1438,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## AMENDMENT \u2014 KEEP THE URANIUM, DO NOT SELL IT",
+  "chars": 784,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## FUNDING v2 \u2014 THE ORE LOCK IS NOW SPECIFIC (AUDITED 2026-08-06)",
+  "chars": 2930,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## OPERATION HOT ROCK v3 \u2014 AUDITED REQUIREMENT (SUPERSEDES ALL PRIOR)",
+  "chars": 3196,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## WAR CITADEL EQUIPMENT PICKUP",
+  "chars": 589,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## EQUIPMENT DOCTRINE \u2014 UPGRADE RELENTLESSLY, THIS IS STANDING",
+  "chars": 1891,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## SHIPS \u2014 FLY THE RIGHT HULL, AND NEVER STRAND YOUR MODULES",
+  "chars": 1235,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## GAME KNOWLEDGE \u2014 FREE REFERENCES YOU ARE NOT USING",
+  "chars": 1211,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## STOP MAKING THESE CALLS \u2014 THEY CAN NEVER SUCCEED",
+  "chars": 903,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## COMMAND AUTHORITY \u2014 READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW",
+  "chars": 2079,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \u2699\ufe0f MACRO TOOLS \u2014 USE THESE INSTEAD OF STEP-BY-STEP LOOPS (EFFICIENCY RULE)",
+  "chars": 1389,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \ud83c\udfe6 ROLE CLARIFICATION \u2014 VAULT BANKER (Admiral 2026-07-23, retires the income-rebalance b",
+  "chars": 916,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \ud83d\udcd2 STORAGE LEDGER \u2014 KNOW WHAT YOU OWN AND WHERE (STANDING DISCIPLINE)",
+  "chars": 836,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \u2696\ufe0f DUAL MANDATE \u2014 DEVASTATOR SOURCING AND INCOME ARE ONE LOOP, NOT TWO",
+  "chars": 1619,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \ud83d\udd01 ANTI-IDLE \u2014 NO VERIFY-AND-HOLD LOOPS (INVIOLABLE)",
+  "chars": 659,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## PRIME DIRECTIVE",
+  "chars": 72,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \ud83d\udd0d VERIFICATION DOCTRINE \u2014 TOOL RESULTS ARE GROUND TRUTH (INVIOLABLE, FLEET-WIDE)",
+  "chars": 3623,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \ud83d\udeab ANTI-CASCADE DOCTRINE \u2014 FLEET-WIDE (INVIOLABLE)",
+  "chars": 1969,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \ud83d\udd12 INVIOLABLE RULE \u2014 NO BoM SALES (SESSION-DEFINING)",
+  "chars": 1634,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \ud83d\udcb0 RESERVE DOCTRINE \u2014 INVIOLABLE FINANCIAL FLOOR (fleet-wide standard)",
+  "chars": 3713,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \ud83d\udc64 CHARACTER \u2014 Ledger Voss",
+  "chars": 562,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \ud83c\udfaf JOB \u2014 Iron & Steel Miner",
+  "chars": 786,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \ud83c\udfdb\ufe0f FACTION STORAGE \u2014 WHAT ACTUALLY WORKS (READ ONCE, TRUST IT)",
+  "chars": 1649,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## \ud83d\udcac FACTION CHAT \u2014 FOUR MESSAGE TYPES ONLY",
+  "chars": 749,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Ledger Voss",
+  "section": "## YOUR QUOTA (all at crimson_war_citadel):",
+  "chars": 462,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## HUNTING DOCTRINE \u2014 THE BAN IS LIFTED (2026-08-06)",
+  "chars": 1847,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \ud83d\udcbc PROCUREMENT CAPS \u2014 RESTORED AND TIGHTENED (INVIOLABLE)",
+  "chars": 1679,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## SILVER HUNT CANCELLED \u2014 THE PLATINUM ROUTE SOLVES IT",
+  "chars": 1921,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## OPERATION SOL FORGE \u2014 v5, THE ADMIRAL HAS DECIDED (2026-08-06)",
+  "chars": 2997,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## GOLD RUSH \u2014 CONFIRMED DEPOSIT AT GOLDCREST",
+  "chars": 1761,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## OPERATION HOT ROCK v4 \u2014 THE CHAIN IS FACILITY-GATED (SUPERSEDES v3)",
+  "chars": 3254,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## MINING DISCIPLINE \u2014 NEVER USE mine_until_full AT A MIXED DEPOSIT",
+  "chars": 1438,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## AMENDMENT \u2014 KEEP THE URANIUM, DO NOT SELL IT",
+  "chars": 784,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## FUNDING v2 \u2014 THE ORE LOCK IS NOW SPECIFIC (AUDITED 2026-08-06)",
+  "chars": 2930,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## OPERATION HOT ROCK v3 \u2014 AUDITED REQUIREMENT (SUPERSEDES ALL PRIOR)",
+  "chars": 3196,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## WAR CITADEL EQUIPMENT PICKUP",
+  "chars": 589,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## EQUIPMENT DOCTRINE \u2014 UPGRADE RELENTLESSLY, THIS IS STANDING",
+  "chars": 1891,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## SHIPS \u2014 FLY THE RIGHT HULL, AND NEVER STRAND YOUR MODULES",
+  "chars": 1235,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## GAME KNOWLEDGE \u2014 FREE REFERENCES YOU ARE NOT USING",
+  "chars": 1179,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## STOP MAKING THESE CALLS \u2014 THEY CAN NEVER SUCCEED",
+  "chars": 903,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## COMMAND AUTHORITY \u2014 READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW",
+  "chars": 2079,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \u2699\ufe0f MACRO TOOLS \u2014 USE THESE INSTEAD OF STEP-BY-STEP LOOPS (EFFICIENCY RULE)",
+  "chars": 1389,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \ud83d\udea8 CURRENT OBJECTIVE \u2014 ORE GIFT DELIVERY (Admiral 2026-07-23, OVERRIDES THE INCOME LOOP)",
+  "chars": 904,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \ud83d\udcd2 STORAGE LEDGER \u2014 KNOW WHAT YOU OWN AND WHERE (STANDING DISCIPLINE)",
+  "chars": 836,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## PRIME DIRECTIVE \u2014 DUAL MANDATE (one loop, not two competing modes)",
+  "chars": 1612,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \ud83d\udd0d VERIFICATION DOCTRINE \u2014 TOOL RESULTS ARE GROUND TRUTH (INVIOLABLE, FLEET-WIDE)",
+  "chars": 3623,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \ud83d\udeab ANTI-CASCADE DOCTRINE \u2014 FLEET-WIDE (INVIOLABLE)",
+  "chars": 1969,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \ud83d\udd12 INVIOLABLE RULE \u2014 NO BoM SALES (SESSION-DEFINING)",
+  "chars": 1634,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \ud83d\udcb0 RESERVE DOCTRINE \u2014 INVIOLABLE FINANCIAL FLOOR (fleet-wide standard)",
+  "chars": 3713,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \ud83d\udd01 ANTI-IDLE \u2014 NO VERIFY-AND-HOLD LOOPS (INVIOLABLE)",
+  "chars": 659,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \ud83d\udc64 CHARACTER \u2014 Grit Vane",
+  "chars": 555,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \ud83c\udfaf JOB \u2014 SURPLUS LIQUIDATOR & GAS RUNNER (reassigned by Admiral 2026-07-21)",
+  "chars": 2677,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \ud83c\udfdb\ufe0f FACTION STORAGE \u2014 WHAT ACTUALLY WORKS (READ ONCE, TRUST IT)",
+  "chars": 1679,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \ud83d\uddd1\ufe0f NO-JETTISON RULE \u2014 DO NOT JETTISON ITEMS OF VALUE (INVIOLABLE, Admiral 2026-07-21)",
+  "chars": 1366,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## \ud83d\udcac FACTION CHAT \u2014 FOUR MESSAGE TYPES ONLY",
+  "chars": 749,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Grit Vane",
+  "section": "## YOUR QUOTA (updated by Admiral 2026-07-21): titanium_ore x800 from your crimson_war_cit",
+  "chars": 407,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## HUNTING DOCTRINE \u2014 THE BAN IS LIFTED (2026-08-06)",
+  "chars": 1847,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## \ud83d\udcbc PROCUREMENT CAPS \u2014 RESTORED AND TIGHTENED (INVIOLABLE)",
+  "chars": 1679,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## SILVER HUNT CANCELLED \u2014 THE PLATINUM ROUTE SOLVES IT",
+  "chars": 1921,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## OPERATION SOL FORGE \u2014 v5, THE ADMIRAL HAS DECIDED (2026-08-06)",
+  "chars": 2997,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## GOLD RUSH \u2014 CONFIRMED DEPOSIT AT GOLDCREST",
+  "chars": 1761,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## OPERATION HOT ROCK v4 \u2014 THE CHAIN IS FACILITY-GATED (SUPERSEDES v3)",
+  "chars": 3254,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## MINING DISCIPLINE \u2014 NEVER USE mine_until_full AT A MIXED DEPOSIT",
+  "chars": 1438,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## AMENDMENT \u2014 KEEP THE URANIUM, DO NOT SELL IT",
+  "chars": 784,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## FUNDING v2 \u2014 THE ORE LOCK IS NOW SPECIFIC (AUDITED 2026-08-06)",
+  "chars": 2930,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## OPERATION HOT ROCK v3 \u2014 AUDITED REQUIREMENT (SUPERSEDES ALL PRIOR)",
+  "chars": 3196,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## WAR CITADEL EQUIPMENT PICKUP",
+  "chars": 589,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## EQUIPMENT DOCTRINE \u2014 UPGRADE RELENTLESSLY, THIS IS STANDING",
+  "chars": 1891,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## SHIPS \u2014 FLY THE RIGHT HULL, AND NEVER STRAND YOUR MODULES",
+  "chars": 1235,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## GAME KNOWLEDGE \u2014 FREE REFERENCES YOU ARE NOT USING",
+  "chars": 1202,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## STOP MAKING THESE CALLS \u2014 THEY CAN NEVER SUCCEED",
+  "chars": 903,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## COMMAND AUTHORITY \u2014 READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW",
+  "chars": 2079,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## \ud83d\udea8 BULK-BUY VERIFICATION \u2014 INVIOLABLE (Admiral 2026-07-22, after two order-book misreads",
+  "chars": 1205,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## \ud83d\udea8 CURRENT OBJECTIVE \u2014 GRAND EXCHANGE FREIGHTER PICKUP (Admiral 2026-07-22, OVERRIDES AL",
+  "chars": 1031,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## IDENTITY & REGISTRATION",
+  "chars": 249,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## PRIME MISSION",
+  "chars": 307,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## HOW TO TRADE (the discipline that makes this work)",
+  "chars": 1150,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## SECONDARY DUTY \u2014 FLEET LOGISTICS (only when Admiral orders it)",
+  "chars": 300,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## INVIOLABLE DOCTRINES (every one of these was learned the hard way)",
+  "chars": 2645,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## MACRO TOOLS \u2014 USE THESE INSTEAD OF STEP-BY-STEP LOOPS",
+  "chars": 346,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## SEED CAPITAL",
+  "chars": 244,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Cass Margin",
+  "section": "## \ud83d\udd10 ADMIRAL CHANNEL AUTHENTICATION (2026-07-24 \u2014 added after a well-intended refusal)",
+  "chars": 826,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## HUNTING DOCTRINE \u2014 THE BAN IS LIFTED (2026-08-06)",
+  "chars": 1847,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## \ud83d\udcbc PROCUREMENT CAPS \u2014 RESTORED AND TIGHTENED (INVIOLABLE)",
+  "chars": 1679,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## SILVER HUNT CANCELLED \u2014 THE PLATINUM ROUTE SOLVES IT",
+  "chars": 1921,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## OPERATION SOL FORGE \u2014 v5, THE ADMIRAL HAS DECIDED (2026-08-06)",
+  "chars": 2997,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## GOLD RUSH \u2014 CONFIRMED DEPOSIT AT GOLDCREST",
+  "chars": 1761,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## OPERATION HOT ROCK v4 \u2014 THE CHAIN IS FACILITY-GATED (SUPERSEDES v3)",
+  "chars": 3254,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## MINING DISCIPLINE \u2014 NEVER USE mine_until_full AT A MIXED DEPOSIT",
+  "chars": 1438,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## AMENDMENT \u2014 KEEP THE URANIUM, DO NOT SELL IT",
+  "chars": 784,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## FUNDING v2 \u2014 THE ORE LOCK IS NOW SPECIFIC (AUDITED 2026-08-06)",
+  "chars": 2930,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## OPERATION HOT ROCK v3 \u2014 AUDITED REQUIREMENT (SUPERSEDES ALL PRIOR)",
+  "chars": 3196,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## RADIOACTIVE EXTRACTION GUARD",
+  "chars": 386,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## WAR CITADEL EQUIPMENT PICKUP",
+  "chars": 589,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## EQUIPMENT DOCTRINE \u2014 UPGRADE RELENTLESSLY, THIS IS STANDING",
+  "chars": 1891,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## SHIPS \u2014 FLY THE RIGHT HULL, AND NEVER STRAND YOUR MODULES",
+  "chars": 1235,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## GAME KNOWLEDGE \u2014 FREE REFERENCES YOU ARE NOT USING",
+  "chars": 1234,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## STOP MAKING THESE CALLS \u2014 THEY CAN NEVER SUCCEED",
+  "chars": 903,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## COMMAND AUTHORITY \u2014 READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW",
+  "chars": 2079,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## IDENTITY",
+  "chars": 226,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## \ud83d\udea8 REINSTATEMENT TERMS (Admiral 2026-07-23, after shutdown for third trading violation)",
+  "chars": 1336,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## \ud83d\ude9b SECONDARY ROLE ACTIVATED \u2014 BOM CONSOLIDATION HAULER (user-approved 2026-07-22)",
+  "chars": 817,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## PRIME MISSION",
+  "chars": 708,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## SECONDARY DUTY \u2014 BOM CONSOLIDATION HAULER (Admiral-ordered only)",
+  "chars": 339,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## TRADING DISCIPLINE (Cass's proven rules \u2014 follow exactly)",
+  "chars": 1138,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## INVIOLABLE DOCTRINES (hard-learned; several are now enforced in the harness)",
+  "chars": 1774,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## MACRO TOOLS",
+  "chars": 239,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## SEED CAPITAL",
+  "chars": 337,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Juno Freight",
+  "section": "## \ud83d\udd10 ADMIRAL CHANNEL AUTHENTICATION (2026-07-24 \u2014 added after a well-intended refusal)",
+  "chars": 826,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## HUNTING DOCTRINE \u2014 THE BAN IS LIFTED (2026-08-06)",
+  "chars": 1847,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## \ud83d\udcbc PROCUREMENT CAPS \u2014 RESTORED AND TIGHTENED (INVIOLABLE)",
+  "chars": 1679,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## SILVER HUNT CANCELLED \u2014 THE PLATINUM ROUTE SOLVES IT",
+  "chars": 1921,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## OPERATION SOL FORGE \u2014 v5, THE ADMIRAL HAS DECIDED (2026-08-06)",
+  "chars": 2997,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## GOLD RUSH \u2014 CONFIRMED DEPOSIT AT GOLDCREST",
+  "chars": 1761,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## OPERATION HOT ROCK v4 \u2014 THE CHAIN IS FACILITY-GATED (SUPERSEDES v3)",
+  "chars": 3254,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## MINING DISCIPLINE \u2014 NEVER USE mine_until_full AT A MIXED DEPOSIT",
+  "chars": 1438,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## AMENDMENT \u2014 KEEP THE URANIUM, DO NOT SELL IT",
+  "chars": 784,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## FUNDING v2 \u2014 THE ORE LOCK IS NOW SPECIFIC (AUDITED 2026-08-06)",
+  "chars": 2930,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## OPERATION HOT ROCK v3 \u2014 AUDITED REQUIREMENT (SUPERSEDES ALL PRIOR)",
+  "chars": 3196,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## WAR CITADEL EQUIPMENT PICKUP",
+  "chars": 589,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## EQUIPMENT DOCTRINE \u2014 UPGRADE RELENTLESSLY, THIS IS STANDING",
+  "chars": 1891,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## SHIPS \u2014 FLY THE RIGHT HULL, AND NEVER STRAND YOUR MODULES",
+  "chars": 1235,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## GAME KNOWLEDGE \u2014 FREE REFERENCES YOU ARE NOT USING",
+  "chars": 1163,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## STOP MAKING THESE CALLS \u2014 THEY CAN NEVER SUCCEED",
+  "chars": 903,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## COMMAND AUTHORITY \u2014 READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW",
+  "chars": 2157,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## IDENTITY",
+  "chars": 231,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## \ud83d\udea8 BULK-BUY VERIFICATION \u2014 INVIOLABLE (Admiral 2026-07-23, the fleet trader standard)",
+  "chars": 901,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## \ud83d\uddfa\ufe0f YOUR TERRITORY \u2014 VOIDBORN & CORE HUBS (Admiral 2026-07-22)",
+  "chars": 813,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## PRIME MISSION",
+  "chars": 717,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## SECONDARY DUTY \u2014 BOM CONSOLIDATION HAULER (Admiral-ordered only)",
+  "chars": 339,
+  "destination": "DIRECTIVE-per-agent"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## TRADING DISCIPLINE (Cass's proven rules \u2014 follow exactly)",
+  "chars": 1138,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## INVIOLABLE DOCTRINES (hard-learned; several are now enforced in the harness)",
+  "chars": 1774,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## MACRO TOOLS",
+  "chars": 239,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Vera Lane",
+  "section": "## SEED CAPITAL",
+  "chars": 336,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## HUNTING DOCTRINE \u2014 THE BAN IS LIFTED (2026-08-06)",
+  "chars": 1847,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## \ud83d\udcbc PROCUREMENT CAPS \u2014 RESTORED AND TIGHTENED (INVIOLABLE)",
+  "chars": 1679,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## SILVER HUNT CANCELLED \u2014 THE PLATINUM ROUTE SOLVES IT",
+  "chars": 1921,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## OPERATION SOL FORGE \u2014 v5, THE ADMIRAL HAS DECIDED (2026-08-06)",
+  "chars": 2997,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## GOLD RUSH \u2014 CONFIRMED DEPOSIT AT GOLDCREST",
+  "chars": 1761,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## OPERATION HOT ROCK v4 \u2014 THE CHAIN IS FACILITY-GATED (SUPERSEDES v3)",
+  "chars": 3254,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## MINING DISCIPLINE \u2014 NEVER USE mine_until_full AT A MIXED DEPOSIT",
+  "chars": 1438,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## AMENDMENT \u2014 KEEP THE URANIUM, DO NOT SELL IT",
+  "chars": 784,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## FUNDING v2 \u2014 THE ORE LOCK IS NOW SPECIFIC (AUDITED 2026-08-06)",
+  "chars": 2930,
+  "destination": "TODO-current-mission"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## OPERATION HOT ROCK v3 \u2014 AUDITED REQUIREMENT (SUPERSEDES ALL PRIOR)",
+  "chars": 3196,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## WAR CITADEL EQUIPMENT PICKUP",
+  "chars": 589,
+  "destination": "DELETE-superseded"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## EQUIPMENT DOCTRINE \u2014 UPGRADE RELENTLESSLY, THIS IS STANDING",
+  "chars": 1891,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## SHIPS \u2014 FLY THE RIGHT HULL, AND NEVER STRAND YOUR MODULES",
+  "chars": 1235,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## GAME KNOWLEDGE \u2014 FREE REFERENCES YOU ARE NOT USING",
+  "chars": 1193,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## STOP MAKING THESE CALLS \u2014 THEY CAN NEVER SUCCEED",
+  "chars": 903,
+  "destination": "PROMPT.MD-fleet-frozen"
+ },
+ {
+  "agent": "Zibal Prospector",
+  "section": "## COMMAND AUTHORITY \u2014 READ THIS FIRST, IT OVERRIDES EVERYTHING BELOW",
+  "chars": 3369,
+  "destination": "PROMPT.MD-fleet-frozen"
+ }
+]
