@@ -85,6 +85,29 @@ src/shared/types.ts shared TS interfaces
 - `http_v2` transparently falls back to a parallel v1 session for commands missing
   from the v2 route map, so all ~150 commands work regardless of v2 spec coverage.
 
+## Prompt / token efficiency (read before touching prompts)
+
+Full analysis and the staged plan: **`docs/PROMPT-ARCHITECTURE.md`**. Key facts a
+future session must not re-derive or get wrong:
+
+- **Prompt caching is already ON and working — 84.3% hit rate.** `@mariozechner/pi-ai`
+  sets `cache_control` for us (system block + last user message), retention `"short"`
+  (5-min TTL). There is nothing to "enable"; the Claude Console card is not a setting.
+- **The fleet runs on the `claude-max` OAuth subscription**, so the metered API Console
+  shows zero spend and zero token volume. That is expected, not a misconfiguration.
+- **`systemPromptTokens` in `llm_call` logs is an ESTIMATE, not real tokens** —
+  `CHARS_PER_TOKEN = 2` in `loop.ts`. Only `cacheRead`/`cacheWrite`/`input`/`output`
+  come from the provider.
+- **The cost lever is cache WRITES, not enabling caching.** `buildSystemPrompt`
+  interpolates memory, todo, fleet orders, and a situational briefing that refreshes
+  every 60s — all inside the cached prefix, so each one invalidates it. Moving those
+  out is worth more than any size reduction.
+- **Never bulk-delete directive sections without a mapping.** Deleting the
+  `PROCUREMENT SIZING — HARD CAPS` block on 2026-08-06 cost 55,000 game credits within
+  the hour. Relocate by volatility; delete only what is provably superseded.
+- Pre-change baseline: `data/baselines/llm-usage-2026-08-06.json` (source log rows
+  prune after 14 days).
+
 ## Verifying a change
 
 1. `bun run build` (must succeed).
