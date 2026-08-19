@@ -129,6 +129,14 @@ function migrate(db: Database): void {
   if (!profileCols.some(c => c.name === 'planning_interval')) {
     db.exec('ALTER TABLE profiles ADD COLUMN planning_interval INTEGER DEFAULT NULL')
   }
+  // Per-agent opt-in for the volatile/stable prompt split (see buildSystemPrompt).
+  // When set, memory, TODO, the fleet-intel and situational briefings, and pending
+  // fleet orders are delivered as a per-turn message instead of being interpolated
+  // into the cached system prompt — they change constantly and were invalidating the
+  // whole cached prefix, which is where the cache-write cost came from.
+  if (!profileCols.some(c => c.name === 'volatile_split')) {
+    db.exec('ALTER TABLE profiles ADD COLUMN volatile_split INTEGER DEFAULT 0')
+  }
   if (!profileCols.some(c => c.name === 'codex_executor_enabled')) {
     db.exec('ALTER TABLE profiles ADD COLUMN codex_executor_enabled INTEGER DEFAULT 0')
   }

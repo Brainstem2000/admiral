@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
 import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, reorderProfiles } from '../lib/db'
+import { buildSystemPrompt, buildVolatileState } from '../lib/agent'
+import { fetchGameCommands, formatCommandList } from '../lib/schema'
 import { agentManager } from '../lib/agent-manager'
 import { resolveProfileModelRouting } from '../lib/model-routing'
 import type { Profile } from '../../shared/types'
@@ -199,6 +201,39 @@ profiles.post('/:id/command', async (c) => {
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
   }
+})
+
+/**
+ * GET /api/profiles/:id/prompt — render this agent's prompt without running a turn.
+ *
+ * Read-only. Lets you verify prompt assembly (and the volatile/stable split) without
+ * spending an LLM call or a game tick. `?phase=planning|executing` to see a phase block.
+ */
+profiles.get('/:id/prompt', async (c) => {
+  const id = c.req.param('id')
+  const profile = getProfile(id)
+  if (!profile) return c.json({ error: 'Profile not found' }, 404)
+  const phaseParam = c.req.query('phase')
+  const phase = phaseParam === 'planning' || phaseParam === 'executing' ? phaseParam : undefined
+  let commandList = '(not fetched — agent not connected)'
+  try {
+    const agent = agentManager.getAgent(id)
+    if (agent?.isConnected) {
+      const cmds = await fetchGameCommands(profile.server_url, profile.connection_mode)
+      commandList = formatCommandList(cmds)
+    }
+  } catch { /* prompt preview must never fail on a schema fetch */ }
+  const system = buildSystemPrompt(profile, commandList, phase, id)
+  const volatile = buildVolatileState(profile, id)
+  return c.json({
+    profile: profile.name,
+    volatile_split: !!profile.volatile_split,
+    system_prompt_chars: system.length,
+    volatile_chars: volatile.length,
+    command_list_chars: commandList.length,
+    system_prompt: system,
+    volatile_state: volatile,
+  })
 })
 
 // POST /api/profiles/batch — batch connect/disconnect multiple agents

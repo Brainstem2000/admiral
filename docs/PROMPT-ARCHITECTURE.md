@@ -1,6 +1,6 @@
 # Prompt Architecture & Token Efficiency
 
-**Status:** steps 1–4 EXECUTED 2026-08-19. Step 5 (the code change) not started.
+**Status:** steps 1–5 EXECUTED 2026-08-19. Step 5 is live on 2 agents; 9 are the control.
 Fleet is shut down.
 **Analysed:** 2026-08-19. **Evidence window:** 2026-08-06 00:18–15:28 UTC.
 
@@ -232,3 +232,49 @@ The 12% size reduction has landed. **The larger win has not** — memory, TODO a
 `buildSystemPrompt`, so they still invalidate the prefix on every change. Until they
 move to a late message, cache writes stay where they were. Ship it behind a per-agent
 flag, run Morg and one miner on it, and compare `cacheWrite` against the other nine.
+
+
+---
+
+## 10. Step 5 — the volatile/stable split (shipped, on 2 agents)
+
+`buildSystemPrompt` used to interpolate memory, the fleet-intel briefing, the 60-second
+situational briefing, the TODO and pending fleet orders directly into the cached system
+prompt. Every change to any of them invalidated the whole prefix.
+
+That region is now extracted into **`buildVolatileState(profile, profileId)`** and, for
+agents with `profiles.volatile_split = 1`, delivered as a **`## CURRENT STATE` block at
+the front of the per-turn user message** — i.e. at the END of the conversation, after
+the cached prefix.
+
+Two details that make or break it:
+
+- **The rebuild test had to change too.** The cached prompt was rebuilt whenever
+  todo/memory/briefing changed. Under the split those are gated out (`volatileChanged`
+  is forced false), leaving only directive and phase as triggers. Without this the
+  prompt would still churn every 60 seconds and the change would buy nothing.
+- **Cross-references are layout-aware.** The prompt says "your TODO is shown *above*"
+  in six places. Under the split that is false, so a `stateAt` variable renders either
+  `above` or `in the CURRENT STATE message at the end of this conversation`. A stale
+  pointer would send an agent hunting for a block that is not there.
+
+**New read-only route: `GET /api/profiles/:id/prompt[?phase=planning|executing]`** —
+renders an agent's prompt without running a turn or spending a tick, returning the
+system prompt, the volatile block, and their sizes. This is how the split was verified.
+
+### Verified 2026-08-19 (command list excluded — agents offline)
+
+| agent | split | system prompt | volatile moved out |
+|---|---|---|---|
+| Morg'Thar | on | 53,091 | 9,200 |
+| Grit Vane | on | 49,154 | 14,671 |
+| Ledger Voss (control) | off | 65,123 | 0 — still in-prompt |
+
+### What has NOT been proven yet
+
+The saving is **structural, not yet measured**. Nothing has run since 2026-08-09, so
+there is no post-change `cacheWrite` figure. The test is: run the fleet, then compare
+`cacheWrite` per call for Morg and Grit against the nine control agents, using
+`data/baselines/llm-usage-2026-08-06.json` as the before. Expect the control group to
+be unchanged and the two split agents to drop sharply. If they do not, the gate is not
+working and `volatileChanged` is the first thing to check.

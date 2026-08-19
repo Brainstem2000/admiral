@@ -20,6 +20,9 @@ export interface Profile {
   planner_provider: string | null
   planner_model: string | null
   planning_interval: number | null
+  /** 1 = deliver volatile state (memory, todo, briefings, fleet orders) as a
+   *  per-turn message instead of inside the cached system prompt. */
+  volatile_split?: number
   // Additive ChatGPT Business/Codex overlays. The provider/model fields above
   // remain the rollback baseline and are never overwritten by these switches.
   codex_executor_enabled: boolean
