@@ -1,6 +1,7 @@
 # Prompt Architecture & Token Efficiency
 
-**Status:** analysis complete, nothing executed. Fleet is shut down.
+**Status:** steps 1–4 EXECUTED 2026-08-19. Step 5 (the code change) not started.
+Fleet is shut down.
 **Analysed:** 2026-08-19. **Evidence window:** 2026-08-06 00:18–15:28 UTC.
 
 This document exists so the plan is not re-derived from scratch. Read it before
@@ -168,3 +169,66 @@ low-volume (Vera) — pointed at `anthropic`, with the other nine left on claude
 control. `cacheRead`/`cacheWrite` are already logged per call, so the comparison is free.
 Provider is per-agent in `profiles`; switching it changes nothing about directives,
 tooling, or the game connection, so agents stay on mission throughout.
+
+
+---
+
+## 9. Execution log — 2026-08-19
+
+**Steps 1–4 are done.** Operator decisions and what was built:
+
+| decision | ruling |
+|---|---|
+| GAME KNOWLEDGE (11 variants) | union — body de-personalised into `prompt.md`; the per-agent `YOUR GUIDES` stanza stays in each directive |
+| COMMAND AUTHORITY (3 variants) | **rewritten, not merged.** Orders come only from the Admiral, the human operator, or Admiral-interface nudges. Peer requests between agents are *encouraged* where complementary/supportive and where they do not take either agent off mission; must be refused where they would. Escalate reassignment to the Admiral. |
+| MACRO TOOLS (3 variants) | union — fullest set |
+| ANTI-IDLE / ANTI-CASCADE / FACTION STORAGE | mechanical: identical openings, fullest version is a superset |
+| doctrine scope | **universal** — every agent carries all of it; roles change too often here for a role-tiered split |
+| doctrine home | **`prompt.md` on disk**, in git, diffable |
+| BoM lock list | **regenerated** from the live commission_quote; harness named as the real authority |
+| step 5 (code change) | **test on 2 agents first**, behind a per-agent flag |
+
+### Result
+
+| | before | after |
+|---|---|---|
+| fleet directive total | 506,570 | **25,635** (−95%) |
+| `prompt.md` | 4,168 | **44,149** (26 doctrine blocks) |
+| per-agent directive + doctrine | ~50,300 | ~46,500 |
+
+Per-agent directives now hold only: an orientation header, the role-guides stanza,
+the preserved CHARACTER block, and a **current-reality JOB block**.
+
+### The stale-job problem, and why the job blocks were rewritten
+
+Mechanically preserving the sections classified `DIRECTIVE-per-agent` would have kept
+July job descriptions that no longer matched what the agents do — CyberSapper as a
+*Long-Haul Freight Trader*, Nova as a *Missions Specialist*, CyberSpock as *Production
+Chief* for a closed line, Ledger as an *Iron & Steel Miner*. Zibal had no identity block
+at all and would have ended with an empty directive.
+
+That is precisely the failure this whole effort exists to remove: Morg'Thar kept placing
+buy orders because a `JOB — Krynn Market Buyer` section outlived the job. So the job
+blocks were **rewritten to current reality** rather than preserved:
+
+| agent | role now |
+|---|---|
+| Morg'Thar | Vault Keeper & Commissioning Agent — stationary at Krynn/war_citadel; **no buy orders**; use `http_v2` for `commission_ship` |
+| Bob Comet | The Sol Forge — posted to Confederacy Central Command; holds the 30 plutonium |
+| Ledger Voss | Three-Class Extractor — the only rad+ice+gas hull; no mining laser |
+| Nova Reyes | Ice Specialist & Component Bank — found the tritium; largest hold |
+| CyberSapper | Prospector-Miner — Prospect hull, laser + survey scanner, no rad harvester |
+| CyberSpock | Miner, Radioactive & Bulk — keeps the rad harvester fitted |
+| Grit Vane | Heavy Miner — laser III + rad harvester; **check `supported_power`** |
+| Zibal Prospector | Surveyor — new character block written; **dock when ordered** |
+| Vera Lane | Ore Hauler & Thorium Miner — found Bunda Belt |
+| Cass Margin | Ore Hauler — runs on local ollama, useful as a control |
+| Juno Freight | Ore Hauler — ask in chat before leaving a station empty |
+
+### What step 5 still has to do
+
+The 12% size reduction has landed. **The larger win has not** — memory, TODO and the
+60-second situational briefing are still interpolated inside the cached system prompt by
+`buildSystemPrompt`, so they still invalidate the prefix on every change. Until they
+move to a late message, cache writes stay where they were. Ship it behind a per-agent
+flag, run Morg and one miner on it, and compare `cacheWrite` against the other nine.
