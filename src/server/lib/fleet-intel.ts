@@ -34,8 +34,27 @@ export class FleetIntelCollector {
     if (!result || typeof result !== 'object') return
     const r = result as R
 
-    switch (command) {
+    // Dispatch on what the GAME says it did, falling back to a normalised command name.
+    //
+    // This switch used to match the raw command string exactly, which quietly missed
+    // every prefixed form — v2 sends names like `spacemolt_market_view_market`, so
+    // fleet_intel_market stayed empty through hundreds of successful view_market calls.
+    // The response payload carries `action: view_market` regardless of how it was
+    // addressed, so prefer that and keep the name as a fallback for payloads without it.
+    const bare = command
+      .replace(/^spacemolt_/, '')
+      .replace(/^(market|ship|storage|social|nav|combat|faction|mission|crafting|player)_/, '')
+    const key = str(r.action) || bare
+
+    switch (key) {
       case 'view_market': return this.processMarket(r, reportedBy)
+      // get_status and get_poi both carry `location.resources[]` — the per-POI deposit
+      // table with richness, remaining and supported_power. get_status runs on nearly
+      // every turn, so this is the richest intel stream the fleet has and it was going
+      // straight to the floor.
+      case 'get_status':
+      case 'get_poi':
+      case 'status': return this.processLocation(r, reportedBy)
       case 'get_system': return this.processSystem(r, reportedBy)
       case 'get_base': return this.processBase(r, reportedBy)
       case 'get_nearby': return this.processNearby(r, reportedBy)
@@ -63,10 +82,69 @@ export class FleetIntelCollector {
     }
   }
 
+
+  /**
+   * Capture the per-POI deposit table from a `get_status` / `get_poi` result.
+   *
+   * Shape (YAML-rendered for readability):
+   *   location:
+   *     system_id, system_name, poi_id, poi_name, poi_type
+   *     resources:
+   *       - item_id, item_name, richness, remaining, supported_power
+   *
+   * `remaining` falls as a deposit is worked and regenerates over days, so rows are
+   * upserted with a moving last_seen rather than being treated as static facts.
+   */
+  private static processLocation(r: R, reportedBy: string): void {
+    const loc = (r.location && typeof r.location === 'object') ? (r.location as R) : r
+    const poiId = str(loc.poi_id)
+    if (!poiId) return
+    const resources = Array.isArray(loc.resources) ? loc.resources : []
+    if (resources.length === 0) return
+
+    const systemId = str(loc.system_id)
+    const systemName = str(loc.system_name)
+    const poiName = str(loc.poi_name)
+    const poiType = str(loc.poi_type)
+
+    const db = getDb()
+    const upsert = db.query(`
+      INSERT INTO fleet_intel_deposits
+        (poi_id, item_id, system_id, system_name, poi_name, poi_type, item_name,
+         richness, remaining, supported_power, reported_by, first_seen, last_seen)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      ON CONFLICT(poi_id, item_id) DO UPDATE SET
+        system_id = excluded.system_id,
+        system_name = excluded.system_name,
+        poi_name = excluded.poi_name,
+        poi_type = excluded.poi_type,
+        item_name = excluded.item_name,
+        richness = excluded.richness,
+        remaining = excluded.remaining,
+        supported_power = excluded.supported_power,
+        reported_by = excluded.reported_by,
+        last_seen = datetime('now')
+    `)
+    for (const res of resources) {
+      if (!res || typeof res !== 'object') continue
+      const d = res as R
+      const itemId = str(d.item_id)
+      if (!itemId) continue
+      upsert.run(
+        poiId, itemId, systemId, systemName, poiName, poiType,
+        str(d.item_name), num(d.richness), num(d.remaining), num(d.supported_power),
+        reportedBy,
+      )
+    }
+  }
+
   private static processMarket(r: R, reportedBy: string): void {
     // view_market returns: { station_id, station_name, system_name?, items: [...] } or { summary: [...] }
-    const stationId = str(r.station_id)
-    const stationName = str(r.station_name || r.name || '')
+    // The game sends `base_id` / `base`; this originally read only `station_id`, so the
+    // early-return below fired on every single call and fleet_intel_market stayed empty
+    // through 375 view_market calls in one day.
+    const stationId = str(r.station_id || r.base_id)
+    const stationName = str(r.station_name || r.base || r.name || '')
     if (!stationId) return
 
     // Get system name from context (may be in the result or not)

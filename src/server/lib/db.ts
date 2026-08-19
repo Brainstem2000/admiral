@@ -463,6 +463,38 @@ function migrate(db: Database): void {
     -- position history to place them with. Rather than guess a station and be
     -- silently wrong, we mark the agent's storage dirty and let the next
     -- view_storage settle it. Honest staleness beats confident fiction.
+    -- Per-POI deposit intel: what a location actually holds, how rich it is, and
+    -- the mining power it supports.
+    --
+    -- This is the single most valuable intel in the game and it was never captured.
+    -- get_status carries the full resource table on nearly every turn — item_id,
+    -- richness, remaining, supported_power — and the collector had no handler for it,
+    -- so fleet_intel_systems.resources sat at 0/505 populated. Agents rediscovered
+    -- deposits constantly; Goldcrest was eventually found by regexing raw log YAML
+    -- because there was nowhere to look it up.
+    --
+    -- Keyed per (poi, item) because deposits are per-POI, not per-system, and a belt
+    -- holds several. remaining moves as it is mined and regenerates over days, so
+    -- last_seen matters as much as the number.
+    CREATE TABLE IF NOT EXISTS fleet_intel_deposits (
+      poi_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      system_id TEXT DEFAULT '',
+      system_name TEXT DEFAULT '',
+      poi_name TEXT DEFAULT '',
+      poi_type TEXT DEFAULT '',
+      item_name TEXT DEFAULT '',
+      richness INTEGER DEFAULT 0,
+      remaining INTEGER DEFAULT 0,
+      supported_power INTEGER DEFAULT 0,
+      reported_by TEXT DEFAULT '',
+      first_seen TEXT DEFAULT (datetime('now')),
+      last_seen TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (poi_id, item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_dep_item ON fleet_intel_deposits(item_id);
+    CREATE INDEX IF NOT EXISTS idx_dep_system ON fleet_intel_deposits(system_id);
+
     CREATE TABLE IF NOT EXISTS storage_dirty (
       profile_id TEXT NOT NULL,
       reason TEXT DEFAULT '',
@@ -1066,6 +1098,35 @@ export function markStorageDirty(profileId: string, reason: string): void {
 
 export function clearStorageDirty(profileId: string): void {
   db.query('DELETE FROM storage_dirty WHERE profile_id = ?').run(profileId)
+}
+
+/**
+ * Where has the fleet seen this resource? Richest first.
+ *
+ * The query that did not exist: agents re-flew to rediscover deposits because
+ * nothing indexed what they had already surveyed.
+ */
+export function findDeposits(itemId: string, limit = 25): Array<Record<string, unknown>> {
+  return db.query(`SELECT * FROM fleet_intel_deposits
+    WHERE item_id = ? AND remaining > 0
+    ORDER BY remaining DESC, richness DESC LIMIT ?`).all(itemId, limit) as Array<Record<string, unknown>>
+}
+
+/** Everything known about one POI. */
+export function getPoiDeposits(poiId: string): Array<Record<string, unknown>> {
+  return db.query('SELECT * FROM fleet_intel_deposits WHERE poi_id = ? ORDER BY remaining DESC')
+    .all(poiId) as Array<Record<string, unknown>>
+}
+
+/** Coverage summary — how much of the galaxy we have actually surveyed. */
+export function depositStats(): Record<string, unknown> {
+  const row = db.query(`SELECT COUNT(*) AS records, COUNT(DISTINCT poi_id) AS pois,
+    COUNT(DISTINCT item_id) AS items, COUNT(DISTINCT system_id) AS systems,
+    MAX(last_seen) AS newest FROM fleet_intel_deposits`).get() as Record<string, unknown>
+  const top = db.query(`SELECT item_id, COUNT(*) AS pois, SUM(remaining) AS total
+    FROM fleet_intel_deposits WHERE remaining > 0
+    GROUP BY item_id ORDER BY total DESC LIMIT 15`).all()
+  return { ...row, top_items: top }
 }
 
 export function getStorageDirty(): Array<{ profile_id: string; reason: string; since: string }> {
