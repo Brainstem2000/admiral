@@ -1,13 +1,13 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
 import { invalidateBriefingCache } from './briefing'
 import { safeTruncate } from './text-safe'
-import { codexLookup, codexChain, priceAdvisory } from './catalog'
+import { codexLookup, codexChain, priceAdvisory, codexGet } from './catalog'
 
 // Extended query result cache: keyed by "profileId:command:argsJSON"
 const queryCache = new Map<string, { result: string; timestamp: number }>()
@@ -373,6 +373,71 @@ export function checkDoctrineGuards(
     }
   }
 
+  // BoM CRAFT lock. The sell and gift guards above stopped material leaving the fleet, but
+  // nothing stopped an agent consuming a commission line INTO a recipe — and a consumed line is
+  // gone in exactly the same way. Thirteen of the Devastator's 24 lines sit at EXACTLY the
+  // required quantity, and nobody in the galaxy sells neutronium_ingot, so a broken line may be
+  // unrecoverable. The near-miss: the Bonanza King BoM needs durasteel_plate 60 / hull_plating 25
+  // / shield_emitter 5, against War Citadel spares of 14 / 19 / 4.
+  //
+  // The reserve comes from the recorded commission_quote, not a constant, so it follows the real
+  // order as lines are delivered. Items in SELL_CARGO_ALWAYS_EXCLUDE with no recorded requirement
+  // are left alone here — that list guards trade, and blocking every craft on it would stop the
+  // fleet building anything at all.
+  {
+    const bare = command.replace(/^spacemolt_/, '').replace(/^craft_/, '')
+    if (bare === 'craft' || bare.endsWith('_craft')) {
+      const recipeId = String(commandArgs?.id ?? commandArgs?.recipe_id ?? '').trim()
+      const runs = Math.max(1, Number(commandArgs?.quantity ?? commandArgs?.count ?? commandArgs?.runs ?? 1) || 1)
+      const isDryRun = commandArgs?.dry_run === true
+      // The guard is not handed a location, so fall back to the last station this agent
+      // recorded storage at — storage snapshots are written on every view_storage.
+      const stationId = String(commandArgs?.base_id ?? commandArgs?.station_id ?? getMostRecentStation(profileId) ?? '')
+
+      if (recipeId && !isDryRun && stationId) {
+        const recipe = codexGet('recipe', recipeId) as { inputs?: Array<{ item_id?: string; quantity?: number }> } | null
+        for (const input of recipe?.inputs ?? []) {
+          const itemId = String(input?.item_id ?? '').toLowerCase()
+          if (!itemId) continue
+          const required = getCommissionRequirement(itemId)
+          if (required <= 0) continue // not a commission line — crafting with it is fine
+
+          const consuming = Number(input?.quantity ?? 0) * runs
+
+          // Two tiers. The agent's TOTAL is the unrecoverable one — if that falls below the
+          // requirement the line cannot be refilled by moving crates around. The per-station
+          // check is the recoverable one, and is only as good as our guess at where they are
+          // standing, so it never fires alone when the total is still healthy elsewhere.
+          const total = getStorageTotalForProfile(profileId, itemId)
+          const held = getStorageQuantity(profileId, stationId, itemId)
+          const breaksTotal = total - consuming < required
+          const breaksHere = held > 0 && held - consuming < required
+          if (!breaksTotal && !breaksHere) continue
+
+          const elsewhere = getStorageElsewhere(stationId, itemId)
+          const where = elsewhere.length
+            ? elsewhere.map((e) => `${e.quantity} at ${e.station_id}`).join(', ')
+            : 'nowhere else in the fleet'
+          const scope = breaksTotal
+            ? `you hold ${total} in total across every station`
+            : `you hold ${held} at this station (${total} fleet-wide)`
+          return (
+            `BLOCKED by Admiral doctrine: crafting ${recipeId} x${runs} would consume ${consuming} ${itemId}, ` +
+            `but the Crimson Devastator commission requires ${required} and ${scope}. ` +
+            `That line is closed and must stay closed; nobody in the galaxy sells neutronium_ingot, so a broken ` +
+            `line may be unrecoverable.
+
+💡 Stock outside this station: ${where}. ` +
+            (breaksTotal
+              ? `There is no surplus to draw on — do NOT craft this.`
+              : `Source it from there and craft again, or say the exact shortfall in faction chat.`) +
+            ` Never take the last units off a commission line to finish a hull.`
+          )
+        }
+      }
+    }
+  }
+
   // BoM gift lock: gifting is the doctrine-approved way to move material between
   // agents (the jettison guard explicitly recommends it), and send_gift reaches
   // the game through the REST fallback — so it never passes the market sell lock
@@ -696,6 +761,28 @@ export async function executeTool(
     // Prefer structuredContent for the LLM — it has the actual data.
     const resultData = resp.structuredContent ?? resp.result
     let result = formatToolResult(command, resultData, resp.notifications)
+
+    // A commission_quote is the only authoritative statement of what the ship needs, and it is
+    // a FREE query — so bank it whenever one goes past. The craft guard below reads these rows
+    // instead of a hardcoded list, which means it tracks delivered lines as the order evolves.
+    {
+      const bare = command.replace(/^spacemolt_/, '').replace(/^ship_/, '')
+      if (bare === 'commission_quote' || bare.endsWith('_commission_quote')) {
+        try {
+          const d = resultData as Record<string, unknown> | undefined
+          const mats = d?.build_materials as Array<{ item_id?: string; quantity?: number }> | undefined
+          const shipClass = String(d?.ship_class ?? commandArgs?.ship_class ?? commandArgs?.id ?? '').toLowerCase()
+          if (shipClass && Array.isArray(mats) && mats.length) {
+            setCommissionRequirements(
+              shipClass,
+              mats.filter((m) => m?.item_id && Number.isFinite(m.quantity))
+                .map((m) => ({ item_id: String(m.item_id), quantity: Number(m.quantity) })),
+            )
+            ctx.log('system', `[commission] recorded ${mats.length} required lines for ${shipClass} — the craft guard now protects them.`)
+          }
+        } catch { /* capture must never break execution */ }
+      }
+    }
 
     // Price-sanity advisory on sells AND buys: catalog base_value vs price.
     // Advisory only — but the buy-side one is loud (267K overpay incident).

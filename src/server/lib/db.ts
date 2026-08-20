@@ -405,6 +405,19 @@ function migrate(db: Database): void {
   // quotas). Enforced in tools.ts: locked items cannot be sold by ANY path
   // unless a row here has remaining > 0. Agent-memory quota tracking failed
   // twice in one night (armor_plate 60 sold vs 25; mass_driver 4 vs 3).
+  // What the live commission_quote says the ship needs, item by item. The BoM guard
+  // reads this rather than a hardcoded list, so it tracks the real order instead of
+  // drifting: quantities change as lines are delivered and the quote is re-pulled.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS commission_requirements (
+      ship_class TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      quantity INTEGER NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (ship_class, item_id)
+    );
+  `)
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS sell_quotas (
       profile_id TEXT NOT NULL,
@@ -1019,6 +1032,77 @@ export function getSellQuota(profileId: string, itemId: string): number | null {
   const row = db.query('SELECT remaining FROM sell_quotas WHERE profile_id = ? AND item_id = ?')
     .get(profileId, itemId) as { remaining: number } | null
   return row ? row.remaining : null
+}
+
+/**
+ * Replace the recorded requirement for one ship class from a fresh commission_quote.
+ * Whole-set replace, not merge: a line that vanishes from the quote is no longer required,
+ * and a stale row would keep protecting material the ship does not need.
+ */
+export function setCommissionRequirements(shipClass: string, items: Array<{ item_id: string; quantity: number }>): void {
+  const tx = db.transaction((rows: Array<{ item_id: string; quantity: number }>) => {
+    db.query('DELETE FROM commission_requirements WHERE ship_class = ?').run(shipClass)
+    const ins = db.query(
+      'INSERT INTO commission_requirements (ship_class, item_id, quantity) VALUES (?, ?, ?)',
+    )
+    for (const r of rows) {
+      if (!r?.item_id || !Number.isFinite(r.quantity)) continue
+      ins.run(shipClass, String(r.item_id).toLowerCase(), Math.max(0, Math.floor(r.quantity)))
+    }
+  })
+  tx(items)
+}
+
+/** How many of this item the commission needs, across every recorded ship class. */
+export function getCommissionRequirement(itemId: string): number {
+  const row = db.query(
+    'SELECT MAX(quantity) AS q FROM commission_requirements WHERE item_id = ?',
+  ).get(String(itemId).toLowerCase()) as { q: number | null } | null
+  return row?.q ?? 0
+}
+
+export function listCommissionRequirements(shipClass?: string): Array<{ ship_class: string; item_id: string; quantity: number; updated_at: string }> {
+  const sql = shipClass
+    ? 'SELECT * FROM commission_requirements WHERE ship_class = ? ORDER BY item_id'
+    : 'SELECT * FROM commission_requirements ORDER BY ship_class, item_id'
+  return (shipClass ? db.query(sql).all(shipClass) : db.query(sql).all()) as Array<{ ship_class: string; item_id: string; quantity: number; updated_at: string }>
+}
+
+/** What this agent holds of one item at one station — the number the craft guard protects. */
+export function getStorageQuantity(profileId: string, stationId: string, itemId: string): number {
+  const row = db.query(
+    'SELECT quantity FROM storage_inventory WHERE profile_id = ? AND station_id = ? AND item_id = ?',
+  ).get(profileId, stationId, itemId) as { quantity: number } | null
+  return row?.quantity ?? 0
+}
+
+/** Everything this agent holds of one item, across every station. */
+export function getStorageTotalForProfile(profileId: string, itemId: string): number {
+  const row = db.query(
+    'SELECT SUM(quantity) AS q FROM storage_inventory WHERE profile_id = ? AND item_id = ?',
+  ).get(profileId, itemId) as { q: number | null } | null
+  return row?.q ?? 0
+}
+
+/**
+ * The station this agent most recently recorded storage at — our best available proxy for
+ * "where they are standing" inside a guard that is not given location context.
+ * Storage snapshots are written on every view_storage, so this tracks closely in practice.
+ */
+export function getMostRecentStation(profileId: string): string | null {
+  const row = db.query(
+    'SELECT station_id FROM storage_inventory WHERE profile_id = ? ORDER BY updated_at DESC LIMIT 1',
+  ).get(profileId) as { station_id: string } | null
+  return row?.station_id ?? null
+}
+
+/** Fleet-wide holdings of an item outside one station — where to source a blocked craft from. */
+export function getStorageElsewhere(stationId: string, itemId: string): Array<{ profile_id: string; station_id: string; quantity: number }> {
+  return db.query(
+    `SELECT profile_id, station_id, quantity FROM storage_inventory
+     WHERE item_id = ? AND station_id != ? AND quantity > 0
+     ORDER BY quantity DESC LIMIT 5`,
+  ).all(itemId, stationId) as Array<{ profile_id: string; station_id: string; quantity: number }>
 }
 
 export function decrementSellQuota(profileId: string, itemId: string, quantity: number): void {
