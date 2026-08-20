@@ -188,3 +188,30 @@ This feed cannot backfill those rows: it aggregates per *empire*, while the tabl
 Use the `game.spacemolt.com` JSON for data and the `.md` suffix for prose docs.
 
 Agents are for *acting* (buy, sell, craft, travel). Looking things up is free over HTTP.
+
+### Ship and loadout decisions — run the script, do not reason from memory
+
+**`bun scripts/ship-match.ts <agent>`** ranks hulls for a specific agent against their real skill
+sheet, the live catalog, and fleet stock. **`bun scripts/ship-match.ts <agent> <hull_id>`** prints
+a full bill of materials showing what the fleet already holds versus what must be bought, with
+market ask depth per line.
+
+Read **[docs/ship-doctrine.md](docs/ship-doctrine.md)** before any ship, module or hauling
+decision. The short version:
+
+- **Cargo capacity alone is never the criterion.** `congregation` holds 1,900 and has zero
+  utility/weapon/defense slots — it can never mount a mining laser or a shield.
+- **A slot you cannot power is not a slot.** Mining Laser III is 6 CPU / 12 power; multiply
+  against `cpu_capacity` and `power_capacity` before trusting a slot count.
+- **Read `inherent_capabilities`.** `ore_cargo_efficiency: 50` halves ore's cargo cost;
+  `ore_yield_bonus` multiplies every extraction. This is why a purpose-built Miner beats a
+  larger generic hauler.
+- **Match hull to the agent's skills, not their job title.** Check the skill sheet.
+- **Price it before calling it impossible.** Half a bill of materials is usually already in
+  `storage_inventory`, and a 400-cargo freighter has sold for 7,376 credits.
+- **Read ask DEPTH, not the headline ask** — `engine_core` quotes 7,148 at a depth of two.
+- **Fit the ship before flying it.** Both haulers the fleet lost were undefended.
+
+This exists because the fleet concluded "we have no hauler, this is impossible" three times in one
+day while a cheap freighter sat on the market, and flew a mining_power-5 laser for weeks when
+mining_power-22 fits the same slot.
