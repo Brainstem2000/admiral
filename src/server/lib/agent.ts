@@ -15,7 +15,7 @@ import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileTool
 import { runAgentTurn, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
-import { FleetIntelCollector } from './fleet-intel'
+import { FleetIntelCollector, buildDepositBriefing } from './fleet-intel'
 import { safeTruncate } from './text-safe'
 import { LedgerCollector } from './ledger'
 import { startBriefingCollector, stopBriefingCollector, clearBriefingCache, buildSituationalBriefing, buildFactionBriefing, getCachedSystemName } from './briefing'
@@ -434,9 +434,17 @@ export class Agent {
                 // Re-resolve API keys each turn for OAuth providers (tokens expire).
                 signal: this.abortController.signal,
                 apiKey: await resolveApiKey(turnRole.provider),
+                // ...and again mid-turn if the token is rotated out from under us.
+                refreshApiKey: () => resolveApiKey(turnRole.provider),
                 maxToolRounds: turnMaxToolRounds,
                 llmTimeoutMs,
-                maxTokens: isPlanningTurn ? 4096 : 2048,
+                // 2048 was tuned for Sonnet 4.6, which almost never reached it (5 of 1,829
+                // calls, 0.3%). Sonnet 5 writes longer and hit it on 96 of 1,260 calls —
+                // 7.6%, 25x more often — at $0.230 a truncated call against $0.055 for a
+                // normal 4.6 turn. A `length` stop is pure waste: the tokens are paid for
+                // and the turn has to be redone. Raising the ceiling costs nothing on turns
+                // that finish early, because output is billed on what is actually produced.
+                maxTokens: isPlanningTurn ? 8192 : 4096,
                 contextBudgetRatio,
                 onActivity: (a) => this.setActivity(`${phasePrefix}${a}`),
                 compactionModel: hasDualModel ? executorResolved?.model : undefined,
@@ -639,6 +647,18 @@ export class Agent {
           const hunting = FleetIntelCollector.buildHuntingBriefing(getCachedSystemName(this.profileId))
           if (hunting) nudgeParts.push(hunting)
         }
+      }
+
+      // Scarce Resource Register: where the fleet has actually seen the ores that are
+      // hard to find. Ephemeral only — `remaining` changes on every scan, so putting it
+      // in the cached system prompt would rebuild ~25-31k tokens per turn.
+      //
+      // This exists because agents demonstrably do not query the register on their own:
+      // one flew 12 jumps hunting copper the fleet had recorded at ~100,000 units in six
+      // belts, and another searched three systems for silicon we had at richness 44.
+      {
+        const deposits = buildDepositBriefing()
+        if (deposits) nudgeParts.push(deposits)
       }
 
       // Agents on the volatile/stable split get memory, TODO, briefings and fleet

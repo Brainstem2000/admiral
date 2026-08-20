@@ -263,6 +263,40 @@ function migrate(db: Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_fit_system ON fleet_intel_threats(system_id);
 
+    -- Crafting facilities and WHERE they are. The fleet has no other record of this, and
+    -- it cost us repeatedly on 2026-08-20: the Thorium Roaster, Legend's Anvil, Heavy
+    -- Railgun Assembly, Enhanced Driver Workshop and Lithium Cell Foundry were each found
+    -- by accident, from the text of a no_facility error, after agents had already flown
+    -- to the wrong station. Two free sources feed this:
+    --   * facility_list -- everything at the station you are docked at
+    --   * the no_facility error itself, which names the nearest public site
+    --     ("Forge Adamantite is made in a Legend's Anvil ... Nearest public one: The
+    --      Obsidian Well in Arneb (6 jump(s) away)")
+    -- The owned column marks facilities the fleet built and pays upkeep on, so they are
+    -- never confused with public ones we merely have access to.
+    CREATE TABLE IF NOT EXISTS fleet_intel_facilities (
+      station_id TEXT NOT NULL,
+      facility_type TEXT NOT NULL,
+      facility_name TEXT,
+      station_name TEXT,
+      system_name TEXT,
+      recipe_id TEXT,
+      public INTEGER DEFAULT 1,
+      owned INTEGER DEFAULT 0,
+      owner_profile_id TEXT,
+      status TEXT,
+      maintenance TEXT,
+      build_cost INTEGER,
+      notes TEXT,
+      reported_by TEXT NOT NULL,
+      first_seen TEXT DEFAULT (datetime('now')),
+      last_seen TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (station_id, facility_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_fifac_type ON fleet_intel_facilities(facility_type);
+    CREATE INDEX IF NOT EXISTS idx_fifac_owned ON fleet_intel_facilities(owned);
+    CREATE INDEX IF NOT EXISTS idx_fifac_recipe ON fleet_intel_facilities(recipe_id);
+
     -- Confirmed kill zones: NAMED POIs where pirates / pirate wrecks were observed via
     -- get_nearby. These are the spawn nodes get_system is BLIND to (e.g. "Decay Chain
     -- Formation" never appears in get_system's POI list), so they are captured separately,
@@ -1194,6 +1228,22 @@ export function setSellQuota(profileId: string, itemId: string, remaining: numbe
   db.query(`INSERT INTO sell_quotas (profile_id, item_id, remaining) VALUES (?, ?, ?)
     ON CONFLICT(profile_id, item_id) DO UPDATE SET remaining = excluded.remaining, updated_at = datetime('now')`)
     .run(profileId, itemId, remaining)
+}
+
+export interface SellQuotaRow { item_id: string; remaining: number; updated_at: string }
+
+/** Every quota row for one agent, richest first — what the Admiral has released and what is left. */
+export function listSellQuotas(profileId: string): SellQuotaRow[] {
+  return db.query(
+    'SELECT item_id, remaining, updated_at FROM sell_quotas WHERE profile_id = ? ORDER BY remaining DESC, item_id',
+  ).all(profileId) as SellQuotaRow[]
+}
+
+/** Drop a quota row entirely. Absent and zero both block, so this is a tidy-up, not a lock. */
+export function clearSellQuota(profileId: string, itemId: string): boolean {
+  const res = db.query('DELETE FROM sell_quotas WHERE profile_id = ? AND item_id = ?')
+    .run(profileId, itemId)
+  return res.changes > 0
 }
 
 export function getPreference(key: string): string | null {
