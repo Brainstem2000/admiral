@@ -9,8 +9,12 @@ import { safeTruncate, scrubContextSurrogates } from './text-safe'
 // and (pre-fix) re-firing into the cooldown gate. With the cooldown-block early-exit below, 12 is
 // ample for any real turn (place an action → exit) and stops the per-turn over-deliberation.
 const DEFAULT_MAX_TOOL_ROUNDS = 12
-const MAX_RETRIES = 3
-const RETRY_BASE_DELAY = 5000
+// The upstream occasionally answers with a non-JSON body ("JSON Parse error: Unable to
+// parse JSON string") or an empty one. It is transient and self-heals, but 3 retries at a
+// 5s base all land inside ~35s, so a blip lasting a minute burned the whole turn — Morg'Thar
+// lost one that way on 2026-08-19 at ~1% of his calls. 5 retries at a 10s base spans ~310s.
+const MAX_RETRIES = 5
+const RETRY_BASE_DELAY = 10_000
 const DEFAULT_LLM_TIMEOUT_MS = 90_000
 
 const CHARS_PER_TOKEN = 2  // Game JSON tokenizes at ~1.7 chars/token; 2 is a safe approximation
@@ -21,6 +25,12 @@ const SUMMARY_MAX_TOKENS = 1024
 export interface LoopOptions {
   signal?: AbortSignal
   apiKey?: string
+  /** Re-resolves the provider's API key mid-turn. OAuth access tokens (claude-max)
+   *  are rotated on refresh and the *previous* token is revoked immediately, while
+   *  its `expiresAt` is still hours away — so a turn holding the old token 401s on
+   *  every retry until it exhausts them. Three agents burned all 5 attempts that way
+   *  on 2026-08-20 03:48Z when the credentials file rotated mid-turn. */
+  refreshApiKey?: () => Promise<string | undefined>
   maxToolRounds?: number
   maxTokens?: number  // Override LLM maxTokens (default: 4096)
   llmTimeoutMs?: number
@@ -452,6 +462,9 @@ async function completeWithRetry(
   let lastError: Error | null = null
 
   const timeoutMs = options?.llmTimeoutMs || DEFAULT_LLM_TIMEOUT_MS
+  // Mutable across attempts: an OAuth rotation mid-turn invalidates the key we
+  // started with, and retrying with it can only ever 401 again.
+  let apiKey = options?.apiKey
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
@@ -466,7 +479,7 @@ async function completeWithRetry(
         scrubContextSurrogates(context)
         const result = await complete(model, context, {
           signal,
-          apiKey: options?.apiKey,
+          apiKey,
           maxTokens: options?.maxTokens ?? 4096,
           cacheRetention: 'long',
         })
@@ -515,6 +528,25 @@ async function completeWithRetry(
         const sysToks = context.systemPrompt ? estimateTokens(context.systemPrompt) : 0
         const msgToks = totalMessageTokens(context.messages)
         log('system', `Emergency compaction complete: ${context.messages.length} messages, ~${sysToks + msgToks} total tokens (system: ${sysToks}, messages: ${msgToks})`)
+      }
+
+      // Auth failure: the token, not the request, is what's broken. Re-resolve it
+      // before sleeping — for claude-max that re-reads the credentials file that
+      // another process (Claude Code, or our own refresh) just rotated.
+      const isAuthError = lastError.message.includes('authentication_error') ||
+        lastError.message.includes('has been revoked') ||
+        lastError.message.includes('401')
+      if (isAuthError && options?.refreshApiKey) {
+        try {
+          const fresh = await options.refreshApiKey()
+          if (fresh && fresh !== apiKey) {
+            apiKey = fresh
+            log('system', 'Auth error — re-resolved provider credentials; retrying immediately.')
+            continue  // Skip the backoff: a fresh token should work now.
+          }
+        } catch (err) {
+          log('system', `Auth error — credential refresh failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
       }
 
       const delay = RETRY_BASE_DELAY * Math.pow(2, attempt)

@@ -85,6 +85,29 @@ src/shared/types.ts shared TS interfaces
 - `http_v2` transparently falls back to a parallel v1 session for commands missing
   from the v2 route map, so all ~150 commands work regardless of v2 spec coverage.
 
+## Prompt / token efficiency (read before touching prompts)
+
+Full analysis and the staged plan: **`docs/PROMPT-ARCHITECTURE.md`**. Key facts a
+future session must not re-derive or get wrong:
+
+- **Prompt caching is already ON and working — 84.3% hit rate.** `@mariozechner/pi-ai`
+  sets `cache_control` for us (system block + last user message), retention `"short"`
+  (5-min TTL). There is nothing to "enable"; the Claude Console card is not a setting.
+- **The fleet runs on the `claude-max` OAuth subscription**, so the metered API Console
+  shows zero spend and zero token volume. That is expected, not a misconfiguration.
+- **`systemPromptTokens` in `llm_call` logs is an ESTIMATE, not real tokens** —
+  `CHARS_PER_TOKEN = 2` in `loop.ts`. Only `cacheRead`/`cacheWrite`/`input`/`output`
+  come from the provider.
+- **The cost lever is cache WRITES, not enabling caching.** `buildSystemPrompt`
+  interpolates memory, todo, fleet orders, and a situational briefing that refreshes
+  every 60s — all inside the cached prefix, so each one invalidates it. Moving those
+  out is worth more than any size reduction.
+- **Never bulk-delete directive sections without a mapping.** Deleting the
+  `PROCUREMENT SIZING — HARD CAPS` block on 2026-08-06 cost 55,000 game credits within
+  the hour. Relocate by volatility; delete only what is provably superseded.
+- Pre-change baseline: `data/baselines/llm-usage-2026-08-06.json` (source log rows
+  prune after 14 days).
+
 ## Verifying a change
 
 1. `bun run build` (must succeed).
@@ -93,3 +116,48 @@ src/shared/types.ts shared TS interfaces
 3. For agent behavior, create/connect a profile and watch its log stream in the
    dashboard (or `GET /api/profiles/:id/logs?stream=true`).
 4. Stop any test server and remove the throwaway `data/` dir when done.
+
+## SpaceMolt information sources — check these BEFORE brute-forcing
+
+The game exposes far more knowledge than the Admiral DB holds. Every source below has,
+at least once, answered in minutes a question that agents were burning hours on. Check
+them **before** dispatching a fleet-wide sweep, guessing a recipe, or declaring something
+unobtainable.
+
+**1. The in-game forums — free, and other players have already solved your problem.**
+`forum_list` and `forum_get_thread` cost **no game tick**. 613 threads were searchable in
+about six minutes (`scripts/`-style sweep: list every category page, then read bodies).
+This is how we learned that adamantite exists in exactly one place and that the Deep Core
+Extractor Mk I — a `quest_item` with no recipe and no seller — comes from a *repeatable*
+20,000cr mission. Five agents scanning asteroid belts could never have found either.
+**Search the forums first whenever something looks unobtainable.**
+
+**2. The public market board — https://spacemolt.com/market**
+A live, galaxy-wide order book across all five empires, with **real tradeable depth** in
+parentheses (it excludes predatory 1cr lowball orders). Per-station boards live at
+`/market/<station_id>` (e.g. `/market/starfall_salvage_station`). Reach it with the
+Browser tools. This beats polling stations one at a time: it found adamantite_ore at
+20,000 in Outer Rim when Grand Exchange wanted 30,000, and showed exotic_crystal was
+*cheaper to buy than to craft*. Note the quantity column is the whole point — see the
+`min(held, buy_qty)` rule below.
+
+**3. The 13 in-game guides — `get_guide`, free.**
+miner, trader, arbitrage, mission-runner, passenger-lines, pirate-hunter, explorer,
+base-builder, crafting, packages, drones, fuel, client-dev. Reading them overturned three
+standing fleet rulings at once (missions pay ~10x ore; bulk ore with no bid should be
+listed with `create_sell_order`, not dumped; "sell into the best bid" is a documented
+1-credit trap).
+
+**4. The codex — `/api/codex/...` and the agents' `codex` tool.**
+`/api/codex/ship/<id>` gives a ship's authoritative `build_materials` + `default_modules`;
+`/api/codex/recipe/<id>` gives exact inputs; `/api/codex/item/<id>` gives `produced_by`,
+`extracted_by`, rarity and `quest_item`. **`/api/codex/chain/<item>` is LOSSY** — it showed
+`synthesize_neutronium` needing only weapons_grade_plutonium, silently dropping
+durasteel_plate and power_core. Use `/api/codex/recipe/<id>` for anything you will act on.
+
+**5. Two arithmetic rules that have each cost us real money.**
+- Realisable value is **`min(held, buy_qty) × best_buy`**, never `price × holdings`. A
+  surplus that looked like 1.13M realised 61,187.
+- Resolve a requirement **to raw inputs before comparing stock**. Comparing a stock at one
+  depth of the crafting tree against a requirement at another drops the multiplier and
+  produces a confident wrong answer.

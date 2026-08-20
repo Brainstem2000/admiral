@@ -15,7 +15,7 @@ import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileTool
 import { runAgentTurn, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
-import { FleetIntelCollector } from './fleet-intel'
+import { FleetIntelCollector, buildDepositBriefing } from './fleet-intel'
 import { safeTruncate } from './text-safe'
 import { LedgerCollector } from './ledger'
 import { startBriefingCollector, stopBriefingCollector, clearBriefingCache, buildSituationalBriefing, buildFactionBriefing, getCachedSystemName } from './briefing'
@@ -434,9 +434,17 @@ export class Agent {
                 // Re-resolve API keys each turn for OAuth providers (tokens expire).
                 signal: this.abortController.signal,
                 apiKey: await resolveApiKey(turnRole.provider),
+                // ...and again mid-turn if the token is rotated out from under us.
+                refreshApiKey: () => resolveApiKey(turnRole.provider),
                 maxToolRounds: turnMaxToolRounds,
                 llmTimeoutMs,
-                maxTokens: isPlanningTurn ? 4096 : 2048,
+                // 2048 was tuned for Sonnet 4.6, which almost never reached it (5 of 1,829
+                // calls, 0.3%). Sonnet 5 writes longer and hit it on 96 of 1,260 calls —
+                // 7.6%, 25x more often — at $0.230 a truncated call against $0.055 for a
+                // normal 4.6 turn. A `length` stop is pure waste: the tokens are paid for
+                // and the turn has to be redone. Raising the ceiling costs nothing on turns
+                // that finish early, because output is billed on what is actually produced.
+                maxTokens: isPlanningTurn ? 8192 : 4096,
                 contextBudgetRatio,
                 onActivity: (a) => this.setActivity(`${phasePrefix}${a}`),
                 compactionModel: hasDualModel ? executorResolved?.model : undefined,
@@ -641,6 +649,36 @@ export class Agent {
         }
       }
 
+      // Scarce Resource Register: where the fleet has actually seen the ores that are
+      // hard to find. Ephemeral only — `remaining` changes on every scan, so putting it
+      // in the cached system prompt would rebuild ~25-31k tokens per turn.
+      //
+      // This exists because agents demonstrably do not query the register on their own:
+      // one flew 12 jumps hunting copper the fleet had recorded at ~100,000 units in six
+      // belts, and another searched three systems for silicon we had at richness 44.
+      {
+        const deposits = buildDepositBriefing()
+        if (deposits) nudgeParts.push(deposits)
+      }
+
+      // Agents on the volatile/stable split get memory, TODO, briefings and fleet
+      // orders here rather than in the system prompt. It rides at the END of the
+      // conversation, so the large cached prefix in front of it never moves.
+      {
+        const vp = getProfile(this.profileId)
+        if (vp?.volatile_split) {
+          const state = buildVolatileState(vp, this.profileId)
+          if (state.trim()) {
+            nudgeParts.unshift(
+              '## CURRENT STATE (auto-injected every turn — do NOT re-query this)\n' +
+              'This replaces the state block that used to sit in your system prompt. It is\n' +
+              'refreshed every turn and is authoritative over anything you remember.\n\n' +
+              state,
+            )
+          }
+        }
+      }
+
       context.messages.push({
         role: 'user' as const,
         content: nudgeParts.join('\n'),
@@ -652,13 +690,21 @@ export class Agent {
       if (freshProfile) {
         const nextIsPlanningTurn = hasDualModel && (turnCounter % planningInterval === 0)
         const phase = hasDualModel ? (nextIsPlanningTurn ? 'planning' as const : 'executing' as const) : undefined
+        const splitVolatile = !!freshProfile.volatile_split
         const currentDirective = freshProfile.directive || ''
         const currentTodo = freshProfile.todo || ''
         const currentMemory = freshProfile.memory || ''
         const memoryDirty = memoryDirtyFlags.get(this.profileId) ?? false
 
         const currentBriefing = buildSituationalBriefing(this.profileId)
-        if (phase !== cachedPromptPhase || currentDirective !== cachedPromptDirective || currentTodo !== cachedPromptTodo || memoryDirty || currentMemory !== cachedPromptMemory || currentBriefing !== cachedPromptBriefing) {
+        // Under the split the volatile inputs ride in a per-turn message, so they must
+        // NOT be part of the rebuild test — otherwise the prompt (and its cache entry)
+        // would still churn on every memory write and every 60s briefing refresh, and
+        // the whole change would buy nothing.
+        const volatileChanged = splitVolatile
+          ? false
+          : (currentTodo !== cachedPromptTodo || memoryDirty || currentMemory !== cachedPromptMemory || currentBriefing !== cachedPromptBriefing)
+        if (phase !== cachedPromptPhase || currentDirective !== cachedPromptDirective || volatileChanged) {
           cachedPrompt = buildSystemPrompt(freshProfile, commandList, phase, this.profileId)
           cachedPromptPhase = phase
           cachedPromptDirective = currentDirective
@@ -809,7 +855,67 @@ function createConnection(profile: Profile): GameConnection {
   }
 }
 
-function buildSystemPrompt(profile: Profile, commandList: string, phase?: 'planning' | 'executing', profileId?: string): string {
+
+/**
+ * The volatile half of an agent's context: memory, the fleet-intel and situational
+ * briefings, the TODO, and pending fleet orders.
+ *
+ * These change constantly — the situational briefing alone refreshes every 60s —
+ * and while they lived inside the system prompt every change invalidated the whole
+ * cached prefix. Measured over one operating window that was 149M cache-write
+ * tokens, with one agent rewriting its entire prompt on ~51% of turns. Delivered
+ * as a per-turn message instead, the cached prefix stops moving.
+ *
+ * Enabled per agent via `profiles.volatile_split`.
+ */
+export function buildVolatileState(profile: Profile, profileId?: string): string {
+  return `## Agent Memory
+${profile.memory || '(No memory stored yet. Use update_memory to save important information.)'}
+
+${(() => {
+  try {
+    const briefing = FleetIntelCollector.buildBriefing(profile.username || undefined)
+    return briefing ? `## Fleet Intelligence Briefing\nShared intel from all Admiral agents:\n${briefing}\n` : ''
+  } catch { return '' }
+})()}${(() => {
+  if (getPreference('situational_briefing') === 'off' || !profileId) return ''
+  const sitBriefing = buildSituationalBriefing(profileId)
+  return sitBriefing ? `## Current Situation — LIVE GROUND TRUTH (auto-collected, refreshed every 60s — DO NOT re-query this data)\n⚠️ AUTHORITATIVE: if your Agent Memory or TODO List disagrees with anything below — your ACTIVE SHIP, location, fuel, credits, or cargo — then THIS briefing is correct and your memory/TODO is STALE. Trust this, act on it, and update your memory/TODO to match. Never plan around a ship or location your live status does not confirm.\n${sitBriefing}\n\n` : ''
+})()}${(() => {
+  if (getPreference('situational_briefing') === 'off') return ''
+  // Inject TODO inline to save read_todo round-trips
+  const todo = profile.todo || ''
+  return todo ? `## Your TODO List (auto-injected — no need to call read_todo)\n${todo}\n\n` : '## Your TODO List\n(Empty — use update_todo to set tasks)\n\n'
+})()}${(() => {
+  if (getPreference('situational_briefing') === 'off' || !profileId) return ''
+  // Inject pending fleet orders to save read_fleet_orders round-trips
+  try {
+    const profiles = listProfiles()
+    const nameOf = (id: string) => profiles.find(p => p.id === id)?.name || id.slice(0, 8)
+    const inbox = getFleetOrders({ toProfileId: profileId })
+    const pending = inbox.filter(o => o.status === 'pending' || o.status === 'accepted')
+    if (pending.length === 0) return ''
+    // Cap at 10 most recent orders to prevent prompt overflow (was causing 213k+ token prompts)
+    const capped = pending.slice(-10)
+    const lines = capped.map(o =>
+      `- [${o.id.slice(0, 8)}] ${o.status.toUpperCase()} from ${nameOf(o.from_profile_id)}: [${o.type}] ${safeTruncate(o.description, 200)}${o.progress ? ' | Progress: ' + o.progress : ''}`
+    )
+    const overflow = pending.length > 10 ? `\n(${pending.length - 10} older orders not shown — use read_fleet_orders to see all)` : ''
+    return `## Pending Fleet Orders (auto-injected — use read_fleet_orders only to accept/complete/reject)\n${lines.join('\n')}${overflow}\n\n`
+  } catch { return '' }
+})()}`
+}
+
+export function buildSystemPrompt(profile: Profile, commandList: string, phase?: 'planning' | 'executing', profileId?: string): string {
+  // When the agent is on the volatile/stable split, the changing state is delivered
+  // as a per-turn message instead — see buildVolatileState.
+  const splitVolatile = !!profile.volatile_split
+  // Where the injected state physically sits, so the prompt's cross-references stay
+  // true under both layouts. Getting this wrong makes an agent hunt for a block that
+  // is not where it was told to look.
+  const stateAt = splitVolatile
+    ? 'in the CURRENT STATE message at the end of this conversation'
+    : 'above'
   const promptMd = getPromptMd()
   const directive = profile.directive || 'Play the game. Mine ore, sell it, and grow stronger.'
   const connectionMode = profile.connection_mode
@@ -851,41 +957,7 @@ ${credentials}
 - API/Protocol: ${apiVersion}
 - Use command names exactly as shown in "Available Game Commands" for this profile.
 
-## Agent Memory
-${profile.memory || '(No memory stored yet. Use update_memory to save important information.)'}
-
-${(() => {
-  try {
-    const briefing = FleetIntelCollector.buildBriefing(profile.username || undefined)
-    return briefing ? `## Fleet Intelligence Briefing\nShared intel from all Admiral agents:\n${briefing}\n` : ''
-  } catch { return '' }
-})()}${(() => {
-  if (getPreference('situational_briefing') === 'off' || !profileId) return ''
-  const sitBriefing = buildSituationalBriefing(profileId)
-  return sitBriefing ? `## Current Situation — LIVE GROUND TRUTH (auto-collected, refreshed every 60s — DO NOT re-query this data)\n⚠️ AUTHORITATIVE: if your Agent Memory or TODO List disagrees with anything below — your ACTIVE SHIP, location, fuel, credits, or cargo — then THIS briefing is correct and your memory/TODO is STALE. Trust this, act on it, and update your memory/TODO to match. Never plan around a ship or location your live status does not confirm.\n${sitBriefing}\n\n` : ''
-})()}${(() => {
-  if (getPreference('situational_briefing') === 'off') return ''
-  // Inject TODO inline to save read_todo round-trips
-  const todo = profile.todo || ''
-  return todo ? `## Your TODO List (auto-injected — no need to call read_todo)\n${todo}\n\n` : '## Your TODO List\n(Empty — use update_todo to set tasks)\n\n'
-})()}${(() => {
-  if (getPreference('situational_briefing') === 'off' || !profileId) return ''
-  // Inject pending fleet orders to save read_fleet_orders round-trips
-  try {
-    const profiles = listProfiles()
-    const nameOf = (id: string) => profiles.find(p => p.id === id)?.name || id.slice(0, 8)
-    const inbox = getFleetOrders({ toProfileId: profileId })
-    const pending = inbox.filter(o => o.status === 'pending' || o.status === 'accepted')
-    if (pending.length === 0) return ''
-    // Cap at 10 most recent orders to prevent prompt overflow (was causing 213k+ token prompts)
-    const capped = pending.slice(-10)
-    const lines = capped.map(o =>
-      `- [${o.id.slice(0, 8)}] ${o.status.toUpperCase()} from ${nameOf(o.from_profile_id)}: [${o.type}] ${safeTruncate(o.description, 200)}${o.progress ? ' | Progress: ' + o.progress : ''}`
-    )
-    const overflow = pending.length > 10 ? `\n(${pending.length - 10} older orders not shown — use read_fleet_orders to see all)` : ''
-    return `## Pending Fleet Orders (auto-injected — use read_fleet_orders only to accept/complete/reject)\n${lines.join('\n')}${overflow}\n\n`
-  } catch { return '' }
-})()}## Available Game Commands
+${splitVolatile ? '' : buildVolatileState(profile, profileId)}## Available Game Commands
 Command signatures (full docs via: game(command="help", args={command: "name"})):
 ${commandList}
 
@@ -905,7 +977,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - After registering, IMMEDIATELY save credentials with save_credentials.
 - Read and update your TODO list regularly to track goals and progress.
 - Update your memory regularly with important discoveries, routes, market intel, and lessons learned.
-- Query commands are free but waste time — prefer the auto-injected briefing data above. Only query for data NOT already shown (e.g. analyze_market, get_skills, view_orders).
+- Query commands are free but waste time — prefer the auto-injected briefing data ${stateAt}. Only query for data NOT already shown (e.g. analyze_market, get_skills, view_orders).
 - Action commands cost 1 tick (10 seconds).
 - Always check fuel before traveling and cargo space before mining.
 - Be social -- chat with players you meet.
@@ -913,7 +985,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 ${phase === 'planning' ? `
 ## Current Phase: Strategic Planning
 You are in PLANNING MODE using a high-capability model. A faster executor model will carry out your plan.
-1. Assess the situation — Current Situation, TODO, Memory, and Fleet Orders are ALL shown above. Do NOT call read_todo, read_memory, read_fleet_orders, get_status, get_cargo, get_system, get_nearby, get_active_missions, or get_location — that data is already injected.
+1. Assess the situation — Current Situation, TODO, Memory, and Fleet Orders are ALL shown ${stateAt}. Do NOT call read_todo, read_memory, read_fleet_orders, get_status, get_cargo, get_system, get_nearby, get_active_missions, or get_location — that data is already injected.
 2. Only query for data NOT in the briefing (e.g. analyze_market for trade routes, get_skills, view_orders, forum_list)
 3. Think deeply about your mission directive and long-term strategy
 4. Write a PRIORITIZED action plan to your TODO (update_todo) as a numbered checklist the executor can follow step-by-step
@@ -922,10 +994,10 @@ You are in PLANNING MODE using a high-capability model. A faster executor model 
 ` : phase === 'executing' ? `
 ## Current Phase: Execution
 You are in EXECUTION MODE — act quickly and decisively. A strategic planner periodically updates your TODO with the plan.
-- Your TODO is shown above — follow it step-by-step. Do NOT call read_todo (it's already injected).
-- Your memory is shown above — do NOT call read_memory (it's already injected).
-- Your situation (location, wallet, cargo, missions) is shown above — do NOT call get_status, get_cargo, get_system, get_nearby, get_active_missions, or get_location (already injected, refreshed every 60s).
-- Fleet orders are shown above if any — use read_fleet_orders ONLY to accept/complete/reject, not to check inbox.
+- Your TODO is shown ${stateAt} — follow it step-by-step. Do NOT call read_todo (it's already injected).
+- Your memory is shown ${stateAt} — do NOT call read_memory (it's already injected).
+- Your situation (location, wallet, cargo, missions) is shown ${stateAt} — do NOT call get_status, get_cargo, get_system, get_nearby, get_active_missions, or get_location (already injected, refreshed every 60s).
+- Fleet orders are shown ${stateAt} if any — use read_fleet_orders ONLY to accept/complete/reject, not to check inbox.
 - Execute the next unchecked action, then update the TODO to mark it done (update_todo)
 - If the TODO is empty or fully complete, take sensible default actions aligned with your directive
 - Don't overthink — the planner will handle strategy next cycle

@@ -632,6 +632,18 @@ export async function executeTool(
 
       // Augment common errors with actionable hints to reduce wasted turns
       const errCode = resp.error.code
+
+      // A `no_facility` refusal names the nearest public site for the recipe. That sentence
+      // is free intelligence the fleet has been discarding — it is the only reason we ever
+      // located the Legend's Anvil, the Heavy Railgun Assembly Facility or the Thorium
+      // Roaster, and only after agents had flown to the wrong station first. Bank it.
+      if (errCode === 'no_facility') {
+        try {
+          const recipeId = String(commandArgs?.id ?? commandArgs?.recipe_id ?? '')
+          FleetIntelCollector.processNoFacility(resp.error.message, recipeId, ctx.profileName)
+        } catch { /* intel capture must never break execution */ }
+      }
+
       if (errCode === 'invalid_poi') {
         const target = commandArgs?.target_poi || commandArgs?.target || ''
         const snaked = String(target).toLowerCase().replace(/\s+/g, '_')
@@ -768,9 +780,28 @@ export async function executeTool(
           const orders = Array.isArray(commandArgs?.orders)
             ? (commandArgs.orders as Array<Record<string, unknown>>)
             : [commandArgs ?? {}]
+          // Charge the quota for what actually SOLD, not what was requested.
+          //
+          // This used to decrement by the requested quantity. Morg'Thar asked to sell
+          // 2 fury_cannon into a book holding a single bid; one filled, and the quota
+          // was consumed for both — silently destroying authorisation for a unit that
+          // never left the vault. A thin order book should cost you a trip, not your
+          // permission to sell.
+          const filled = (() => {
+            const d = (resultData ?? {}) as Record<string, unknown>
+            const det = (d.details ?? d) as Record<string, unknown>
+            for (const k of ['quantity_filled', 'filled', 'quantity_sold', 'sold_quantity']) {
+              const n = Number(det[k])
+              if (Number.isFinite(n) && n >= 0) return n
+            }
+            return null
+          })()
           for (const o of orders) {
             const itemId = String(o.item_id ?? o.id ?? '').toLowerCase()
-            const qty = Number(o.quantity ?? 0) || 0
+            const requested = Number(o.quantity ?? 0) || 0
+            // Fall back to the requested amount only when the response does not report
+            // a fill — never charge more than was asked for.
+            const qty = filled === null ? requested : Math.min(filled, requested)
             if (itemId && qty > 0 && SELL_CARGO_ALWAYS_EXCLUDE.has(itemId)) {
               decrementSellQuota(ctx.profileId, itemId, qty)
             }

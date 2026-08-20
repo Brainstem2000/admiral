@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
-import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, reorderProfiles } from '../lib/db'
+import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, reorderProfiles, listSellQuotas, setSellQuota, clearSellQuota } from '../lib/db'
+import { buildSystemPrompt, buildVolatileState } from '../lib/agent'
+import { fetchGameCommands, formatCommandList } from '../lib/schema'
 import { agentManager } from '../lib/agent-manager'
 import { resolveProfileModelRouting } from '../lib/model-routing'
 import type { Profile } from '../../shared/types'
@@ -201,6 +203,39 @@ profiles.post('/:id/command', async (c) => {
   }
 })
 
+/**
+ * GET /api/profiles/:id/prompt — render this agent's prompt without running a turn.
+ *
+ * Read-only. Lets you verify prompt assembly (and the volatile/stable split) without
+ * spending an LLM call or a game tick. `?phase=planning|executing` to see a phase block.
+ */
+profiles.get('/:id/prompt', async (c) => {
+  const id = c.req.param('id')
+  const profile = getProfile(id)
+  if (!profile) return c.json({ error: 'Profile not found' }, 404)
+  const phaseParam = c.req.query('phase')
+  const phase = phaseParam === 'planning' || phaseParam === 'executing' ? phaseParam : undefined
+  let commandList = '(not fetched — agent not connected)'
+  try {
+    const agent = agentManager.getAgent(id)
+    if (agent?.isConnected) {
+      const cmds = await fetchGameCommands(profile.server_url, profile.connection_mode)
+      commandList = formatCommandList(cmds)
+    }
+  } catch { /* prompt preview must never fail on a schema fetch */ }
+  const system = buildSystemPrompt(profile, commandList, phase, id)
+  const volatile = buildVolatileState(profile, id)
+  return c.json({
+    profile: profile.name,
+    volatile_split: !!profile.volatile_split,
+    system_prompt_chars: system.length,
+    volatile_chars: volatile.length,
+    command_list_chars: commandList.length,
+    system_prompt: system,
+    volatile_state: volatile,
+  })
+})
+
 // POST /api/profiles/batch — batch connect/disconnect multiple agents
 profiles.post('/batch', async (c) => {
   const body = await c.req.json()
@@ -262,6 +297,56 @@ profiles.post('/:id/nudge', async (c) => {
   if (!status.running) return c.json({ error: 'Agent is not running' }, 400)
   agentManager.nudge(id, message.trim())
   return c.json({ ok: true })
+})
+
+/**
+ * Sell quotas — the Admiral's per-agent, per-item release of BoM-locked material.
+ *
+ * `SELL_CARGO_ALWAYS_EXCLUDE` in tools.ts blocks locked items on every path; a row here with
+ * `remaining > 0` is the only thing that lets a specific quantity through. Both an absent row
+ * and a zero row block, so granting is always an explicit act.
+ *
+ * These existed only as a DB function before: the sole way to release a sale mid-session was to
+ * open data/admiral.db with a second connection and UPSERT by hand while the server was running.
+ *
+ * NOTE: tools.ts lowercases the item id before looking the quota up, so ids are normalised to
+ * lower case on write and on delete. A quota stored as "Shield_Emitter" would never be found.
+ */
+
+// GET /api/profiles/:id/sell-quotas — what has been released for this agent, and what is left.
+profiles.get('/:id/sell-quotas', (c) => {
+  const id = c.req.param('id')
+  if (!getProfile(id)) return c.json({ error: 'Profile not found' }, 404)
+  return c.json({ quotas: listSellQuotas(id) })
+})
+
+// POST /api/profiles/:id/sell-quotas  body: { item_id, remaining }
+// Sets (or overwrites) one allowance. Overwrites rather than adds — the Admiral authorises an
+// exact quantity against the live commission quote, so a stale row must never accumulate.
+profiles.post('/:id/sell-quotas', async (c) => {
+  const id = c.req.param('id')
+  if (!getProfile(id)) return c.json({ error: 'Profile not found' }, 404)
+
+  const body = await c.req.json().catch(() => null) as Record<string, unknown> | null
+  const itemId = typeof body?.item_id === 'string' ? body.item_id.trim().toLowerCase() : ''
+  if (!itemId) return c.json({ error: 'item_id is required and must be a non-empty string' }, 400)
+
+  const remaining = body?.remaining
+  if (typeof remaining !== 'number' || !Number.isInteger(remaining) || remaining < 0) {
+    return c.json({ error: 'remaining is required and must be a non-negative integer' }, 400)
+  }
+
+  setSellQuota(id, itemId, remaining)
+  return c.json({ ok: true, item_id: itemId, remaining })
+})
+
+// DELETE /api/profiles/:id/sell-quotas/:item_id — drop the row. Absent blocks exactly like zero.
+profiles.delete('/:id/sell-quotas/:item_id', (c) => {
+  const id = c.req.param('id')
+  if (!getProfile(id)) return c.json({ error: 'Profile not found' }, 404)
+  const itemId = c.req.param('item_id').trim().toLowerCase()
+  if (!itemId) return c.json({ error: 'item_id is required' }, 400)
+  return c.json({ ok: true, cleared: clearSellQuota(id, itemId), item_id: itemId })
 })
 
 export default profiles

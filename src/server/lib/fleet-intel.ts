@@ -34,8 +34,27 @@ export class FleetIntelCollector {
     if (!result || typeof result !== 'object') return
     const r = result as R
 
-    switch (command) {
+    // Dispatch on what the GAME says it did, falling back to a normalised command name.
+    //
+    // This switch used to match the raw command string exactly, which quietly missed
+    // every prefixed form — v2 sends names like `spacemolt_market_view_market`, so
+    // fleet_intel_market stayed empty through hundreds of successful view_market calls.
+    // The response payload carries `action: view_market` regardless of how it was
+    // addressed, so prefer that and keep the name as a fallback for payloads without it.
+    const bare = command
+      .replace(/^spacemolt_/, '')
+      .replace(/^(market|ship|storage|social|nav|combat|faction|mission|crafting|player)_/, '')
+    const key = str(r.action) || bare
+
+    switch (key) {
       case 'view_market': return this.processMarket(r, reportedBy)
+      // get_status and get_poi both carry `location.resources[]` — the per-POI deposit
+      // table with richness, remaining and supported_power. get_status runs on nearly
+      // every turn, so this is the richest intel stream the fleet has and it was going
+      // straight to the floor.
+      case 'get_status':
+      case 'get_poi':
+      case 'status': return this.processLocation(r, reportedBy)
       case 'get_system': return this.processSystem(r, reportedBy)
       case 'get_base': return this.processBase(r, reportedBy)
       case 'get_nearby': return this.processNearby(r, reportedBy)
@@ -43,7 +62,67 @@ export class FleetIntelCollector {
       case 'get_map': return this.processMap(r, reportedBy)
       case 'wrecks':
       case 'get_wrecks': return this.processWrecks(r, reportedBy)
+      case 'list':
+      case 'facility_list': return this.processFacilities(r, reportedBy)
     }
+  }
+
+  /** Record which crafting facilities exist at a station. `facility_list` is a free query
+   *  and returns the station's whole roster; without this the fleet has no record of where
+   *  anything can be crafted and rediscovers it by flying to the wrong place. */
+  private static processFacilities(r: R, reportedBy: string): void {
+    const stationId = str(r.base_id || r.station_id || '')
+    if (!stationId) return
+    const stationName = str(r.base_name || r.station_name || '')
+    const rows = [r.station_facilities, r.facilities, r.player_facilities, r.faction_facilities]
+      .filter(Array.isArray).flat() as Array<Record<string, unknown>>
+    if (rows.length === 0) return
+
+    const db = getDb()
+    const q = db.query(`
+      INSERT INTO fleet_intel_facilities
+        (station_id, facility_type, facility_name, station_name, status, maintenance, reported_by, last_seen)
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(station_id, facility_type) DO UPDATE SET
+        facility_name = COALESCE(NULLIF(excluded.facility_name, ''), fleet_intel_facilities.facility_name),
+        station_name  = COALESCE(NULLIF(excluded.station_name, ''),  fleet_intel_facilities.station_name),
+        status        = COALESCE(NULLIF(excluded.status, ''),        fleet_intel_facilities.status),
+        maintenance   = COALESCE(NULLIF(excluded.maintenance, ''),   fleet_intel_facilities.maintenance),
+        last_seen     = datetime('now')
+    `)
+    for (const f of rows) {
+      const type = str(f.type || f.facility_type || f.id || '')
+      if (!type) continue
+      q.run(stationId, type, str(f.name || ''), stationName,
+            str(f.status || ''), str(f.maintenance || ''), reportedBy)
+    }
+  }
+
+  /** Harvest the `no_facility` error, which volunteers the nearest public site:
+   *  "'Forge Adamantite' is made in a Legend's Anvil, and no facility here can make it.
+   *   Nearest public one: The Obsidian Well in Arneb (6 jump(s) away)"
+   *  That single sentence is the only reason we ever located the Legend's Anvil, the Heavy
+   *  Railgun Assembly Facility or the Thorium Roaster — so stop throwing it away. */
+  static processNoFacility(message: string, recipeId: string, reportedBy: string): void {
+    const m = /is made in an? ([^,]+?), and no facility here/i.exec(message)
+    const n = /Nearest public one:\s*(.+?)\s+in\s+([^(]+?)\s*\(/i.exec(message)
+    if (!m || !n) return
+    const facilityName = m[1].trim()
+    const stationName = n[1].trim()
+    const systemName = n[2].trim()
+    const facilityType = facilityName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')
+    const stationId = stationName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')
+    getDb().query(`
+      INSERT INTO fleet_intel_facilities
+        (station_id, facility_type, facility_name, station_name, system_name, recipe_id,
+         public, reported_by, notes, last_seen)
+      VALUES (?, ?, ?, ?, ?, ?, 1, ?, 'located via no_facility hint', datetime('now'))
+      ON CONFLICT(station_id, facility_type) DO UPDATE SET
+        facility_name = COALESCE(NULLIF(excluded.facility_name, ''), fleet_intel_facilities.facility_name),
+        system_name   = COALESCE(NULLIF(excluded.system_name, ''),   fleet_intel_facilities.system_name),
+        recipe_id     = COALESCE(NULLIF(excluded.recipe_id, ''),     fleet_intel_facilities.recipe_id),
+        last_seen     = datetime('now')
+    `).run(stationId, facilityType, facilityName, stationName, systemName, recipeId, reportedBy)
   }
 
   static processNotifications(notifications: unknown[], reportedBy: string): void {
@@ -63,10 +142,91 @@ export class FleetIntelCollector {
     }
   }
 
+
+  /**
+   * Capture the per-POI deposit table from a `get_status` / `get_poi` result.
+   *
+   * Shape (YAML-rendered for readability):
+   *   location:
+   *     system_id, system_name, poi_id, poi_name, poi_type
+   *     resources:
+   *       - item_id, item_name, richness, remaining, supported_power
+   *
+   * `remaining` falls as a deposit is worked and regenerates over days, so rows are
+   * upserted with a moving last_seen rather than being treated as static facts.
+   */
+  private static processLocation(r: R, reportedBy: string): void {
+    // Two different shapes arrive here and they disagree on every field name.
+    //   get_status : { location: { poi_id, poi_name, poi_type, system_id, resources: [{item_id, item_name, supported_power}] } }
+    //   get_poi    : { poi: { id, name, type, system_id, resources: [{resource_id, richness, remaining}] }, resources: [...] }
+    // Reading only the get_status names meant every get_poi bailed on the missing
+    // poi_id and was silently discarded -- which is the one command fleet doctrine
+    // tells agents to run on arrival everywhere. Normalise before touching the DB.
+    const loc = (r.location && typeof r.location === 'object') ? (r.location as R) : r
+    const poi = (loc.poi && typeof loc.poi === 'object') ? (loc.poi as R) : null
+
+    const poiId = str(loc.poi_id) || (poi ? str(poi.id) : '')
+    if (!poiId) return
+    const rawResources = Array.isArray(loc.resources) ? loc.resources
+      : (poi && Array.isArray(poi.resources)) ? poi.resources : []
+    const resources = rawResources
+    if (resources.length === 0) return
+
+    const systemId = str(loc.system_id) || (poi ? str(poi.system_id) : '')
+    const systemName = str(loc.system_name)
+    const poiName = str(loc.poi_name) || (poi ? str(poi.name) : '')
+    const poiType = str(loc.poi_type) || (poi ? str(poi.type) : '')
+
+    const db = getDb()
+    const upsert = db.query(`
+      INSERT INTO fleet_intel_deposits
+        (poi_id, item_id, system_id, system_name, poi_name, poi_type, item_name,
+         richness, remaining, supported_power, reported_by, first_seen, last_seen)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      ON CONFLICT(poi_id, item_id) DO UPDATE SET
+        system_id = excluded.system_id,
+        -- get_poi carries system_id but NOT system_name. Same guard as item_name below:
+        -- without it, every flypast blanked the name a get_status had filled in.
+        system_name = CASE WHEN excluded.system_name <> ''
+                           THEN excluded.system_name ELSE fleet_intel_deposits.system_name END,
+        poi_name = excluded.poi_name,
+        poi_type = CASE WHEN excluded.poi_type <> ''
+                        THEN excluded.poi_type ELSE fleet_intel_deposits.poi_type END,
+        -- get_poi reports richness/remaining but carries no item_name or
+        -- supported_power. Overwriting blindly would blank the richer get_status row
+        -- every time somebody flew past, so keep the old value when the new one is empty.
+        item_name = CASE WHEN excluded.item_name <> ''
+                         THEN excluded.item_name ELSE fleet_intel_deposits.item_name END,
+        richness = excluded.richness,
+        remaining = excluded.remaining,
+        supported_power = CASE WHEN excluded.supported_power > 0
+                               THEN excluded.supported_power
+                               ELSE fleet_intel_deposits.supported_power END,
+        reported_by = excluded.reported_by,
+        last_seen = datetime('now')
+    `)
+    for (const res of resources) {
+      if (!res || typeof res !== 'object') continue
+      const d = res as R
+      // get_status calls it item_id; get_poi calls it resource_id.
+      const itemId = str(d.item_id) || str(d.resource_id)
+      if (!itemId) continue
+      upsert.run(
+        poiId, itemId, systemId, systemName, poiName, poiType,
+        str(d.item_name) || str(d.resource_name), num(d.richness), num(d.remaining),
+        num(d.supported_power) || num(d.supports_power),
+        reportedBy,
+      )
+    }
+  }
+
   private static processMarket(r: R, reportedBy: string): void {
     // view_market returns: { station_id, station_name, system_name?, items: [...] } or { summary: [...] }
-    const stationId = str(r.station_id)
-    const stationName = str(r.station_name || r.name || '')
+    // The game sends `base_id` / `base`; this originally read only `station_id`, so the
+    // early-return below fired on every single call and fleet_intel_market stayed empty
+    // through 375 view_market calls in one day.
+    const stationId = str(r.station_id || r.base_id)
+    const stationName = str(r.station_name || r.base || r.name || '')
     if (!stationId) return
 
     // Get system name from context (may be in the result or not)
@@ -505,6 +665,48 @@ export class FleetIntelCollector {
       .all(limit) as Array<Record<string, unknown>>
   }
 
+  /** Where can we craft X? Owned facilities first — those cost us upkeep and should be
+   *  used before flying to a public one. */
+  static getFacilities(opts: { type?: string; recipe?: string; ownedOnly?: boolean } = {}):
+      Array<Record<string, unknown>> {
+    const where: string[] = []
+    const args: unknown[] = []
+    if (opts.type) { where.push('(facility_type LIKE ? OR facility_name LIKE ?)'); args.push(`%${opts.type}%`, `%${opts.type}%`) }
+    if (opts.recipe) { where.push('recipe_id = ?'); args.push(opts.recipe) }
+    if (opts.ownedOnly) where.push('owned = 1')
+    const sql = `SELECT * FROM fleet_intel_facilities
+      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+      ORDER BY owned DESC, last_seen DESC LIMIT 500`
+    return getDb().query(sql).all(...args) as Array<Record<string, unknown>>
+  }
+
+  /** Register a facility the fleet BUILT. These are assets with upkeep, not just places we
+   *  happen to have access to, so they are flagged `owned` and never expire from pruning. */
+  static recordOwnedFacility(f: {
+    stationId: string; facilityType: string; facilityName?: string; stationName?: string
+    systemName?: string; recipeId?: string; buildCost?: number; ownerProfileId?: string
+    reportedBy: string; notes?: string
+  }): void {
+    getDb().query(`
+      INSERT INTO fleet_intel_facilities
+        (station_id, facility_type, facility_name, station_name, system_name, recipe_id,
+         public, owned, owner_profile_id, build_cost, notes, reported_by, last_seen)
+      VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(station_id, facility_type) DO UPDATE SET
+        owned = 1, public = 0,
+        owner_profile_id = COALESCE(excluded.owner_profile_id, fleet_intel_facilities.owner_profile_id),
+        build_cost       = COALESCE(excluded.build_cost,       fleet_intel_facilities.build_cost),
+        facility_name    = COALESCE(NULLIF(excluded.facility_name, ''), fleet_intel_facilities.facility_name),
+        station_name     = COALESCE(NULLIF(excluded.station_name, ''),  fleet_intel_facilities.station_name),
+        system_name      = COALESCE(NULLIF(excluded.system_name, ''),   fleet_intel_facilities.system_name),
+        recipe_id        = COALESCE(NULLIF(excluded.recipe_id, ''),     fleet_intel_facilities.recipe_id),
+        notes            = COALESCE(NULLIF(excluded.notes, ''),         fleet_intel_facilities.notes),
+        last_seen        = datetime('now')
+    `).run(f.stationId, f.facilityType, f.facilityName ?? '', f.stationName ?? '',
+           f.systemName ?? '', f.recipeId ?? '', f.ownerProfileId ?? null,
+           f.buildCost ?? null, f.notes ?? '', f.reportedBy)
+  }
+
   /** Remove expired threats */
   static cleanup(): void {
     getDb().query("DELETE FROM fleet_intel_threats WHERE expires_at IS NOT NULL AND expires_at < datetime('now')").run()
@@ -635,4 +837,121 @@ export class FleetIntelCollector {
 
     return sections.join('\n\n')
   }
+}
+
+/**
+ * Build the SCARCE RESOURCE REGISTER — an ephemeral, zero-cost digest of where the
+ * fleet has actually seen the ores that are hard to find.
+ *
+ * Why this exists: agents kept flying blind. One ran 12 jumps hunting copper while the
+ * register held six belts at ~100,000 units of it; another searched three systems for
+ * silicon we had recorded at richness 44 with 20,000 remaining. The data was there and
+ * queryable — nobody queried it, because nothing put it in front of them.
+ *
+ * MUST be injected as an EPHEMERAL per-turn message, never into the cached system
+ * prompt: `remaining` changes on every scan, and a per-turn-changing byte in the cached
+ * prompt rebuilds ~25-31k tokens and busts the prompt-cache prefix (measured: ~65% of
+ * LLM spend was spurious cacheWrites). Same rule as buildFactionBriefing.
+ */
+/** How old a scan is, in words an agent can act on. A bare number reads as current fact;
+ *  "14d old" tells the reader to expect the belt to be stripped and plan a fallback. */
+function fmtAge(hours: number): string {
+  if (!Number.isFinite(hours) || hours < 0) return 'age unknown'
+  if (hours < 1) return 'fresh'
+  if (hours < 24) return `${Math.round(hours)}h old`
+  return `${Math.round(hours / 24)}d old`
+}
+
+export function buildDepositBriefing(): string {
+  const db = getDb()
+  type Row = { item_id: string; item_name: string; system_name: string; poi_name: string; richness: number; remaining: number; age_h: number }
+
+  // "Abundant" = you will trip over it, so it needs no directions. The bar has to be high:
+  // at >= 3 POIs this swallowed silicon_ore, which sits at exactly 3 known fields and had an
+  // agent hunting it across five systems for an hour while the register told him it was
+  // "never worth a search". Iron and copper are at ~139 POIs; that is abundant. Three is not.
+  const ABUNDANT_MIN_POIS = 8
+  const abundant = db.query(
+    `SELECT item_id, COUNT(*) AS n FROM fleet_intel_deposits
+     WHERE remaining > 10000 GROUP BY item_id HAVING n >= ?`
+  ).all(ABUNDANT_MIN_POIS) as Array<{ item_id: string; n: number }>
+  const abundantSet = new Set(abundant.map(r => r.item_id))
+
+  // Age matters as much as quantity. On 2026-08-20, 845 of the 939 stocked deposits were
+  // over a week old, and three agents in one hour flew to fields the register still listed
+  // as rich — Ledger hit six stripped belts in a row. A number with no date reads as fact.
+  const rows = db.query(
+    `SELECT item_id, item_name, system_name, poi_name, richness, remaining,
+            (julianday('now') - julianday(last_seen)) * 24 AS age_h
+     FROM fleet_intel_deposits WHERE remaining > 0 ORDER BY remaining DESC`
+  ).all() as Row[]
+
+  const bestPerItem = new Map<string, Row[]>()
+  for (const r of rows) {
+    if (abundantSet.has(r.item_id)) continue
+    const list = bestPerItem.get(r.item_id) ?? []
+    if (list.length < 2) { list.push(r); bestPerItem.set(r.item_id, list) }
+  }
+  if (bestPerItem.size === 0 && abundantSet.size === 0) return ''
+
+  // Take BOTH ends of the workable range, because neither sort alone is right.
+  // Scarcest-first alone fills the list with exhausted deposits (tritium at ~1 unit).
+  // Richest-first alone buries the very things agents hunt: silver/cobalt/platinum at
+  // ~22,000 crowd out titanium at ~1,818. So: the scarce-but-still-workable items first
+  // (those genuinely need directions), then the biggest deposits we know of.
+  // Anything under WORKABLE_FLOOR is not a destination and earns no space.
+  const WORKABLE_FLOOR = 50
+  const workable = [...bestPerItem.entries()]
+    .filter(([, list]) => (list[0]?.remaining ?? 0) >= WORKABLE_FLOOR)
+  const scarcest = [...workable].sort((a, b) => (a[1][0]?.remaining ?? 0) - (b[1][0]?.remaining ?? 0)).slice(0, 10)
+  const richest = [...workable].sort((a, b) => (b[1][0]?.remaining ?? 0) - (a[1][0]?.remaining ?? 0)).slice(0, 8)
+  const seen = new Set(scarcest.map(([k]) => k))
+  const ordered = [...scarcest, ...richest.filter(([k]) => !seen.has(k))]
+
+  const lines: string[] = []
+  for (const [, list] of ordered) {
+    const head = list[0]
+    if (!head) continue
+    const where = list
+      .map(r => `${r.system_name || '?'}/${r.poi_name} r${r.richness} ~${r.remaining} (${fmtAge(r.age_h)})`)
+      .join('  ·  ')
+    lines.push(`- ${head.item_name || head.item_id}: ${where}`)
+  }
+
+  const out = [
+    '## SCARCE RESOURCE REGISTER (your fleet\'s own scans — do not go searching blind)',
+    'Every line came from a `get_poi` somebody already ran. **Each entry carries the age of',
+    'that scan — read it before you commit jumps.** Anything marked in days is a historical',
+    'reading, not a promise: most week-old fields have since been mined out, so treat them as',
+    'leads to verify, and plan a fallback before you fly. Entries marked `fresh` or in hours',
+    'are worth trusting. Still: do NOT burn jumps hunting a resource nobody has listed here,',
+    'and do not assume something is gone because one belt was stripped.',
+    'When you scan a field, that reading updates this register for everyone — reporting a',
+    'stripped belt is real work, not a wasted turn.',
+    ...lines,
+  ]
+  if (abundantSet.size > 0) {
+    // Name one field per abundant item rather than just the item. "It is everywhere" is
+    // useless to an agent who still has to pick a destination, and it reads as "do not
+    // bother looking" — which is how a miner ends up searching five systems for a
+    // resource the register could have pointed at directly.
+    const example = new Map<string, Row>()
+    for (const r of rows) if (abundantSet.has(r.item_id) && !example.has(r.item_id)) example.set(r.item_id, r)
+    const shown = [...abundantSet].slice(0, 8).map(id => {
+      const e = example.get(id)
+      return e ? `${e.item_name || id} (${e.system_name || '?'}/${e.poi_name})` : id
+    })
+    out.push('ABUNDANT — you will trip over these, but here is the richest known field for each anyway:')
+    out.push('  ' + shown.join(' · '))
+  }
+
+  // Name the exhausted ones explicitly. Silence reads as "not looked at yet" and sends
+  // somebody to check; "we looked, it is gone" ends the search.
+  const dead = [...bestPerItem.entries()]
+    .filter(([, list]) => (list[0]?.remaining ?? 0) < WORKABLE_FLOOR)
+    .map(([, list]) => `${list[0]?.item_name || '?'} (~${list[0]?.remaining})`)
+  if (dead.length > 0) {
+    out.push(`WORKED OUT — best known deposit is effectively empty, do not go looking: ${dead.slice(0, 8).join(', ')}`)
+  }
+  return out.join('\n')
 }
