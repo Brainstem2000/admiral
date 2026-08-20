@@ -1,5 +1,15 @@
 # Crimson Devastator — Full Audit
 
+> **CORRECTION 2026-08-19 — the yard fee FLUCTUATES, it does not steadily drift up.**
+> Three readings inside one hour: 1,893,049 → 1,601,505 → 1,905,546. The "+36,000/day"
+> figure stated below was inferred from three readings days apart and is wrong. Re-quote
+> before acting; do not treat a low reading as a deadline or a high one as defeat.
+>
+> **Also corrected:** `fury_alloy` was described as "hold 149, need 120, sell 29 surplus."
+> 149 was fleet-wide; the vault holds exactly 120 against a requirement of 120 — zero
+> surplus. A fleet-wide total is not a usable quantity: storage is per-agent AND
+> per-station. The BoM sell-lock blocked the sale and was right to.
+
 **Run:** 2026-08-06 ~02:00–03:00 UTC · **Method:** live `commission_quote` +
 storage ledger rebuilt from scratch via `view_storage(station_id)` across every
 (agent, station) pair · **Catalog:** codex v0.552.0

@@ -161,3 +161,30 @@ durasteel_plate and power_core. Use `/api/codex/recipe/<id>` for anything you wi
 - Resolve a requirement **to raw inputs before comparing stock**. Comparing a stock at one
   depth of the crafting tree against a requirement at another drops the multiplier and
   produces a confident wrong answer.
+
+### Live data over HTTP — use this INSTEAD of tasking an agent
+
+**Never spend an agent turn looking something up.** These are free, unauthenticated, and current:
+
+```
+https://game.spacemolt.com/api/market        live order book, 3,565 items, WITH BID DEPTH
+https://game.spacemolt.com/api/catalog.json  every item/module/recipe/skill/ship/facility
+https://game.spacemolt.com/api/stations      stations + empires
+https://spacemolt.com/sitemap.md             index of every page; each page also serves .md
+```
+
+`/api/market` carries `best_bid`, `best_ask` **and** `bid_quantity_at_best` — the depth field.
+`realisable = min(held, bid_quantity_at_best) x best_bid`, never `price x holdings`. A headline
+bid has been observed 112 units deep on one item and 1 unit deep on another, so depth is never
+safe to assume.
+
+Admiral's local `fleet_intel_market` now records depth too (`best_buy_qty` / `best_sell_qty`),
+captured from `view_market`. Use `realisableValue()` in `db.ts`, or `GET /api/fleet-intel/realisable`,
+rather than multiplying price by holdings. **A row with NULL depth was written before depth capture
+existed** — its value is still an unvalidated ceiling, and the briefings label it `(depth unknown)`.
+This feed cannot backfill those rows: it aggregates per *empire*, while the table is per *station*.
+
+`https://spacemolt.com/market` is a client-rendered SPA — fetching it returns only the page shell.
+Use the `game.spacemolt.com` JSON for data and the `.md` suffix for prose docs.
+
+Agents are for *acting* (buy, sell, craft, travel). Looking things up is free over HTTP.

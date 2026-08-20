@@ -133,9 +133,9 @@ function MarketTab({ data }: { data: MarketIntel[] }) {
               <div key={item.item_id} className="flex items-center justify-between text-[10px]">
                 <span className="text-muted-foreground">{formatItemName(item.item_id)}</span>
                 <span className="font-mono">
-                  {item.best_sell != null && <span className="text-green-400">{item.best_sell}↓</span>}
+                  {item.best_sell != null && <span className="text-green-400">{item.best_sell}↓{depthTag(item.best_sell_qty)}</span>}
                   {item.best_sell != null && item.best_buy != null && <span className="text-muted-foreground/30 mx-0.5">/</span>}
-                  {item.best_buy != null && <span className="text-blue-400">{item.best_buy}↑</span>}
+                  {item.best_buy != null && <span className="text-blue-400">{item.best_buy}↑{depthTag(item.best_buy_qty)}</span>}
                 </span>
               </div>
             ))}
@@ -286,6 +286,17 @@ function Empty({ message }: { message: string }) {
 
 function formatItemName(id: string): string {
   return id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
+/**
+ * Units resting at that price, e.g. "x2". Rendered dim and small because it qualifies the
+ * price rather than competing with it -- but rendered at all, because a 14,956cr bid that
+ * covers one unit and a 7,530cr bid that covers 112 look identical without it.
+ * Omitted when the quantity was never captured (null), which older rows will be.
+ */
+function depthTag(qty: number | null | undefined) {
+  if (qty == null) return null
+  return <span className="text-muted-foreground/50 text-[9px]">{'×' + qty}</span>
 }
 
 function formatAge(isoDate: string): string {

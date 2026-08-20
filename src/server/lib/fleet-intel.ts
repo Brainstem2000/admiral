@@ -8,6 +8,55 @@ function str(v: unknown): string { return typeof v === 'string' ? v : '' }
 function num(v: unknown): number | null { return typeof v === 'number' ? v : null }
 function int(v: unknown): number { return typeof v === 'number' ? Math.floor(v) : 0 }
 
+/**
+ * Quantity resting at the best price in a raw order book.
+ *
+ * Bids are best-high, asks best-low. Several orders can sit at the same price, so they
+ * are summed. Returns null when the book is absent or unparseable (unknown), and 0 for a
+ * book that is present and empty (genuinely nothing bid) -- callers rely on that split.
+ */
+function qtyAtBest(orders: unknown, side: 'buy' | 'sell'): number | null {
+  if (!Array.isArray(orders)) return null
+  if (orders.length === 0) return 0
+  let bestPrice: number | null = null
+  let qty = 0
+  for (const o of orders) {
+    if (!o || typeof o !== 'object') continue
+    const ord = o as R
+    const price = num(ord.price_each ?? ord.price ?? ord.unit_price)
+    const q = num(ord.quantity ?? ord.qty ?? ord.amount)
+    if (price === null || price <= 0 || q === null || q <= 0) continue
+    if (bestPrice === null || (side === 'buy' ? price > bestPrice : price < bestPrice)) {
+      bestPrice = price
+      qty = q
+    } else if (price === bestPrice) {
+      qty += q
+    }
+  }
+  return bestPrice === null ? null : qty
+}
+
+/**
+ * Units available AT the best price on one side of a market listing.
+ *
+ * view_market reports it directly as `best_buy_qty` / `best_sell_qty`; the public feed at
+ * game.spacemolt.com/api/market calls the same number `bid_quantity_at_best` /
+ * `ask_quantity_at_best`. Where neither field is present the raw order book is walked.
+ *
+ * NOT `buy_quantity` / `bid_quantity`, which is the whole book summed across every price
+ * level: enriched_uranium_rod at Iron Reach reported best_buy_qty 2 against buy_quantity
+ * 38, because the second-best bid was already 122cr lower. Only the at-best figure bounds
+ * what you get at the headline price, so only that one is stored.
+ */
+function bestQty(item: R, side: 'buy' | 'sell'): number | null {
+  const direct = side === 'buy'
+    ? item.best_buy_qty ?? item.bid_quantity_at_best
+    : item.best_sell_qty ?? item.ask_quantity_at_best
+  const n = num(direct)
+  if (n !== null) return Math.max(0, Math.floor(n))
+  return qtyAtBest(side === 'buy' ? item.buy_orders : item.sell_orders, side)
+}
+
 // Known ghost NPCs: permanently-present unkillable phantoms that read as "pirates" in
 // get_nearby but never despawn and cannot be attacked (e.g. "Murmur Load" at
 // ross_248_cryobelt). Sightings of ONLY these must not create/refresh kill zones.
@@ -234,27 +283,42 @@ export class FleetIntelCollector {
 
     const db = getDb()
     const upsert = db.query(`
-      INSERT INTO fleet_intel_market (station_id, station_name, system_name, item_id, best_buy, best_sell, reported_by, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      INSERT INTO fleet_intel_market (station_id, station_name, system_name, item_id,
+                                      best_buy, best_sell, best_buy_qty, best_sell_qty,
+                                      reported_by, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       ON CONFLICT(station_id, item_id) DO UPDATE SET
         station_name = excluded.station_name,
         system_name = CASE WHEN excluded.system_name != '' THEN excluded.system_name ELSE fleet_intel_market.system_name END,
         best_buy = excluded.best_buy,
         best_sell = excluded.best_sell,
+        -- A report that carried no depth must not erase depth we already have, but any
+        -- depth it does carry wins outright -- including 0, since "the bids are gone" is
+        -- exactly the news a seller needs.
+        best_buy_qty  = COALESCE(excluded.best_buy_qty,  fleet_intel_market.best_buy_qty),
+        best_sell_qty = COALESCE(excluded.best_sell_qty, fleet_intel_market.best_sell_qty),
         reported_by = excluded.reported_by,
         updated_at = datetime('now')
     `)
+
+    // One market listing -> one row. Both response shapes land here: the full per-item
+    // view (best_buy/best_sell plus buy_orders/sell_orders books) and the compact
+    // all-items summary (buy_price/sell_price with buy_quantity/sell_quantity).
+    const record = (item: R): void => {
+      const itemId = str(item.item_id || item.id || '')
+      if (!itemId) return
+      const bestBuy = num(item.best_buy_price ?? item.best_buy ?? item.best_bid ?? item.buy_price)
+      const bestSell = num(item.best_sell_price ?? item.best_sell ?? item.best_ask ?? item.sell_price)
+      upsert.run(stationId, stationName, systemName, itemId,
+                 bestBuy, bestSell, bestQty(item, 'buy'), bestQty(item, 'sell'), reportedBy)
+    }
 
     // Full market view with order books
     const items = r.items as R[] | undefined
     if (Array.isArray(items)) {
       for (const item of items) {
         if (!item || typeof item !== 'object') continue
-        const itemId = str((item as R).item_id || (item as R).id || '')
-        if (!itemId) continue
-        const bestBuy = num((item as R).best_buy_price ?? (item as R).best_buy)
-        const bestSell = num((item as R).best_sell_price ?? (item as R).best_sell)
-        upsert.run(stationId, stationName, systemName, itemId, bestBuy, bestSell, reportedBy)
+        record(item as R)
       }
     }
 
@@ -263,11 +327,7 @@ export class FleetIntelCollector {
     if (Array.isArray(summary)) {
       for (const item of summary) {
         if (!item || typeof item !== 'object') continue
-        const itemId = str((item as R).item_id || (item as R).id || '')
-        if (!itemId) continue
-        const bestBuy = num((item as R).best_buy ?? (item as R).buy_price)
-        const bestSell = num((item as R).best_sell ?? (item as R).sell_price)
-        upsert.run(stationId, stationName, systemName, itemId, bestBuy, bestSell, reportedBy)
+        record(item as R)
       }
     }
   }
@@ -611,26 +671,45 @@ export class FleetIntelCollector {
       sections.push(`### Active Threats\n${lines.join('\n')}`)
     }
 
-    // Market opportunities — find items with biggest buy/sell spread across stations
+    // Market opportunities — biggest spread across stations, ranked by what is actually
+    // TRADEABLE rather than by headline margin. Ranking on price alone floated one-unit
+    // books to the top of every briefing: crimson_berserker_plating showed a 14,956cr bid
+    // that covered exactly one unit, with the next at 8,000. `tradeable` is the smaller of
+    // the two sides' at-best depths, so `profit * tradeable` is the whole trade rather than
+    // a per-unit fantasy. Rows predating depth capture sort last and say so.
     const opportunities = db.query(`
       SELECT a.item_id,
-             a.station_name as buy_station, a.best_sell as buy_price,
-             b.station_name as sell_station, b.best_buy as sell_price,
-             (b.best_buy - a.best_sell) as profit
+             a.station_name as buy_station, a.best_sell as buy_price, a.best_sell_qty as buy_depth,
+             b.station_name as sell_station, b.best_buy as sell_price, b.best_buy_qty as sell_depth,
+             (b.best_buy - a.best_sell) as profit,
+             -- Scalar MIN() is NULL if EITHER side is NULL, which is the point: a trade is
+             -- only as big as its smaller side, so one unknown side makes the size unknown.
+             -- Substituting the known side for the unknown one would manufacture exactly the
+             -- false confidence this column exists to remove.
+             MIN(a.best_sell_qty, b.best_buy_qty) as tradeable
       FROM fleet_intel_market a
       JOIN fleet_intel_market b ON a.item_id = b.item_id AND a.station_id != b.station_id
       WHERE a.best_sell IS NOT NULL AND a.best_sell > 0
         AND b.best_buy IS NOT NULL AND b.best_buy > 0
         AND b.best_buy > a.best_sell
-      ORDER BY profit DESC
+        AND (a.best_sell_qty IS NULL OR a.best_sell_qty > 0)
+        AND (b.best_buy_qty IS NULL OR b.best_buy_qty > 0)
+      ORDER BY (tradeable IS NULL),
+               CASE WHEN tradeable IS NULL THEN profit ELSE profit * tradeable END DESC
       LIMIT 5
-    `).all() as Array<{ item_id: string; buy_station: string; buy_price: number; sell_station: string; sell_price: number; profit: number }>
+    `).all() as Array<{ item_id: string; buy_station: string; buy_price: number; buy_depth: number | null;
+                        sell_station: string; sell_price: number; sell_depth: number | null;
+                        profit: number; tradeable: number | null }>
 
     if (opportunities.length > 0) {
+      const n = (v: number) => v.toLocaleString('en-US')
+      const deep = (d: number | null) => (d === null ? '' : ` x${n(d)}`)
       const lines = opportunities.map(o =>
-        `- ${o.item_id}: buy at ${o.buy_station} (${o.buy_price}cr) → sell at ${o.sell_station} (${o.sell_price}cr) = ${o.profit}cr profit`
+        `- ${o.item_id}: buy at ${o.buy_station} (${n(o.buy_price)}cr${deep(o.buy_depth)}) → `
+        + `sell at ${o.sell_station} (${n(o.sell_price)}cr${deep(o.sell_depth)}) = ${n(o.profit)}cr/unit`
+        + (o.tradeable === null ? ' (depth unknown)' : ` x${n(o.tradeable)} = ${n(o.profit * o.tradeable)}cr`)
       )
-      sections.push(`### Market Opportunities\n${lines.join('\n')}`)
+      sections.push(`### Market Opportunities (xN = units tradeable at that price)\n${lines.join('\n')}`)
     }
 
     // Recently discovered systems with stations

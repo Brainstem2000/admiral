@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { FleetIntelCollector } from '../lib/fleet-intel'
-import { findDeposits, getPoiDeposits, depositStats } from '../lib/db'
+import { findDeposits, getPoiDeposits, depositStats, realisableValue, getFleetItemTotals } from '../lib/db'
 
 const fleetIntel = new Hono()
 
@@ -59,6 +59,35 @@ fleetIntel.get('/deposits', (c) => {
   if (item) return c.json({ item_id: item, deposits: findDeposits(item, limit) })
   if (poi) return c.json({ poi_id: poi, deposits: getPoiDeposits(poi) })
   return c.json(depositStats())
+})
+
+/**
+ * GET /api/fleet-intel/realisable?item=<item_id>&held=<n>  — what n units would really fetch
+ * GET /api/fleet-intel/realisable                          — same, for everything the fleet holds
+ *
+ * Answers "what is this actually worth" without multiplying price by holdings. The naive
+ * product assumes a bid exists for every unit at the top price; capping each line at the
+ * quantity actually bid for cut a 4,394,759 valuation of fleet stock to 1,565,224.
+ *
+ * Lines whose depth was never captured are reported separately and NOT added to the total,
+ * because their figure is the uncapped one this endpoint exists to stop people quoting.
+ */
+fleetIntel.get('/realisable', (c) => {
+  const item = c.req.query('item')
+  if (item) {
+    return c.json(realisableValue(item, Number(c.req.query('held') ?? 0)))
+  }
+  const lines = getFleetItemTotals().map(t => realisableValue(t.item_id, t.total))
+  const priced = lines.filter(l => l.depth_known && l.value > 0)
+  const unpriced = lines.filter(l => !l.depth_known && l.value > 0)
+  const sum = (rows: typeof lines) => rows.reduce((n, l) => n + l.value, 0)
+  return c.json({
+    realisable_total: sum(priced),
+    depth_unknown_ceiling: sum(unpriced),
+    priced_lines: priced.length,
+    depth_unknown_lines: unpriced.length,
+    lines: [...priced, ...unpriced].sort((a, b) => b.value - a.value).slice(0, 200),
+  })
 })
 
 /**

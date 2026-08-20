@@ -603,7 +603,29 @@ The **Stellar Alliance owns ZERO faction lockboxes anywhere in the game.** Do NO
 **Rules:**
 - Do NOT waste turns retrying `faction_deposit_credits` or `view_faction_storage` after the first `no_faction_storage` error. The answer will not change.
 - Do NOT try to build a Faction Lockbox — it costs 200,000 cr which is Devastator commission money.
-- There is NO treasurer. Credit pooling happens only when the Admiral explicitly directs it by nudge. Never gift credits on your own initiative, and never expect a NEED chat to be funded — most of the fleet is offline; a NEED is a broadcast, not a plan.
+- There is NO treasurer for general spending. Credit pooling happens only when the Admiral explicitly directs it by nudge. Do not gift credits on your own initiative for equipment, cargo, or opportunities — and never expect a general NEED chat to be funded; a NEED is a broadcast, not a plan.
+
+## ⛽ FUEL REQUESTS ARE PRE-APPROVED (Admiral, 2026-08-19)
+
+**Fuel is the one exception to the no-gifting rule, and it is standing authorisation
+— you do not need to ask.**
+
+A stranded agent earns nothing and can be lost. Fuel is already exempt from the
+wallet floor for your own ship; it is now exempt for a crewmate's too.
+
+**If you hold more than your 25,000 cr floor and another agent asks for fuel money,
+send it.** Credit gifts travel between systems, so you can fund anyone from anywhere.
+
+  * Send what was asked, or 3,000 cr if no amount was named — enough for several jumps.
+  * Say so in faction chat so two agents do not both send.
+  * `send_gift(recipient="<name>", credits=<amount>)`.
+
+**If you are the one who is short: ASK.** Post a NEED in faction chat naming the
+amount and where you are. Do not burn your last fuel on a speculative jump, and do
+not sit idle waiting to be noticed. Asking early is cheap; stranding is not.
+
+Abuse of this is a fuel request from an agent who is not actually short, or one
+large enough to be working capital rather than fuel. Those still need the Admiral.
 
 ## CRAFT JOB SAFETY — NEVER CANCEL BY POLLING
 

@@ -5,6 +5,9 @@ export interface MarketIntel {
   item_id: string
   best_buy: number | null
   best_sell: number | null
+  /** Units resting AT the best price. null = never captured; 0 = no orders. */
+  best_buy_qty: number | null
+  best_sell_qty: number | null
   reported_by: string
   updated_at: string
 }
