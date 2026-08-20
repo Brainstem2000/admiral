@@ -231,6 +231,10 @@ function migrate(db: Database): void {
       item_id TEXT NOT NULL,
       best_buy INTEGER,
       best_sell INTEGER,
+      -- Units resting AT the best price. A price without a quantity is not a
+      -- valuation. NULL = never captured; 0 = the game reported no orders.
+      best_buy_qty INTEGER,
+      best_sell_qty INTEGER,
       reported_by TEXT NOT NULL,
       updated_at TEXT DEFAULT (datetime('now')),
       UNIQUE(station_id, item_id)
@@ -612,6 +616,23 @@ function migrate(db: Database): void {
   }
   if (!fisCols.some(c => c.name === 'poi_types')) {
     db.exec('ALTER TABLE fleet_intel_systems ADD COLUMN poi_types TEXT')
+  }
+
+  // Migrate fleet_intel_market: record ORDER DEPTH alongside price.
+  // The table stored what things cost and discarded how many were wanted at that price,
+  // which made every valuation built on it wrong. Valuing the fleet's non-BoM stock at
+  // price x holdings on 2026-08-20 gave 4,394,759; capping each line by real bid depth
+  // gave 1,565,224 -- a 2.8x overstatement. Depth varies enormously and is not
+  // guessable: shield_emitter was 112 units deep at 7,530 the same afternoon that
+  // crimson_berserker_plating was ONE unit deep (14,956 for the first, 8,000 for the next).
+  // Kept NULLABLE, with no DEFAULT, so "never captured" (NULL) stays distinct from "no
+  // orders on that side" (0) -- realisableValue() treats the two very differently.
+  const fimCols = db.query("PRAGMA table_info(fleet_intel_market)").all() as { name: string }[]
+  if (!fimCols.some(c => c.name === 'best_buy_qty')) {
+    db.exec('ALTER TABLE fleet_intel_market ADD COLUMN best_buy_qty INTEGER')
+  }
+  if (!fimCols.some(c => c.name === 'best_sell_qty')) {
+    db.exec('ALTER TABLE fleet_intel_market ADD COLUMN best_sell_qty INTEGER')
   }
 
   // Migrate fleet_intel_killzones: ghost flag for permanently-present unkillable phantom
@@ -1215,6 +1236,74 @@ export function getFleetItemTotals(): Array<{
       )
      GROUP BY item_id ORDER BY total DESC`)
     .all() as Array<{ item_id: string; total: number; locations: number; in_cargo: number }>
+}
+
+export interface RealisableValue {
+  item_id: string
+  held: number
+  /** Station whose bid realises the most for `held` units, or null if nobody is bidding. */
+  station_id: string | null
+  station_name: string | null
+  system_name: string | null
+  /** Best bid at that station. */
+  price: number | null
+  /** Units bid for AT that price. null means never captured -- NOT zero. */
+  depth: number | null
+  /** Units actually sellable into that bid: min(held, depth). */
+  units: number
+  /** units * price -- what the stack is really worth. */
+  value: number
+  /** false => depth unknown, so `value` is an UPPER BOUND (the old price x holdings figure). */
+  depth_known: boolean
+  updated_at: string | null
+}
+
+/**
+ * What `heldQty` of an item would actually fetch, capped by real bid depth.
+ *
+ * `price * holdings` is not a valuation -- it assumes someone is bidding for every unit
+ * at the top price, and usually nobody is. Use this instead of multiplying.
+ *
+ * Picks the station where the stack realises the MOST, which is not always the one with
+ * the highest headline price: a 112-deep bid at 7,530 beats a one-unit bid at 14,956.
+ * Rows whose depth was never captured are only ever used as a last resort, because their
+ * uncapped figure would otherwise outbid every honest one -- when that happens the result
+ * carries `depth_known: false` and the caller must treat `value` as a ceiling, not a price.
+ */
+export function realisableValue(itemId: string, heldQty: number): RealisableValue {
+  const held = Math.max(0, Math.floor(heldQty))
+  const none: RealisableValue = {
+    item_id: itemId, held, station_id: null, station_name: null, system_name: null,
+    price: null, depth: null, units: 0, value: 0, depth_known: false, updated_at: null,
+  }
+  if (held === 0) return none
+
+  const rows = getDb().query(`
+    SELECT station_id, station_name, system_name, best_buy, best_buy_qty, updated_at
+      FROM fleet_intel_market
+     WHERE item_id = ? AND best_buy IS NOT NULL AND best_buy > 0`)
+    .all(itemId) as Array<{
+      station_id: string; station_name: string; system_name: string
+      best_buy: number; best_buy_qty: number | null; updated_at: string
+    }>
+
+  let best: RealisableValue | null = null
+  for (const r of rows) {
+    const depthKnown = r.best_buy_qty !== null
+    // A known depth of 0 means the bids are gone: the stack realises nothing here.
+    const units = depthKnown ? Math.min(held, Math.max(0, r.best_buy_qty as number)) : held
+    const cand: RealisableValue = {
+      item_id: itemId, held,
+      station_id: r.station_id, station_name: r.station_name, system_name: r.system_name,
+      price: r.best_buy, depth: r.best_buy_qty, units, value: units * r.best_buy,
+      depth_known: depthKnown, updated_at: r.updated_at,
+    }
+    // Verified depth always beats unverified, however big the unverified number looks.
+    if (!best) { best = cand; continue }
+    if (cand.depth_known !== best.depth_known) { if (cand.depth_known) best = cand; continue }
+    if (cand.value > best.value) best = cand
+  }
+  return best ?? none
 }
 
 export function getStorageShips(profileId?: string): Array<Record<string, unknown>> {

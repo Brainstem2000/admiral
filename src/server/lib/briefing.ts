@@ -279,13 +279,28 @@ export function buildSituationalBriefing(profileId: string): string {
   }
 
   // Market summary (top 5 items by margin if available)
+  //
+  // Depth is shown alongside price because price alone reads as unlimited: an agent
+  // seeing "enriched_uranium_rod (buy:12776)" will size a sale as 12,776 x whatever it
+  // holds, when the station is bidding that for exactly TWO units and 122cr less for the
+  // third. `xN` is the quantity at the best price, so it caps the sale.
+  //
+  // This does mean the cached system prompt rebuilds when a book is eaten as well as when
+  // a price moves. That is a real cache cost, accepted deliberately: it is genuine game
+  // state (not a clock, which is what the note below forbids), and it is the number the
+  // agent actually trades on. Drop the `xN` here first if cache writes ever spike.
   if (cache.market && cache.market.length > 0) {
     const items = cache.market.slice(0, 8).map((m: unknown) => {
       const item = m as Record<string, unknown>
       const name = item.item_id ?? item.name ?? '?'
       const buyPrice = item.buy_price ?? item.price ?? '?'
       const sellPrice = item.sell_price ?? ''
-      return sellPrice ? `${name} (buy:${buyPrice} sell:${sellPrice})` : `${name} @${buyPrice}`
+      const qty = (v: unknown) => (typeof v === 'number' ? ` x${v}` : '')
+      const buyQty = qty(item.best_buy_qty ?? item.bid_quantity_at_best)
+      const sellQty = qty(item.best_sell_qty ?? item.ask_quantity_at_best)
+      return sellPrice
+        ? `${name} (buy:${buyPrice}${buyQty} sell:${sellPrice}${sellQty})`
+        : `${name} @${buyPrice}${buyQty}`
     })
     lines.push(`Market: ${items.join(', ')}`)
   }
