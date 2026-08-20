@@ -11,9 +11,9 @@ tsconfig.tsbuildinfo
 dist/
 src/frontend/dist/
 admiral
-admiral.exe
-admiral.new.exe
-admiral.backup.exe
+# every compiled variant: admiral.exe, .new, .prev, .backup, and any future suffix.
+# ~100MB each — one `git add -A` without this would put one in history permanently.
+admiral*.exe
 
 # ad-hoc game-data dumps in the repo root
 /morg_*.json
