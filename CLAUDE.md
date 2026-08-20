@@ -226,3 +226,22 @@ decision. The short version:
 This exists because the fleet concluded "we have no hauler, this is impossible" three times in one
 day while a cheap freighter sat on the market, and flew a mining_power-5 laser for weeks when
 mining_power-22 fits the same slot.
+
+### Before writing any directive — run plan-check
+
+**`bun scripts/plan-check.ts <agent> [--to <system>] <item:qty> ...`**
+
+Answers the questions that produced most of this project's wrong directives: does this agent
+hold it, AT WHICH STATION, how many jumps from where they actually are, will it fit in the hold,
+is it a commission line, and what is the live price *with depth*. It exits noisy when the market
+cache is stale, because depth moves within minutes.
+
+The agent-side companion is **[docs/agent-verification-protocol.md](docs/agent-verification-protocol.md)** —
+each agent runs their own six checks and publishes verified findings to faction chat so nobody
+pays twice for the same lookup.
+
+**The failure mode both exist to stop:** asserting a fact about a place you are not standing in.
+One session produced ~15 corrections; almost all were that shape — summing per-station storage
+fleet-wide, quoting a bid without its depth, planning a "quick handoff" 25 jumps away, or reading
+a cached snapshot instead of the live result. The checks that were made mechanical have produced
+none since. The ones left to discipline kept failing.
