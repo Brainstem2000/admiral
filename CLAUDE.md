@@ -189,6 +189,17 @@ Use the `game.spacemolt.com` JSON for data and the `.md` suffix for prose docs.
 
 Agents are for *acting* (buy, sell, craft, travel). Looking things up is free over HTTP.
 
+**Agents cannot fetch HTTP.** Their tool set is `game`, `mine_until_full`, `goto_system`,
+`sell_cargo`, `codex`, `codex_chain`, memory/todo/status/fleet-order — no web access. The
+endpoints above are for the Admiral to read and *relay*. In-game, agents have
+`analyze_market()` (scales with trading skill), `faction_query_trade_intel()` (cross-station
+price database; item_id lookup at L2), and `faction_trade_intel_status()`.
+
+`view_market` only shows the station you are docked at, and prices differ enormously **by
+empire** — nickel_ore asked 500 in crimson versus 33 in nebula on the same day. Relay a
+cross-empire sheet rather than letting agents price locally.
+
+
 ### Ship and loadout decisions — run the script, do not reason from memory
 
 **`bun scripts/ship-match.ts <agent>`** ranks hulls for a specific agent against their real skill
