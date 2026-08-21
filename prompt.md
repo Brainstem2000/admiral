@@ -430,6 +430,12 @@ primary task is blocked:
 | Has another player solved this | `forum_list` / `forum_get_thread` — free, 600+ threads |
 | Web-only docs (spacemolt.com/docs/*) | You CANNOT fetch the web. Post a NEED — the Admiral reads and relays. |
 
+SEALED PACKAGES (freight) — the trap every agent hits once: a package's item_id is
+`package:<uuid>` — the bare uuid ALWAYS fails with package_not_present. Load with
+storage_withdraw item_id="package:<id>" (100 cargo footprint, always), deliver with
+shipping_deliver package_id=<id> docked at the destination, track with shipping_active
+(next_step hints), un-stick with shipping_return while it sits in your cargo at a station.
+
 PUBLISH WHAT YOU VERIFY — one free check serves twelve agents. Faction-chat formats:
   VERIFIED <station> <item>: bid <p> x<depth> | ask <p> x<depth>
   VERIFIED ROUTE <from> -> <to>: <n> jumps, <n> fuel
