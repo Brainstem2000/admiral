@@ -966,6 +966,7 @@ These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(co
 - read_todo() -- Read your current TODO list
 - update_todo(content="...") -- Replace your TODO list with new content
 - read_memory() -- Read your persistent memory (routes, intel, inventories, lessons)
+- fleet_route(from, to) -- Route between ANY two systems from the fleet's LEARNED jump graph (every route any agent has flown): free, works from anywhere, auto-avoids goldcrest/bluerift. Answers are upper bounds -- confirm with the game's find_route before committing fuel. USE THIS FIRST for any distance question so the fleet never rediscovers a route.
 - update_memory(content="...") -- Replace your persistent memory with new content
 - save_credentials(username, password, empire, player_id) -- Save login credentials locally
 - status_log(category, message) -- Log a status message for the human watching

@@ -95,3 +95,21 @@ console.log('\n=== WALLET DAILY CLOSES (latest day per agent) ===')
 for (const w of db.query(`SELECT profile_id, day, close_balance, min_balance, max_balance FROM wallet_daily w1
   WHERE day = (SELECT MAX(day) FROM wallet_daily w2 WHERE w2.profile_id = w1.profile_id) ORDER BY close_balance DESC`).all() as any[])
   console.log(`  ${N(w.profile_id).padEnd(12)} ${w.day}  close ${String(w.close_balance).padStart(9)}  range ${w.min_balance}..${w.max_balance}`)
+
+console.log('\n=== SYSTEM DANGER BOARD (non-SAFE current grades + 7d trend) ===')
+try {
+  const days = db.query(`SELECT system_id, day, grade FROM system_danger_daily
+    WHERE day >= date('now','-7 days') ORDER BY system_id, day`).all() as any[]
+  const bySys = new Map<string, any[]>()
+  for (const d of days) { if (!bySys.has(d.system_id)) bySys.set(d.system_id, []); bySys.get(d.system_id)!.push(d) }
+  let shown = 0
+  for (const [sys, rows] of bySys) {
+    const latest = rows[rows.length - 1]
+    if (latest.grade === 'SAFE') continue
+    const first = rows[0]
+    const trend = rows.length < 2 ? '' : first.grade === latest.grade ? '  (steady)' : `  (was ${first.grade} ${first.day})`
+    console.log(`  ${sys.padEnd(20)} ${latest.grade.padEnd(10)} as of ${latest.day}${trend}`)
+    shown++
+  }
+  if (!shown) console.log('  (no non-SAFE grades snapshotted yet — populates as fleet_route runs)')
+} catch { console.log('  (system_danger_daily absent — deploys with next binary)') }

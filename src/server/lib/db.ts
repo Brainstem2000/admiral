@@ -619,6 +619,18 @@ function migrate(db: Database): void {
       PRIMARY KEY (a, b)
     );
 
+    -- Daily danger-grade snapshots per system, so danger TRENDS are visible even though
+    -- the raw evidence (wrecks/killzones/sightings) prunes at 7 days. Grades: SAFE, RISKY,
+    -- DANGEROUS ("only go if you are strapped"), FORBIDDEN (fleet ban — never). Written on
+    -- assessment, keeping the WORST grade seen that day. Never pruned.
+    CREATE TABLE IF NOT EXISTS system_danger_daily (
+      system_id TEXT NOT NULL,
+      day TEXT NOT NULL,
+      grade TEXT NOT NULL,
+      evidence TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (system_id, day)
+    );
+
     -- Per (agent, category) high-water mark so ingestion is incremental.
     CREATE TABLE IF NOT EXISTS action_cursor (
       profile_id TEXT NOT NULL,
@@ -1524,6 +1536,58 @@ export function recordSystemLinks(pairs: Array<[string, string]>, source: string
 /** The full learned adjacency — union this with the galaxy_map blob when routing. */
 export function getKnownLinks(): Array<{ a: string; b: string }> {
   return db.query('SELECT a, b FROM system_links').all() as Array<{ a: string; b: string }>
+}
+
+/** Fleet hard bans — systems no route may cross, whatever the evidence says today. */
+export const FORBIDDEN_SYSTEMS = new Set(['goldcrest', 'bluerift'])
+
+const GRADE_RANK: Record<string, number> = { SAFE: 0, RISKY: 1, DANGEROUS: 2, FORBIDDEN: 3 }
+
+/**
+ * Grade one system from live evidence. Calibrated 2026-08-21 against real data:
+ * police_level runs 0–100 (57 known systems sit at ZERO police; 397 are unvisited/unknown),
+ * wreck_type 'ship' means a vessel was destroyed there, killzones carry last_pirate_at.
+ * Unknown space is graded RISKY, not SAFE — absence of evidence is not policing.
+ */
+export function assessSystemDanger(systemId: string): { grade: string; reasons: string[] } {
+  const id = String(systemId).toLowerCase().trim()
+  if (FORBIDDEN_SYSTEMS.has(id)) {
+    return { grade: 'FORBIDDEN', reasons: ['fleet ban — losses recorded here (leviathan corridor)'] }
+  }
+  const reasons: string[] = []
+  const sys = db.query('SELECT police_level FROM fleet_intel_systems WHERE system_id = ?')
+    .get(id) as { police_level: number | null } | undefined
+  let rank: number
+  if (sys?.police_level == null) { rank = GRADE_RANK.RISKY; reasons.push('police level unknown (unvisited)') }
+  else if (sys.police_level >= 55) { rank = GRADE_RANK.SAFE; reasons.push(`police ${sys.police_level}`) }
+  else if (sys.police_level > 0) { rank = GRADE_RANK.RISKY; reasons.push(`low police (${sys.police_level})`) }
+  else { rank = GRADE_RANK.DANGEROUS; reasons.push('ZERO police') }
+
+  const shipWreck = db.query(`SELECT COUNT(*) n FROM fleet_intel_wrecks
+    WHERE system_id = ? AND wreck_type = 'ship' AND last_seen > datetime('now','-72 hours')`)
+    .get(id) as { n: number }
+  if (shipWreck.n > 0) { rank = Math.max(rank, GRADE_RANK.DANGEROUS); reasons.push(`${shipWreck.n} ship wreck(s) <72h`) }
+
+  const kz = db.query(`SELECT COUNT(*) n FROM fleet_intel_killzones
+    WHERE system_id = ? AND pirate_seen = 1 AND last_pirate_at > datetime('now','-7 days')`)
+    .get(id) as { n: number }
+  if (kz.n > 0) { rank = Math.min(rank + 1, GRADE_RANK.DANGEROUS); reasons.push('pirates seen <7d') }
+
+  const grade = (Object.keys(GRADE_RANK) as string[]).find((g) => GRADE_RANK[g] === rank) ?? 'RISKY'
+  // Trend snapshot: keep the WORST grade seen each day, so improvement/decay is visible
+  // long after the raw evidence prunes.
+  try {
+    db.query(`INSERT INTO system_danger_daily (system_id, day, grade, evidence)
+      VALUES (?, date('now'), ?, ?)
+      ON CONFLICT(system_id, day) DO UPDATE SET
+        grade = CASE WHEN
+          (CASE excluded.grade WHEN 'SAFE' THEN 0 WHEN 'RISKY' THEN 1 WHEN 'DANGEROUS' THEN 2 ELSE 3 END) >
+          (CASE grade WHEN 'SAFE' THEN 0 WHEN 'RISKY' THEN 1 WHEN 'DANGEROUS' THEN 2 ELSE 3 END)
+        THEN excluded.grade ELSE grade END,
+        evidence = excluded.evidence`)
+      .run(id, grade, reasons.join('; '))
+  } catch { /* snapshot must never break an assessment */ }
+  return { grade, reasons }
 }
 
 /** Fold a wallet reading into the never-pruned daily min/max/close. Piggybacks the snapshot writer. */

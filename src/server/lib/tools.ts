@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -74,6 +74,14 @@ export const allTools: Tool[] = [
     parameters: Type.Object({}),
   },
   {
+    name: 'fleet_route',
+    description: "Route estimate between ANY two systems from the fleet's learned jump graph (every route any agent has ever flown) — no game tick, works without being at either end, and AVOIDS forbidden systems (goldcrest, bluerift) automatically, which the game's find_route will not do. Distances are upper bounds that improve as the fleet flies; before committing to a trip, confirm with a live find_route from your position.",
+    parameters: Type.Object({
+      from: Type.String({ description: 'Origin system_id (e.g. krynn)' }),
+      to: Type.String({ description: 'Destination system_id (e.g. haven)' }),
+    }),
+  },
+  {
     name: 'update_memory',
     description: 'Update your persistent memory. Save important discoveries, routes, market intel, storage inventories, combat data, lessons. Replaces entire memory - include everything you want to keep.',
     parameters: Type.Object({
@@ -136,7 +144,7 @@ export const allTools: Tool[] = [
   },
 ]
 
-const LOCAL_TOOLS = new Set(['save_credentials', 'update_todo', 'read_todo', 'update_memory', 'read_memory', 'status_log', 'fleet_order', 'read_fleet_orders', 'codex', 'codex_chain'])
+const LOCAL_TOOLS = new Set(['save_credentials', 'update_todo', 'read_todo', 'update_memory', 'read_memory', 'status_log', 'fleet_order', 'read_fleet_orders', 'codex', 'codex_chain', 'fleet_route'])
 // Macro tools: bounded code loops over game commands — one LLM call replaces
 // dozens of per-step calls. They pace themselves (lib_v2 mutations await the
 // tick; other modes sleep between steps), so they bypass the single-action
@@ -1017,6 +1025,65 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
       const result = codexChain(String(args.item_id ?? ''), Number(args.quantity ?? 1))
       ctx.log('tool_result', truncate(result, 200), result)
       return truncateResult(result)
+    }
+    case 'fleet_route': {
+      // BFS over the learned jump graph (system_links: every edge any agent has flown,
+      // seeded from the galaxy map), with fleet-banned systems excluded outright. The
+      // graph is partial by nature — answers are upper bounds, and "no route" only means
+      // the fleet has not learned one yet.
+      const FORBIDDEN = new Set(['goldcrest', 'bluerift'])
+      const from = String(args.from ?? '').toLowerCase().trim()
+      const to = String(args.to ?? '').toLowerCase().trim()
+      let result: string
+      if (!from || !to) {
+        result = 'fleet_route needs both from and to system_ids.'
+      } else {
+        const adj = new Map<string, Set<string>>()
+        for (const l of getKnownLinks()) {
+          if (FORBIDDEN.has(l.a) || FORBIDDEN.has(l.b)) continue
+          if (!adj.has(l.a)) adj.set(l.a, new Set())
+          if (!adj.has(l.b)) adj.set(l.b, new Set())
+          adj.get(l.a)!.add(l.b)
+          adj.get(l.b)!.add(l.a)
+        }
+        if (!adj.has(from)) result = `Unknown origin "${from}" — the fleet has no learned links there yet. Use the game's find_route.`
+        else if (!adj.has(to)) result = `Unknown destination "${to}" — the fleet has no learned links there yet. Use the game's find_route.`
+        else {
+          const prev = new Map<string, string>()
+          const q = [from]; const seen = new Set([from])
+          let found = false
+          while (q.length && !found) {
+            const n = q.shift()!
+            for (const x of adj.get(n) ?? []) {
+              if (seen.has(x)) continue
+              seen.add(x); prev.set(x, n)
+              if (x === to) { found = true; break }
+              q.push(x)
+            }
+          }
+          if (!found) result = `No route learned from ${from} to ${to} avoiding ${[...FORBIDDEN].join('/')} — the real graph may still have one; try the game's find_route.`
+          else {
+            const path = [to]; let c = to
+            while (c !== from) { c = prev.get(c)!; path.unshift(c) }
+            // Danger annotation per hop: SAFE hops print bare; anything worse is tagged so
+            // the route reads as a risk briefing, not just a distance.
+            let risky = 0, dangerous = 0
+            const annotated = path.map((s) => {
+              const d = assessSystemDanger(s)
+              if (d.grade === 'RISKY') { risky++; return `${s}[RISKY]` }
+              if (d.grade === 'DANGEROUS') { dangerous++; return `${s}[DANGEROUS]` }
+              return s
+            })
+            const warn = dangerous > 0
+              ? `\n⚠ ${dangerous} DANGEROUS hop(s) — "only go if you are strapped": armed, shielded, and cleared by the Admiral for unpoliced space.`
+              : risky > 0 ? `\n${risky} RISKY hop(s) (low/unknown police) — get_nearby on arrival, leave on hostile contact.` : ''
+            result = `LEARNED ROUTE (${path.length - 1} jumps, goldcrest/bluerift excluded): ${annotated.join(' > ')}${warn}\n` +
+              `Upper bound from the fleet's learned graph — the real route may be shorter. Confirm with a live find_route before committing fuel.`
+          }
+        }
+      }
+      ctx.log('tool_result', truncate(result, 200), result)
+      return result
     }
     case 'save_credentials': {
       const creds = {
