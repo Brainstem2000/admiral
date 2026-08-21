@@ -163,10 +163,21 @@ export function captureSystemLinks(resultData: unknown, source: string): void {
     const walk = (node: unknown): void => {
       if (!node || typeof node !== 'object' || Array.isArray(node)) return
       const o = node as Record<string, unknown>
-      const sys = typeof o.system_id === 'string' ? o.system_id : undefined
-      if (sys) sysIds.add(sys.toLowerCase())
+      // Owner id: jump/location shapes use system_id; get_system's system node uses bare
+      // `id` — accept it only when connections are co-located, so POI/ship ids never pair.
+      const sys = typeof o.system_id === 'string' ? o.system_id
+        : (typeof o.id === 'string' && Array.isArray(o.connections)) ? o.id : undefined
+      if (typeof o.system_id === 'string') sysIds.add(o.system_id.toLowerCase())
       if (Array.isArray(o.connections)) {
-        const conns = o.connections.filter((c): c is string => typeof c === 'string')
+        // Two wire shapes: plain strings (jump/location) or {system_id, name, distance}
+        // objects (get_system). Object entries' ids must NOT feed the orphan-candidate
+        // set — they are neighbors, not context.
+        const conns = o.connections
+          .map((c) => typeof c === 'string' ? c
+            : (c && typeof c === 'object' && typeof (c as Record<string, unknown>).system_id === 'string')
+              ? String((c as Record<string, unknown>).system_id) : null)
+          .filter((c): c is string => !!c)
+        for (const c of conns) sysIds.delete(c.toLowerCase())
         if (sys) for (const c of conns) pairs.push([sys, c])
         else if (conns.length) orphanConnections.push(conns)
       }
