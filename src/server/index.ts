@@ -137,6 +137,10 @@ setInterval(runPrune, 6 * 60 * 60 * 1000)
 // 12-profile fleet never hammers the login endpoint.
 async function refreshOfflineWallets() {
   const { listProfiles: lp, addFinancialSnapshot, getDb } = await import('./lib/db')
+  // Imported here rather than top-level: index.ts otherwise never references the
+  // agent manager, and the original omission made every sweep iteration throw the
+  // same ReferenceError into its per-profile catch — a silent total failure.
+  const { agentManager } = await import('./lib/agent-manager')
   const db = getDb()
   for (const p of lp()) {
     try {
