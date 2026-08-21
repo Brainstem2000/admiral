@@ -34,3 +34,7 @@ admiral*.exe
 # runtime output logs
 admiral-stdout.log
 admiral-stderr.log
+
+# Admiral watcher state (regenerated; not worth versioning)
+data/needs-admiral.jsonl
+data/needs-admiral.ack

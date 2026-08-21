@@ -277,3 +277,24 @@ sold 100 trade_cipher at the full 504 wall — the same item she had sold at 150
 **Before writing another nudge, ask: is this transient or structural, and is the agent moving?**
 A long persuasive message to a travelling agent is the worst combination — it interrupts the
 journey to deliver something that belonged in state they read on boot.
+
+### First thing every session — check who is waiting on you
+
+```bash
+bun scripts/needs-admiral.ts --catchup   # what came in while nobody was watching
+bun scripts/needs-admiral.ts             # then leave running as a Monitor
+bun scripts/needs-admiral.ts --ack       # after you have acted on the backlog
+```
+
+Detection persists to `data/needs-admiral.jsonl` and the read cursor to `data/needs-admiral.ack`,
+so **the backlog survives a session restart, a server restart and a reboot.** Watch mode is
+session-scoped by nature — nothing can notify a Claude session that does not exist — so `--catchup`
+is the part that matters: run it before anything else.
+
+It filters, in order: relayed third-party MAYDAY traffic, routine "check passed / batch
+progressing" status, and `NEED: <AgentName>` peer-to-peer requests. What survives is an agent that
+is genuinely stopped and waiting on the Admiral.
+
+**Why it is narrow:** a previous monitor fired on every `HALT` and was switched off as noise, after
+which an agent sat blocked for eight minutes with nobody watching. A watcher that cries wolf gets
+turned off, which is strictly worse than no watcher — so bias the filters toward silence.
