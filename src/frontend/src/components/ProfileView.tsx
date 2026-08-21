@@ -1081,8 +1081,28 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
         <Pencil size={10} className="shrink-0 text-muted-foreground/0 group-hover:text-muted-foreground transition-colors" />
       </div>
 
-      {/* Player status */}
-      <PlayerStatus data={playerData} />
+      {/* Player status — live data when connected; otherwise the durable last-known
+          character sheet (profile_last_state, refreshed every ~20 min by the server's
+          offline sweep) so a parked agent can be evaluated without connecting it. */}
+      {playerData ? (
+        <PlayerStatus data={playerData} />
+      ) : (profile as Record<string, unknown>).last_state ? (() => {
+        const ls = (profile as Record<string, unknown>).last_state as Record<string, unknown>
+        const synth = {
+          system: ls.system, poi: ls.poi, credits: ls.credits,
+          ship: { class_name: ls.ship_name || ls.ship_class, hull: ls.hull, fuel: ls.fuel, cargo: ls.cargo },
+        }
+        return (
+          <div>
+            <div className="px-4 pt-1.5 text-[9px] text-muted-foreground/50 uppercase tracking-[1.5px]">
+              last known — {String(ls.updated_at ?? '').slice(5, 16)}Z ({String(ls.ship_class || 'ship ?')})
+            </div>
+            <PlayerStatus data={synth} />
+          </div>
+        )
+      })() : (
+        <PlayerStatus data={null} />
+      )}
 
       {/* Quick commands + side pane toggle */}
       <QuickCommands

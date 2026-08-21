@@ -623,6 +623,22 @@ function migrate(db: Database): void {
     -- the raw evidence (wrecks/killzones/sightings) prunes at 7 days. Grades: SAFE, RISKY,
     -- DANGEROUS ("only go if you are strapped"), FORBIDDEN (fleet ban — never). Written on
     -- assessment, keeping the WORST grade seen that day. Never pruned.
+    -- Last-known character state per profile, written by the offline wallet refresher
+    -- and on connects — so the dashboard can show ship/position/wallet for OFFLINE
+    -- agents (evaluating a parked agent for a mission previously required connecting it).
+    CREATE TABLE IF NOT EXISTS profile_last_state (
+      profile_id TEXT PRIMARY KEY,
+      system TEXT NOT NULL DEFAULT '',
+      poi TEXT NOT NULL DEFAULT '',
+      ship_class TEXT NOT NULL DEFAULT '',
+      ship_name TEXT NOT NULL DEFAULT '',
+      hull TEXT NOT NULL DEFAULT '',
+      fuel TEXT NOT NULL DEFAULT '',
+      cargo TEXT NOT NULL DEFAULT '',
+      credits INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS system_danger_daily (
       system_id TEXT NOT NULL,
       day TEXT NOT NULL,
@@ -1536,6 +1552,30 @@ export function recordSystemLinks(pairs: Array<[string, string]>, source: string
 /** The full learned adjacency — union this with the galaxy_map blob when routing. */
 export function getKnownLinks(): Array<{ a: string; b: string }> {
   return db.query('SELECT a, b FROM system_links').all() as Array<{ a: string; b: string }>
+}
+
+/** Upsert the last-known character state (position/ship/wallet) for offline visibility. */
+export function upsertProfileLastState(profileId: string, s: {
+  system?: string; poi?: string; ship_class?: string; ship_name?: string
+  hull?: string; fuel?: string; cargo?: string; credits?: number
+}): void {
+  db.query(`INSERT INTO profile_last_state (profile_id, system, poi, ship_class, ship_name, hull, fuel, cargo, credits, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(profile_id) DO UPDATE SET
+      system = excluded.system, poi = excluded.poi,
+      ship_class = CASE WHEN excluded.ship_class != '' THEN excluded.ship_class ELSE ship_class END,
+      ship_name = CASE WHEN excluded.ship_name != '' THEN excluded.ship_name ELSE ship_name END,
+      hull = CASE WHEN excluded.hull != '' THEN excluded.hull ELSE hull END,
+      fuel = CASE WHEN excluded.fuel != '' THEN excluded.fuel ELSE fuel END,
+      cargo = CASE WHEN excluded.cargo != '' THEN excluded.cargo ELSE cargo END,
+      credits = excluded.credits, updated_at = datetime('now')`)
+    .run(profileId, s.system ?? '', s.poi ?? '', s.ship_class ?? '', s.ship_name ?? '',
+      s.hull ?? '', s.fuel ?? '', s.cargo ?? '', Number(s.credits ?? 0) || 0)
+}
+
+export function getProfileLastStates(): Map<string, Record<string, unknown>> {
+  const rows = db.query('SELECT * FROM profile_last_state').all() as Array<Record<string, unknown>>
+  return new Map(rows.map((r) => [String(r.profile_id), r]))
 }
 
 /** Fleet hard bans — systems no route may cross, whatever the evidence says today. */

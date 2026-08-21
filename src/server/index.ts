@@ -156,6 +156,34 @@ async function refreshOfflineWallets() {
           .get(p.id) as { storage: number } | undefined
         addFinancialSnapshot(p.id, credits, prev?.storage ?? 0)
       }
+      // While connected anyway, refresh the durable character sheet: position/ship into
+      // profile_last_state, and list_ships/get_ship through the agent's command path so
+      // the capture hooks re-sync the ship registry and module manifest. All silent —
+      // no LLM is involved and nothing lands in the agent's context.
+      try {
+        const { upsertProfileLastState } = await import('./lib/db')
+        const agent = agentManager.getAgent(p.id)
+        let shipClass = '', shipName = '', hull = '', fuel = '', cargo = ''
+        if (agent) {
+          try {
+            const ls = await agent.executeCommand('list_ships', {}, { silent: true }) as Record<string, unknown>
+            const ships = (ls?.structuredContent as Record<string, unknown> | undefined)?.ships as Array<Record<string, unknown>> | undefined
+            const active = ships?.find((sh) => sh.is_active)
+            if (active) {
+              shipClass = String(active.class_id ?? '')
+              shipName = String(active.class_name ?? '')
+              hull = String(active.hull ?? '')
+              fuel = String(active.fuel ?? '')
+            }
+            await agent.executeCommand('get_ship', {}, { silent: true })
+          } catch { /* enrichment optional */ }
+        }
+        upsertProfileLastState(p.id, {
+          system: String(gs?.system ?? ''), poi: String(gs?.poi ?? ''),
+          ship_class: shipClass, ship_name: shipName, hull, fuel, cargo,
+          credits: Number.isFinite(credits) ? credits : 0,
+        })
+      } catch { /* state sheet is best-effort */ }
       await agentManager.disconnect(p.id)
       await new Promise((r) => setTimeout(r, 2500))
     } catch { /* one profile failing must not stop the sweep */ }
