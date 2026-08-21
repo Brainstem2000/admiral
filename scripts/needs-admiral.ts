@@ -36,6 +36,11 @@ const RELAYED = /\[CHAT_MESSAGE\]|\[CHAT\]|MAYDAY|Notifications:|channel"?\s*:\s
 // "NEED: <AgentName> — ..." is one agent asking another, not asking us. Route those only if
 // they stall; they are not the Admiral's inbox.
 const PEER_TO_PEER = /NEED:\s*(Morg|Nova|CyberSpock|CyberSapper|Bob|Cass|Grit|Juno|Ledger|Rook|Vera|Zibal)/i
+// The Admiral's OWN directive is echoed verbatim into the log as a `system` row when a turn is
+// restarted, so any order containing "ask the Admiral" or "NEED:" re-triggers this watcher on
+// the very text that answers it. Self-inflicted noise, and noise is what got the last monitor
+// switched off. Match the echo prefix, not the directive body.
+const SELF_ECHO = /^\s*(Directive updated|Nudge delivered|Fleet order sent|Memory updated|TODO updated)/i
 
 const db = new Database(DB, { readonly: true })
 const names: Record<string, string> = Object.fromEntries(
@@ -63,7 +68,7 @@ function scan(sinceId: number, pages = Infinity): { hits: Hit[]; maxId: number }
     for (const r of rows) {
       cursor = Math.max(cursor, r.id)
       const s = r.summary.replace(/\s+/g, ' ')
-      if (RELAYED.test(s) || BENIGN.test(s) || PEER_TO_PEER.test(s)) continue
+      if (RELAYED.test(s) || BENIGN.test(s) || PEER_TO_PEER.test(s) || SELF_ECHO.test(s)) continue
       if (!ASKING.test(s) && !STUCK.test(s)) continue
       hits.push({ id: r.id, ts: r.timestamp, agent: names[r.profile_id] ?? '?', text: s.slice(0, 220) })
     }
