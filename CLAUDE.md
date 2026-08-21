@@ -245,3 +245,32 @@ One session produced ~15 corrections; almost all were that shape — summing per
 fleet-wide, quoting a bid without its depth, planning a "quick handoff" 25 jumps away, or reading
 a cached snapshot instead of the live result. The checks that were made mechanical have produced
 none since. The ones left to discipline kept failing.
+
+### Changing an agent's behaviour — pick the mechanism, don't default to nudging
+
+There are five ways to alter what an agent does. Three are silent; two interrupt. **Match the
+mechanism to the agent's state**, because interruption cost scales with how mobile they are.
+
+| mechanism | effect | use when |
+|---|---|---|
+| `POST /:id/nudge` | **restarts the turn**; agent re-plans | one transient fact, agent is DOCKED |
+| `PUT /:id {directive}` | **restarts the turn**; rewrites standing orders | policy change, agent is DOCKED |
+| `PUT /:id {todo}` | silent — read on next turn | replace the plan without interrupting |
+| `PUT /:id {memory}` | silent — read on next turn | correct durable facts |
+| disconnect → `PUT` → `connect_llm` | clean boot on the new state | agent is MID-ROUTE or oscillating |
+
+**Only `directive` triggers `restartTurn()`.** `todo` and `memory` writes land silently, which is
+usually what you want.
+
+**Measured cost of getting this wrong (2026-08-20):** both agents received nine interruptions in
+two hours. Morg was docked throughout — 17 transactions, 51,316 credits. Nova was mid-route every
+time — she re-derived a destination on each restart, changed target eight times in 90 minutes,
+arrived nowhere, and managed 6 transactions for 14,600. Same interruptions, wildly different cost.
+
+The stop-rewrite-start sequence fixed it in one pass: disconnect, rewrite `todo` and `memory`
+directly, reconnect. She booted on the new plan with no mid-flight re-derivation and immediately
+sold 100 trade_cipher at the full 504 wall — the same item she had sold at 150 two hours earlier.
+
+**Before writing another nudge, ask: is this transient or structural, and is the agent moving?**
+A long persuasive message to a travelling agent is the worst combination — it interrupts the
+journey to deliver something that belonged in state they read on boot.
