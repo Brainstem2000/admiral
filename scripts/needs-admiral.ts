@@ -41,6 +41,9 @@ const PEER_TO_PEER = /NEED:\s*(Morg|Nova|CyberSpock|CyberSapper|Bob|Cass|Grit|Ju
 // the very text that answers it. Self-inflicted noise, and noise is what got the last monitor
 // switched off. Match the echo prefix, not the directive body.
 const SELF_ECHO = /^\s*(Directive updated|Nudge delivered|Fleet order sent|Memory updated|TODO updated)/i
+// Reading faction chat back produces tool_results that BEGIN with the channel dump and
+// re-quote every NEED already handled — the watcher must not fire on an agent's inbox.
+const CHAT_READBACK = /^\s*channel:\s*(faction|global|local)/i
 
 const db = new Database(DB, { readonly: true })
 const names: Record<string, string> = Object.fromEntries(
@@ -68,7 +71,7 @@ function scan(sinceId: number, pages = Infinity): { hits: Hit[]; maxId: number }
     for (const r of rows) {
       cursor = Math.max(cursor, r.id)
       const s = r.summary.replace(/\s+/g, ' ')
-      if (RELAYED.test(s) || BENIGN.test(s) || PEER_TO_PEER.test(s) || SELF_ECHO.test(s)) continue
+      if (RELAYED.test(s) || BENIGN.test(s) || PEER_TO_PEER.test(s) || SELF_ECHO.test(s) || CHAT_READBACK.test(s)) continue
       if (!ASKING.test(s) && !STUCK.test(s)) continue
       hits.push({ id: r.id, ts: r.timestamp, agent: names[r.profile_id] ?? '?', text: s.slice(0, 220) })
     }
