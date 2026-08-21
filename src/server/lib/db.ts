@@ -501,6 +501,29 @@ function migrate(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_evt_created ON action_events(created_at);
     CREATE INDEX IF NOT EXISTS idx_evt_type ON action_events(event_type);
 
+    -- Standing financial drains: facility rents and taxes, folded from the action
+    -- log's 'other' category. Added 2026-08-21 after a Crew Bunk + Ledger Desk at
+    -- confederacy_central_command turned out to have been billing one agent since
+    -- 2026-07-22 — the rent ESCALATED 15cr -> 433cr per cycle and had consumed
+    -- on the order of 2M credits before anyone noticed, because the ingestion
+    -- swept only item-moving categories and rent fires while agents are offline.
+    -- One row per (agent, station, facility) for rent; one per (agent, empire,
+    -- tax type) for taxes. status flips to 'ended' on facility_dismantle.
+    CREATE TABLE IF NOT EXISTS recurring_obligations (
+      profile_id TEXT NOT NULL,
+      obligation_type TEXT NOT NULL,          -- 'rent' | 'tax'
+      station_id TEXT NOT NULL DEFAULT '',    -- empire name for taxes
+      facility TEXT NOT NULL DEFAULT '',      -- tax type for taxes
+      last_cost INTEGER NOT NULL DEFAULT 0,
+      payment_count INTEGER NOT NULL DEFAULT 0,
+      total_paid INTEGER NOT NULL DEFAULT 0,
+      first_seen TEXT NOT NULL DEFAULT '',
+      last_seen TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active',
+      PRIMARY KEY (profile_id, obligation_type, station_id, facility),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+
     -- Per (agent, category) high-water mark so ingestion is incremental.
     CREATE TABLE IF NOT EXISTS action_cursor (
       profile_id TEXT NOT NULL,
@@ -1216,6 +1239,69 @@ export function getActionCursor(profileId: string, category: string): number {
   const r = db.query('SELECT last_event_id FROM action_cursor WHERE profile_id = ? AND category = ?')
     .get(profileId, category) as { last_event_id?: number } | undefined
   return r?.last_event_id ?? 0
+}
+
+/**
+ * Fold financial drain events into the obligations register. Unlike cargo, this IS
+ * replayed on backfill — a rent paid in July is still money gone, and the whole point
+ * of the register is that history a human never watched still adds up somewhere.
+ * INSERT OR IGNORE on action_events already guarantees each event folds exactly once.
+ */
+export function recordObligations(profileId: string, events: ActionEvent[]): void {
+  const rent = db.query(`
+    INSERT INTO recurring_obligations
+      (profile_id, obligation_type, station_id, facility, last_cost, payment_count, total_paid, first_seen, last_seen)
+    VALUES (?, 'rent', ?, ?, ?, 1, ?, ?, ?)
+    ON CONFLICT(profile_id, obligation_type, station_id, facility) DO UPDATE SET
+      last_cost = excluded.last_cost,
+      payment_count = payment_count + 1,
+      total_paid = total_paid + excluded.total_paid,
+      first_seen = MIN(first_seen, excluded.first_seen),
+      last_seen = MAX(last_seen, excluded.last_seen),
+      status = 'active'`)
+  const tax = db.query(`
+    INSERT INTO recurring_obligations
+      (profile_id, obligation_type, station_id, facility, last_cost, payment_count, total_paid, first_seen, last_seen)
+    VALUES (?, 'tax', ?, ?, ?, 1, ?, ?, ?)
+    ON CONFLICT(profile_id, obligation_type, station_id, facility) DO UPDATE SET
+      last_cost = excluded.last_cost,
+      payment_count = payment_count + 1,
+      total_paid = total_paid + excluded.total_paid,
+      first_seen = MIN(first_seen, excluded.first_seen),
+      last_seen = MAX(last_seen, excluded.last_seen)`)
+  const ended = db.query(`
+    UPDATE recurring_obligations SET status = 'ended', last_seen = MAX(last_seen, ?)
+    WHERE profile_id = ? AND obligation_type = 'rent' AND station_id = ? AND facility = ?`)
+  const tx = db.transaction(() => {
+    for (const e of events) {
+      const d = e.data ?? {}
+      const when = e.created_at ?? ''
+      if (e.event_type === 'other.rent_paid') {
+        const cost = Number(d.cost ?? 0) || 0
+        rent.run(profileId, String(d.base_id ?? ''), String(d.facility ?? ''), cost, cost, when, when)
+      } else if (e.event_type === 'tax.property_paid' || e.event_type === 'tax.income_paid') {
+        const paid = Number(d.paid ?? d.owed ?? 0) || 0
+        tax.run(profileId, String(d.empire ?? ''), e.event_type.replace('tax.', ''), paid, paid, when, when)
+      } else if (e.event_type === 'other.facility_dismantle_completed') {
+        ended.run(when, profileId, String(d.base_id ?? ''), String(d.facility ?? ''))
+      }
+    }
+  })
+  tx()
+}
+
+export interface ObligationRow {
+  profile_id: string; obligation_type: string; station_id: string; facility: string
+  last_cost: number; payment_count: number; total_paid: number
+  first_seen: string; last_seen: string; status: string
+}
+
+/** Active-first, biggest drain first. `activeWithinHours` treats a rent silent longer than that as lapsed. */
+export function listObligations(profileId?: string): ObligationRow[] {
+  const where = profileId ? 'WHERE profile_id = ?' : ''
+  const q = db.query(`SELECT * FROM recurring_obligations ${where}
+    ORDER BY status = 'active' DESC, total_paid DESC`)
+  return (profileId ? q.all(profileId) : q.all()) as ObligationRow[]
 }
 
 /** Events for one agent after a timestamp, oldest first — the snapshot overlay. */

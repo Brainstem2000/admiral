@@ -7,6 +7,7 @@
  * Kill switch: preference "situational_briefing" = "off" disables injection.
  */
 import type { GameConnection, CommandResult } from './connections/interface'
+import { listObligations } from './db'
 
 const REFRESH_INTERVAL = 60_000 // 60 seconds
 
@@ -217,6 +218,26 @@ export function buildSituationalBriefing(profileId: string): string {
   lines.push(`** STATUS: ${isDocked ? 'DOCKED at ' + (poiName || systemName) : 'IN SPACE (not docked — cannot trade/market/storage/missions)'} **`)
   lines.push(`Location: ${systemName}${poiName ? ' > ' + poiName : ''}`)
   lines.push(`Wallet: ${fmtNum(Number(credits))}cr | Fuel: ${fuel}/${maxFuel} | Hull: ${hull}/${maxHull}${shield !== undefined ? ' | Shield: ' + shield : ''}`)
+
+  // Standing drains — every agent sees its own rents every turn. A Crew Bunk +
+  // Ledger Desk billed one agent ~2M over 30 days precisely because no surface
+  // showed it. Rent silent >6h is shown as (lapsed?) rather than dropped: absence
+  // of a payment is weaker evidence than a dismantle event.
+  {
+    const obs = listObligations(profileId).filter(o => o.obligation_type === 'rent' && o.status === 'active')
+    if (obs.length > 0) {
+      const now = Date.now()
+      const parts = obs.map(o => {
+        const staleH = (now - new Date(o.last_seen).getTime()) / 3_600_000
+        // total rounded to 10k: the nag keeps its weight while the briefing text —
+        // which sits inside the CACHED prompt prefix — stays stable between payments
+        // instead of invalidating the cache every rent cycle.
+        const roughTotal = Math.round(o.total_paid / 10_000) * 10_000
+        return `${o.facility} @${o.station_id} ${o.last_cost}cr/cycle (~${fmtNum(roughTotal)} paid to date${staleH > 6 ? ', lapsed?' : ''})`
+      })
+      lines.push(`⚠ ACTIVE RENTALS DRAINING YOUR WALLET: ${parts.join('; ')} — cancel any you are not actively using, or post NEED if unsure how.`)
+    }
+  }
 
   // Ship info
   if (ship) {

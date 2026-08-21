@@ -79,3 +79,16 @@ the last hour** — including numbers the Admiral gives you. The Admiral is work
 tables and a context window; you are standing in the actual station. When your reading disagrees
 with an order, **your reading wins** — say so in faction chat and hold. That has already saved
 this fleet twice.
+
+## Recurring commitments — never without a NEED (added 2026-08-21)
+
+**Renting, leasing, or subscribing to ANYTHING that bills per cycle requires a NEED to the
+Admiral FIRST, with the facility, the station, the per-cycle cost, and the purpose.** No
+exceptions, including "it's only 15cr" — a Crew Bunk + Ledger Desk that started at 15cr/cycle
+escalated 28x and silently consumed ~2M credits over 30 days. Rent bills while you are
+offline and asleep; you will not see it happen.
+
+- Your briefing now shows your active rentals every turn. If one is listed that you are not
+  actively using **this session**, cancel it (Morg'Thar's pattern: rent -> use -> dismantle
+  same day) or post NEED if you cannot find the cancel mechanism.
+- Rent ESCALATES. The price you signed at is not the price you will pay.

@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { FleetIntelCollector } from '../lib/fleet-intel'
-import { findDeposits, getPoiDeposits, depositStats, realisableValue, getFleetItemTotals } from '../lib/db'
+import { findDeposits, getPoiDeposits, depositStats, realisableValue, getFleetItemTotals, listObligations } from '../lib/db'
 
 const fleetIntel = new Hono()
 
@@ -24,6 +24,12 @@ fleetIntel.get('/', (c) => {
     }
     if (c.req.query('wrecks') === 'true') {
       return c.json({ wrecks: FleetIntelCollector.getWreckObservations() })
+    }
+    // ?obligations=true[&profile=id] — standing drains: facility rents + taxes,
+    // folded from the action log. Exists because a rented Crew Bunk + Ledger Desk
+    // billed one agent ~2M credits over 30 days with no surface anywhere.
+    if (c.req.query('obligations') === 'true') {
+      return c.json({ obligations: listObligations(c.req.query('profile') || undefined) })
     }
     // ?facilities=true[&type=substr][&recipe=id][&owned=true] — where things can be crafted.
     if (c.req.query('facilities') === 'true') {

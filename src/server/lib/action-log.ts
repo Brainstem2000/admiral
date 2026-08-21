@@ -25,12 +25,15 @@
  */
 import {
   recordActionEvents, getActionCursor, markStorageDirty,
-  recordCargoSnapshot, getCargoForProfile, type ActionEvent,
+  recordCargoSnapshot, getCargoForProfile, recordObligations, type ActionEvent,
 } from './db'
 import type { GameConnection } from './connections/interface'
 
-/** Categories that can move items. `combat` is included for ship-loss cargo wipes. */
-const CATEGORIES = ['trading', 'storage', 'mining', 'crafting', 'combat'] as const
+/** Categories that can move items. `combat` is included for ship-loss cargo wipes.
+ *  `other` carries the money nobody watches — rent_paid, tax.*, jettison, facility
+ *  lifecycle. Its absence hid a 30-day facility rental that escalated 15 -> 433cr
+ *  per cycle and consumed ~2M credits before a wallet audit caught it. */
+const CATEGORIES = ['trading', 'storage', 'mining', 'crafting', 'combat', 'other'] as const
 
 /** Signed cargo effect of one event, as [item_id, delta] pairs. */
 export function cargoDeltas(e: ActionEvent): Array<[string, number]> {
@@ -66,6 +69,9 @@ export function cargoDeltas(e: ActionEvent): Array<[string, number]> {
     // A gift sent from cargo leaves the hold; `source: "storage"` never touches it.
     case 'trading.gift_sent':
       return d.source === 'storage' ? [] : one(-1)
+
+    // Jettisoned cargo is gone. Lived unseen in `other` until that category was swept.
+    case 'other.jettison': return one(-1)
 
     // A received gift lands in STORAGE at the sender's station, never in cargo.
     case 'trading.gift_received': return []
@@ -167,7 +173,12 @@ export async function ingestActionLog(
       // re-applying a delta we already applied would double-count it.
       const insertedIds = new Set(recordActionEvents(profileId, category, parsed))
       added += insertedIds.size
-      for (const p of parsed) if (insertedIds.has(p.event_id)) fresh.push(p)
+      const inserted = parsed.filter(p => insertedIds.has(p.event_id))
+      for (const p of inserted) fresh.push(p)
+      // Obligations fold on EVERY inserted event, backfill included — a rent paid
+      // in July is still money gone, and the register exists precisely so that
+      // history nobody watched still adds up. Dedupe is the INSERT OR IGNORE above.
+      if (inserted.length) recordObligations(profileId, inserted)
       if (!sc?.has_more) break
       // Deep back-fills hammered the API with 429s once before; pace them.
       if (backfilling) await new Promise(r => setTimeout(r, 250))
