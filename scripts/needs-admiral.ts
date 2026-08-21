@@ -43,7 +43,7 @@ const PEER_TO_PEER = /NEED:\s*(Morg|Nova|CyberSpock|CyberSapper|Bob|Cass|Grit|Ju
 const SELF_ECHO = /^\s*(Directive updated|Nudge delivered|Fleet order sent|Memory updated|TODO updated)/i
 // Reading faction chat back produces tool_results that BEGIN with the channel dump and
 // re-quote every NEED already handled — the watcher must not fire on an agent's inbox.
-const CHAT_READBACK = /^\s*channel:\s*(faction|global|local)/i
+const CHAT_READBACK = /^\s*channel:\s*(faction|global|local)/i
 
 const db = new Database(DB, { readonly: true })
 const names: Record<string, string> = Object.fromEntries(
