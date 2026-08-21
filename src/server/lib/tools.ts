@@ -145,6 +145,46 @@ export const allTools: Tool[] = [
 ]
 
 const LOCAL_TOOLS = new Set(['save_credentials', 'update_todo', 'read_todo', 'update_memory', 'read_memory', 'status_log', 'fleet_order', 'read_fleet_orders', 'codex', 'codex_chain', 'fleet_route'])
+
+/**
+ * Extract jump-graph edges from any game result and bank them. Two shapes exist in the
+ * wild and they are NOT co-located: jump/travel results carry `system_id` in `details`
+ * while the arrival's `connections` array sits under `location` — so same-node pairing
+ * alone never matched (the original sniffer's bug; its unit test fixture was built with
+ * the wrong shape and passed anyway). Contextual rule: pair same-node when possible,
+ * otherwise pair a connections array with the result's system_id ONLY when exactly one
+ * distinct system_id appears in the whole payload — never guess between two systems.
+ */
+export function captureSystemLinks(resultData: unknown, source: string): void {
+  try {
+    const pairs: Array<[string, string]> = []
+    const sysIds = new Set<string>()
+    const orphanConnections: string[][] = []
+    const walk = (node: unknown): void => {
+      if (!node || typeof node !== 'object' || Array.isArray(node)) return
+      const o = node as Record<string, unknown>
+      const sys = typeof o.system_id === 'string' ? o.system_id : undefined
+      if (sys) sysIds.add(sys.toLowerCase())
+      if (Array.isArray(o.connections)) {
+        const conns = o.connections.filter((c): c is string => typeof c === 'string')
+        if (sys) for (const c of conns) pairs.push([sys, c])
+        else if (conns.length) orphanConnections.push(conns)
+      }
+      if (Array.isArray(o.route)) {
+        const ids = (o.route as Array<Record<string, unknown>>)
+          .map((h) => (typeof h?.system_id === 'string' ? h.system_id : null))
+        for (let i = 1; i < ids.length; i++) if (ids[i - 1] && ids[i]) pairs.push([ids[i - 1]!, ids[i]!])
+      }
+      for (const v of Object.values(o)) walk(v)
+    }
+    walk(resultData)
+    if (orphanConnections.length && sysIds.size === 1) {
+      const sys = [...sysIds][0]
+      for (const conns of orphanConnections) for (const c of conns) pairs.push([sys, c])
+    }
+    if (pairs.length) recordSystemLinks(pairs, source)
+  } catch { /* capture must never break execution */ }
+}
 // Macro tools: bounded code loops over game commands — one LLM call replaces
 // dozens of per-step calls. They pace themselves (lib_v2 mutations await the
 // tick; other modes sleep between steps), so they bypass the single-action
@@ -824,26 +864,7 @@ export async function executeTool(
         // Learned jump-graph edges — shape-sniffed from ANY result rather than keyed on
         // command names, because connections lists appear on jump, travel, dock, get_system
         // and get_status results alike. Each arrival teaches the destination's whole node.
-        {
-          const pairs: Array<[string, string]> = []
-          const sniff = (node: unknown): void => {
-            if (!node || typeof node !== 'object') return
-            const o = node as Record<string, unknown>
-            const sys = typeof o.system_id === 'string' ? o.system_id : undefined
-            if (sys && Array.isArray(o.connections)) {
-              for (const c of o.connections) if (typeof c === 'string') pairs.push([sys, c])
-            }
-            // find_route: { route: [{system_id, jumps}, ...] } — consecutive entries are edges
-            if (Array.isArray(o.route)) {
-              const ids = (o.route as Array<Record<string, unknown>>)
-                .map((h) => (typeof h?.system_id === 'string' ? h.system_id : null))
-              for (let i = 1; i < ids.length; i++) if (ids[i - 1] && ids[i]) pairs.push([ids[i - 1]!, ids[i]!])
-            }
-            for (const v of Object.values(o)) if (v && typeof v === 'object' && !Array.isArray(v)) sniff(v)
-          }
-          sniff(resultData)
-          if (pairs.length) recordSystemLinks(pairs, deepBare || 'result')
-        }
+        captureSystemLinks(resultData, deepBare || 'result')
         if (bare === 'get_empire_info' && typeof resultData === 'string') {
           // The result is a text report of === empire === blocks; parse each one.
           const text = resultData as string
@@ -1301,7 +1322,12 @@ async function macroAction(
 ): Promise<{ ok: boolean; errorCode?: string; errorMessage?: string }> {
   for (let attempt = 0; ; attempt++) {
     const resp = await conn.execute(command, args)
-    if (!resp.error) return { ok: true }
+    if (!resp.error) {
+      // Macros bypass executeTool's capture path entirely (this was why zero links were
+      // learned while agents flew all day on goto_system) — sniff hop results here too.
+      captureSystemLinks(resp.structuredContent ?? resp.result, `macro_${command}`)
+      return { ok: true }
+    }
     if (MACRO_RETRYABLE.has(resp.error.code) && attempt < maxRetries) {
       await macroSleep(Math.max((resp.error.retry_after ?? 10) * 1000, 5000))
       continue
@@ -1413,6 +1439,7 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
     // Plot the route
     const routeResp = await conn.execute('find_route', { target_system: target })
     const rc = (routeResp.structuredContent ?? routeResp.result) as Record<string, unknown> | undefined
+    captureSystemLinks(rc, 'macro_find_route')
     if (routeResp.error || !rc) return `MACRO ABORT: find_route failed${routeResp.error ? ` [${routeResp.error.code}]` : ''}. Check the system name with search_systems.`
     if (rc.found === false) return `MACRO ABORT: no route to ${target}: ${rc.message ?? 'unreachable'}.`
     const route = Array.isArray(rc.route) ? (rc.route as Array<Record<string, unknown>>) : []
