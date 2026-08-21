@@ -159,7 +159,18 @@ export function CharacterPage({ profile, status, playerData, onOpenEditor }: Pro
       } catch { /* ignore */ }
     })
 
-    return () => { es.close(); esRef.current = null }
+    // Self-heal: EventSource gives up PERMANENTLY on some failures (non-200 during a
+    // server restart, suspended tab, proxy close). The status-flip sseKey bump only fires
+    // if the status poll happens to observe a flip — a fast agent bounce slips between
+    // samples and the pane freezes forever. Any error now schedules a full re-create.
+    es.onerror = () => {
+      if (esRef.current !== es) return
+      es.close()
+      esRef.current = null
+      setTimeout(() => setSseKey(k => k + 1), 3000)
+    }
+
+    return () => { es.close(); if (esRef.current === es) esRef.current = null }
   }, [profile.id, sseKey, mergeEntries])
 
   // Reset activity string when disconnected.

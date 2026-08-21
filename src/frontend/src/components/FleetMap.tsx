@@ -162,6 +162,7 @@ export function FleetMap({ profiles, statuses, playerDataMap, activeId, onSelect
   const [selActivityStr, setSelActivityStr] = useState('idle')
   const [nowTick, setNowTick] = useState(() => Date.now())
   const selEsRef = useRef<EventSource | null>(null)
+  const [selRetry, setSelRetry] = useState(0)
   const selConnected = activeId ? (statuses[activeId]?.connected ?? false) : false
 
   useEffect(() => {
@@ -183,8 +184,17 @@ export function FleetMap({ profiles, statuses, playerDataMap, activeId, onSelect
     es.addEventListener('activity', (event) => {
       try { setSelActivityStr(JSON.parse((event as MessageEvent).data).activity || 'idle') } catch { /* ignore */ }
     })
-    return () => { es.close(); selEsRef.current = null }
-  }, [activeId, selConnected])
+    // Same self-heal as CharacterPage: a fatally-closed EventSource never recovers on
+    // its own, and the connected-flag dependency only reconnects when the status poll
+    // catches a flip. Any error schedules a re-create with a short backoff.
+    es.onerror = () => {
+      if (selEsRef.current !== es) return
+      es.close()
+      selEsRef.current = null
+      setTimeout(() => setSelRetry(k => k + 1), 3000)
+    }
+    return () => { es.close(); if (selEsRef.current === es) selEsRef.current = null }
+  }, [activeId, selConnected, selRetry])
 
   // Staleness tick so a finished jump decays out of "traveling".
   useEffect(() => {
