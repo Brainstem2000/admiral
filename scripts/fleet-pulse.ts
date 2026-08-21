@@ -109,12 +109,16 @@ let lastHourly = Date.now()
 let morningFired = false
 
 async function tick(force = false) {
+  // data/.fleet-idle marks a PLANNED stand-down (Admiral disconnected the fleet on purpose).
+  // While it exists, an empty fleet is not an incident and the hourly heartbeat would be
+  // an empty line — but the server-down alarm and the morning alarm must survive.
+  const plannedIdle = await Bun.file('data/.fleet-idle').exists()
   const agents = await connectedAgents()
   if (agents === null) {
     if (!dedupe('server-down')) console.log('ADMIRAL-SERVER-DOWN: API on :3031 unreachable — agents may be orphaned')
     return
   }
-  if (agents.length === 0 && !dedupe('none-connected')) {
+  if (agents.length === 0 && !plannedIdle && !dedupe('none-connected')) {
     console.log('NO-AGENTS-CONNECTED: zero connected profiles — was the fleet meant to be running?')
   }
   for (const line of sweep(agents)) console.log(line)
@@ -125,7 +129,7 @@ async function tick(force = false) {
     morningFired = true
     console.log('MORNING-REPORT-DUE: compile the overnight summary for the user (09:00 CT return)')
   }
-  if (force || Date.now() - lastHourly >= HOUR_MS) {
+  if ((force || Date.now() - lastHourly >= HOUR_MS) && !(plannedIdle && agents.length === 0)) {
     lastHourly = Date.now()
     console.log(fleetwatch(agents))
   }
