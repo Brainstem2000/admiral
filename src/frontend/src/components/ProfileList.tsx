@@ -236,7 +236,12 @@ export function ProfileList({ profiles, activeId, statuses, playerDataMap, onSel
                     </div>
                     {(player || pd) && (
                       <div className="mt-1 ml-7 text-[9px] text-muted-foreground/70 leading-relaxed">
-                        <span className="text-[hsl(var(--smui-yellow))]">{Number(player?.credits || pd?.credits || 0).toLocaleString()}c</span>
+                        {/* Offline cards show the LAST-KNOWN snapshot — twice mistaken for live
+                            data (a wallet read 278c while the game said 17c). Label it stale. */}
+                        {!p.connected && (
+                          <span className="text-muted-foreground/40 mr-1">last seen:</span>
+                        )}
+                        <span className={p.connected ? 'text-[hsl(var(--smui-yellow))]' : 'text-muted-foreground/50'}>{Number(player?.credits || pd?.credits || 0).toLocaleString()}c</span>
                         {' '}
                         <span>{String(player?.current_poi || player?.current_system || pd?.poi || pd?.system || '')}</span>
                         {(player?.empire || pd?.empire) ? (
