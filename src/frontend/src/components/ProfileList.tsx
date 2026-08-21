@@ -234,14 +234,22 @@ export function ProfileList({ profiles, activeId, statuses, playerDataMap, onSel
                         </span>
                       )}
                     </div>
-                    {(player || pd) && (
+                    {(player || pd || p.last_wallet != null) && (
                       <div className="mt-1 ml-7 text-[9px] text-muted-foreground/70 leading-relaxed">
-                        {/* Offline cards show the LAST-KNOWN snapshot — twice mistaken for live
-                            data (a wallet read 278c while the game said 17c). Label it stale. */}
-                        {!p.connected && (
-                          <span className="text-muted-foreground/40 mr-1">last seen:</span>
+                        {/* Connected: live gameState. Offline: the DB's last-known wallet — kept
+                            accurate by the server's 20-min offline refresher (rent drains wallets
+                            while agents sleep; a frozen connect-time cache once read 278c against
+                            a true 17c) — shown with its age so staleness is never ambiguous. */}
+                        {p.connected ? (
+                          <span className="text-[hsl(var(--smui-yellow))]">{Number(player?.credits ?? pd?.credits ?? p.last_wallet ?? 0).toLocaleString()}c</span>
+                        ) : (
+                          <span className="text-muted-foreground/60" title={p.last_wallet_at ? `as of ${p.last_wallet_at} UTC` : 'no snapshot yet'}>
+                            {Number(p.last_wallet ?? player?.credits ?? pd?.credits ?? 0).toLocaleString()}c
+                            {p.last_wallet_at ? (
+                              <span className="text-muted-foreground/40"> @{String(p.last_wallet_at).slice(11, 16)}Z</span>
+                            ) : null}
+                          </span>
                         )}
-                        <span className={p.connected ? 'text-[hsl(var(--smui-yellow))]' : 'text-muted-foreground/50'}>{Number(player?.credits || pd?.credits || 0).toLocaleString()}c</span>
                         {' '}
                         <span>{String(player?.current_poi || player?.current_system || pd?.poi || pd?.system || '')}</span>
                         {(player?.empire || pd?.empire) ? (

@@ -129,6 +129,37 @@ function runPrune() {
 runPrune()
 setInterval(runPrune, 6 * 60 * 60 * 1000)
 
+// Offline wallet refresher: rent and taxes bill server-side while agents are
+// disconnected, so a wallet frozen at disconnect time drifts from the truth within
+// minutes (observed: a card showing 278c while the game said 17c). Every 20 minutes,
+// briefly game-connect each credentialed, disconnected profile — NO LLM loop — read
+// the live balance into the snapshot stream, and disconnect. Serial with gaps so a
+// 12-profile fleet never hammers the login endpoint.
+async function refreshOfflineWallets() {
+  const { listProfiles: lp, addFinancialSnapshot, getDb } = await import('./lib/db')
+  const db = getDb()
+  for (const p of lp()) {
+    try {
+      if (!p.username || !p.password) continue
+      if (agentManager.getAgent(p.id)?.isConnected) continue
+      await agentManager.connect(p.id)
+      const gs = agentManager.getStatus(p.id).gameState as Record<string, unknown> | null
+      const credits = Number(gs?.credits)
+      if (Number.isFinite(credits)) {
+        // Carry the last-known storage value forward — this sweep learns nothing about
+        // storage, and writing 0 would corrupt the wealth-over-time series.
+        const prev = db.query('SELECT storage FROM financial_snapshots WHERE profile_id = ? ORDER BY id DESC LIMIT 1')
+          .get(p.id) as { storage: number } | undefined
+        addFinancialSnapshot(p.id, credits, prev?.storage ?? 0)
+      }
+      await agentManager.disconnect(p.id)
+      await new Promise((r) => setTimeout(r, 2500))
+    } catch { /* one profile failing must not stop the sweep */ }
+  }
+}
+setTimeout(refreshOfflineWallets, 60 * 1000) // first pass shortly after boot
+setInterval(refreshOfflineWallets, 20 * 60 * 1000)
+
 const port = parseInt(process.env.PORT || '3031')
 // Bind to loopback by default so the API (which serves plaintext secrets) is not
 // exposed to the LAN. Set ADMIRAL_HOST=0.0.0.0 to intentionally expose it.

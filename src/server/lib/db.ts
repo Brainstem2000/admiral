@@ -1837,6 +1837,19 @@ export function setGalaxyMap(data: GalaxyMapData): void {
   ).run(JSON.stringify(data), data.fetched_at, JSON.stringify(data), data.fetched_at)
 }
 
+/**
+ * Latest known wallet per profile from the snapshot stream — the durable answer to
+ * "what did this agent last hold", valid across disconnects and server restarts.
+ * The in-memory gameState freezes the moment an agent disconnects; this keeps moving
+ * as long as anything (agent turns, the offline wallet refresher) records snapshots.
+ */
+export function getLatestWallets(): Map<string, { wallet: number; at: string }> {
+  const rows = db.query(`SELECT profile_id, wallet, timestamp FROM financial_snapshots fs
+    WHERE id = (SELECT MAX(id) FROM financial_snapshots WHERE profile_id = fs.profile_id)`)
+    .all() as Array<{ profile_id: string; wallet: number; timestamp: string }>
+  return new Map(rows.map((r) => [r.profile_id, { wallet: r.wallet, at: r.timestamp }]))
+}
+
 // --- Financial Snapshots ---
 
 export function addFinancialSnapshot(profileId: string, wallet: number, storage: number): void {

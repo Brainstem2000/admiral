@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, reorderProfiles, listSellQuotas, setSellQuota, clearSellQuota } from '../lib/db'
+import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, reorderProfiles, listSellQuotas, setSellQuota, clearSellQuota, getLatestWallets } from '../lib/db'
 import { buildSystemPrompt, buildVolatileState } from '../lib/agent'
 import { fetchGameCommands, formatCommandList } from '../lib/schema'
 import { agentManager } from '../lib/agent-manager'
@@ -69,6 +69,9 @@ function validateProfileInput(body: Record<string, unknown>): string | null {
 // GET /api/profiles
 profiles.get('/', (c) => {
   const all = listProfiles()
+  // Durable last-known wallets so offline cards show real balances (with their age)
+  // instead of whatever gameState was cached at the last connect.
+  const wallets = getLatestWallets()
   return c.json(all.map(p => {
     const status = agentManager.getStatus(p.id)
     // Persist live faction name to group_name so it survives disconnects
@@ -77,7 +80,8 @@ profiles.get('/', (c) => {
       updateProfile(p.id, { group_name: liveFaction })
       p.group_name = liveFaction
     }
-    return withEffectiveRouting(sanitizeProfile({ ...p, ...status }))
+    const lw = wallets.get(p.id)
+    return withEffectiveRouting(sanitizeProfile({ ...p, ...status, last_wallet: lw?.wallet ?? null, last_wallet_at: lw?.at ?? null }))
   }))
 })
 
