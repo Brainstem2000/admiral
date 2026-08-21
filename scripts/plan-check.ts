@@ -50,7 +50,19 @@ function bfsFactory(db: Database) {
   const row = db.query('SELECT data FROM galaxy_map ORDER BY fetched_at DESC LIMIT 1').get() as { data: string } | null
   if (!row) return () => null
   const g = JSON.parse(row.data) as { systems: Array<{ system_id: string; connections?: string[] }> }
-  const adj = new Map(g.systems.map((s) => [s.system_id, s.connections ?? []]))
+  const adj = new Map(g.systems.map((s) => [s.system_id, [...(s.connections ?? [])]]))
+  // Merge LEARNED links (system_links) over the blob. The blob only knows visited systems'
+  // connections (435/505 had none) and once said horizon->krynn = 30j where the game's router
+  // flew 12 — every agent traversal has banked real edges since. Distances stay upper bounds;
+  // they just converge toward truth as coverage grows. Live find_route remains authoritative.
+  try {
+    for (const l of db.query('SELECT a, b FROM system_links').all() as Array<{ a: string; b: string }>) {
+      if (!adj.has(l.a)) adj.set(l.a, [])
+      if (!adj.has(l.b)) adj.set(l.b, [])
+      if (!adj.get(l.a)!.includes(l.b)) adj.get(l.a)!.push(l.b)
+      if (!adj.get(l.b)!.includes(l.a)) adj.get(l.b)!.push(l.a)
+    }
+  } catch { /* table absent on old DBs — blob-only is still correct */ }
   return (a: string, b: string): number | null => {
     if (!adj.has(a) || !adj.has(b)) return null
     const q: Array<[string, number]> = [[a, 0]]

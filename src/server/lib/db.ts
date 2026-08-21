@@ -603,6 +603,22 @@ function migrate(db: Database): void {
       PRIMARY KEY (profile_id, day)
     );
 
+    -- Learned jump-graph edges. The galaxy_map blob only carries connections for VISITED
+    -- systems (435 of 505 had none), so fleet BFS said horizon->krynn = 30 jumps where the
+    -- game's own router flew it in 12 — routes and ferry economics computed on the blob
+    -- were off by up to 2-3x. Every jump result carries the arrival system's complete
+    -- connections list and every find_route result carries its route array; this table
+    -- banks them permanently. Stored as canonical pairs (a < b): the game's links are
+    -- bidirectional. Never pruned — a jump lane does not expire.
+    CREATE TABLE IF NOT EXISTS system_links (
+      a TEXT NOT NULL,
+      b TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT '',        -- 'map_seed' | 'jump' | 'find_route' | 'get_system'
+      first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (a, b)
+    );
+
     -- Per (agent, category) high-water mark so ingestion is incremental.
     CREATE TABLE IF NOT EXISTS action_cursor (
       profile_id TEXT NOT NULL,
@@ -1488,6 +1504,26 @@ export function upsertFreightContracts(profileId: string, rows: Array<{
     }
   })
   tx()
+}
+
+/** Bank learned jump-graph edges as canonical pairs. Cheap enough to call on every capture. */
+export function recordSystemLinks(pairs: Array<[string, string]>, source: string): void {
+  if (!pairs.length) return
+  const ins = db.query(`INSERT INTO system_links (a, b, source) VALUES (?, ?, ?)
+    ON CONFLICT(a, b) DO UPDATE SET last_seen = datetime('now')`)
+  const tx = db.transaction(() => {
+    for (const [x, y] of pairs) {
+      const a = String(x).toLowerCase().trim(), b = String(y).toLowerCase().trim()
+      if (!a || !b || a === b) continue
+      ins.run(a < b ? a : b, a < b ? b : a, source)
+    }
+  })
+  tx()
+}
+
+/** The full learned adjacency — union this with the galaxy_map blob when routing. */
+export function getKnownLinks(): Array<{ a: string; b: string }> {
+  return db.query('SELECT a, b FROM system_links').all() as Array<{ a: string; b: string }>
 }
 
 /** Fold a wallet reading into the never-pruned daily min/max/close. Piggybacks the snapshot writer. */
