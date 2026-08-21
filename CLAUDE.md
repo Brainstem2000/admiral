@@ -255,12 +255,15 @@ mechanism to the agent's state**, because interruption cost scales with how mobi
 |---|---|---|
 | `POST /:id/nudge` | **restarts the turn**; agent re-plans | one transient fact, agent is DOCKED |
 | `PUT /:id {directive}` | **restarts the turn**; rewrites standing orders | policy change, agent is DOCKED |
-| `PUT /:id {todo}` | silent — read on next turn | replace the plan without interrupting |
-| `PUT /:id {memory}` | silent — read on next turn | correct durable facts |
+| `PUT /:id {todo}` | silent — but **the agent will overwrite it** | seeding a plan they then own |
+| `PUT /:id {memory}` | silent — **agent-owned, they rewrite it** | facts worth surviving, expect edits |
 | disconnect → `PUT` → `connect_llm` | clean boot on the new state | agent is MID-ROUTE or oscillating |
 
-**Only `directive` triggers `restartTurn()`.** `todo` and `memory` writes land silently, which is
-usually what you want.
+**Only `directive` triggers `restartTurn()`.** But `todo` and `memory` are AGENT-OWNED — they have
+`update_todo`/`update_memory` and will overwrite you. One rewritten TODO was replaced by the agent
+**40 seconds** after restart, and the replacement cancelled the job it contained, because she was
+correctly obeying a **stale directive**. Agents apply `directive > todo > memory`, which is right.
+**Put the actual order in the directive or it will not stick.**
 
 **Measured cost of getting this wrong (2026-08-20):** both agents received nine interruptions in
 two hours. Morg was docked throughout — 17 transactions, 51,316 credits. Nova was mid-route every
