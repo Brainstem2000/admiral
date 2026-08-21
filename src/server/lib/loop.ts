@@ -4,6 +4,7 @@ import type { GameConnection } from './connections/interface'
 import type { LogFn } from './tools'
 import { executeTool, ACTION_PENDING_SENTINEL, COOLDOWN_BLOCKED_SENTINEL } from './tools'
 import { safeTruncate, scrubContextSurrogates } from './text-safe'
+import { recordLlmSpend } from './db'
 
 // Lowered from 30: the cap was being treated as a quota — turns ran to the ceiling firing queries
 // and (pre-fix) re-firing into the cooldown gate. With the cooldown-block early-exit below, 12 is
@@ -143,6 +144,13 @@ export async function runAgentTurn(
       }, null, 2)
 
       log('llm_call', summary, detail)
+      // Durable rollup: llm_call log rows prune at 14 days, and the fleet's core economic
+      // question ($/day per agent vs revenue) kept being recomputed by hand from rows that
+      // then evaporated. This survives pruning at one row per agent-day-model.
+      try {
+        recordLlmSpend(profileId, response.model, u.cost.total ?? 0,
+          u.input ?? 0, u.output ?? 0, u.cacheRead ?? 0, u.cacheWrite ?? 0)
+      } catch { /* accounting must never break a turn */ }
     }
 
     context.messages.push(response)

@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -782,6 +782,56 @@ export async function executeTool(
           }
         } catch { /* capture must never break execution */ }
       }
+    }
+
+    // Self-accounting captures (2026-08-21): bank authoritative reads as they pass. Each of
+    // these fills a table whose absence cost something real — see the schema comment in db.ts.
+    {
+      const bare = command.replace(/^spacemolt_/, '').replace(/^(salvage_|ship_|facility_|social_)/, '')
+      try {
+        const d = resultData as Record<string, unknown> | undefined
+        if (bare === 'policies' && Array.isArray(d?.policies)) {
+          replaceInsurancePolicies(ctx.profileId, d!.policies as never[])
+        } else if (bare === 'list_ships' && Array.isArray(d?.ships)) {
+          replaceShipsForProfile(ctx.profileId, d!.ships as never[])
+        } else if (bare === 'get_ship' && Array.isArray(d?.modules)) {
+          const shipId = String((d as Record<string, unknown>).ship_id ?? (d as Record<string, unknown>).id ?? 'active')
+          recordShipModules(ctx.profileId, shipId, d!.modules as never[])
+        } else if ((bare === 'shipping_list' || bare === 'shipping') && Array.isArray(d?.shipments)) {
+          const rows = (d!.shipments as Array<Record<string, unknown>>).map((s) => {
+            const c = (s.contract ?? s) as Record<string, unknown>
+            return {
+              contract_id: String(c.contract_id ?? c.id ?? s.id ?? ''),
+              origin_base: String(c.origin_base_id ?? c.origin ?? ''),
+              dest_base: String(c.destination_base_id ?? c.destination ?? ''),
+              base_reward: Number(c.base_reward ?? 0) || 0,
+              appraised_value: Number(c.appraised_value ?? 0) || 0,
+              status: c.breached_at ? 'breached' : c.delivered_at ? 'delivered' : c.accepted_at && String(c.accepted_at) > '0002' ? 'accepted' : 'open',
+              accepted_at: String(c.accepted_at ?? ''),
+              completed_at: String(c.delivered_at ?? c.breached_at ?? ''),
+            }
+          })
+          upsertFreightContracts(ctx.profileId, rows)
+        } else if (bare === 'get_empire_info' && typeof resultData === 'string') {
+          // The result is a text report of === empire === blocks; parse each one.
+          const text = resultData as string
+          const re = /=== (\w+) ===/g
+          let m: RegExpExecArray | null
+          const marks: Array<{ empire: string; at: number }> = []
+          while ((m = re.exec(text))) marks.push({ empire: m[1], at: m.index })
+          for (let i = 0; i < marks.length; i++) {
+            const block = text.slice(marks[i].at, marks[i + 1]?.at ?? text.length)
+            const g = (rx: RegExp) => (block.match(rx) ?? [])[1] ?? ''
+            recordEmpirePolicy(marks[i].empire, {
+              property: g(/Property tax[^%]*?Rate: ([\d.]+%)/s),
+              income: g(/Income tax[^%]*?Rate: ([\d.]+%)/s),
+              salesCitizen: g(/Citizens: ([\d.]+%)/),
+              evictionGrace: Number(g(/Eviction grace: (\d+)/)) || 0,
+              fuelTax: Number(g(/Fuel tax: (\d+)/)) || 0,
+            }, block)
+          }
+        }
+      } catch { /* capture must never break execution */ }
     }
 
     // Price-sanity advisory on sells AND buys: catalog base_value vs price.

@@ -524,6 +524,85 @@ function migrate(db: Database): void {
       FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
     );
 
+    -- ===== SELF-ACCOUNTING LAYER (2026-08-21) =====
+    -- None of these tables are pruned. Each exists because its absence cost something real:
+    -- LLM spend lived in log_entries (14-day prune) so the fleet's core economics kept being
+    -- recomputed by hand and lost; "is the Wagon insured?" needed live queries; empire tax
+    -- rates float dev-side with no history; storage_ships went stale enough that scrap
+    -- commands fired on phantom ids; freight P&L had no home; a 33k/night rent leak was
+    -- caught only by an accidental wallet comparison.
+
+    CREATE TABLE IF NOT EXISTS llm_spend_daily (
+      profile_id TEXT NOT NULL,
+      day TEXT NOT NULL,                      -- UTC YYYY-MM-DD
+      model TEXT NOT NULL DEFAULT '',
+      calls INTEGER NOT NULL DEFAULT 0,
+      cost REAL NOT NULL DEFAULT 0,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read INTEGER NOT NULL DEFAULT 0,
+      cache_write INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (profile_id, day, model)
+    );
+
+    CREATE TABLE IF NOT EXISTS insurance_policies (
+      policy_id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      ship_class TEXT NOT NULL DEFAULT '',
+      base_id TEXT NOT NULL DEFAULT '',
+      coverage INTEGER NOT NULL DEFAULT 0,
+      premium INTEGER NOT NULL DEFAULT 0,
+      expires_at TEXT NOT NULL DEFAULT '',
+      first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS empire_policy_snapshots (
+      empire TEXT NOT NULL,
+      fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+      property_rate TEXT NOT NULL DEFAULT '',
+      income_rate TEXT NOT NULL DEFAULT '',
+      sales_citizen_rate TEXT NOT NULL DEFAULT '',
+      eviction_grace_cycles INTEGER NOT NULL DEFAULT 0,
+      fuel_tax INTEGER NOT NULL DEFAULT 0,
+      raw TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (empire, fetched_at)
+    );
+
+    -- Fitted modules of a profile's ACTIVE ship, replaced on every get_ship capture.
+    CREATE TABLE IF NOT EXISTS ship_modules (
+      profile_id TEXT NOT NULL,
+      ship_id TEXT NOT NULL,
+      module_name TEXT NOT NULL,
+      slot TEXT NOT NULL DEFAULT '',
+      cpu INTEGER NOT NULL DEFAULT 0,
+      power INTEGER NOT NULL DEFAULT 0,
+      captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (profile_id, ship_id, module_name, slot)
+    );
+
+    CREATE TABLE IF NOT EXISTS freight_contracts (
+      contract_id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      origin_base TEXT NOT NULL DEFAULT '',
+      dest_base TEXT NOT NULL DEFAULT '',
+      base_reward INTEGER NOT NULL DEFAULT 0,
+      appraised_value INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'open',    -- open | accepted | delivered | breached
+      accepted_at TEXT NOT NULL DEFAULT '',
+      completed_at TEXT NOT NULL DEFAULT '',
+      last_seen TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS wallet_daily (
+      profile_id TEXT NOT NULL,
+      day TEXT NOT NULL,                      -- UTC YYYY-MM-DD
+      close_balance INTEGER NOT NULL DEFAULT 0,
+      min_balance INTEGER NOT NULL DEFAULT 0,
+      max_balance INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (profile_id, day)
+    );
+
     -- Per (agent, category) high-water mark so ingestion is incremental.
     CREATE TABLE IF NOT EXISTS action_cursor (
       profile_id TEXT NOT NULL,
@@ -1304,6 +1383,126 @@ export function listObligations(profileId?: string): ObligationRow[] {
   return (profileId ? q.all(profileId) : q.all()) as ObligationRow[]
 }
 
+// ===== self-accounting helpers (2026-08-21) =====
+
+/** Fold one LLM call into the durable daily rollup. Called at the same site that logs llm_call. */
+export function recordLlmSpend(profileId: string, model: string, cost: number,
+  inputTokens: number, outputTokens: number, cacheRead: number, cacheWrite: number): void {
+  const day = new Date().toISOString().slice(0, 10)
+  db.query(`INSERT INTO llm_spend_daily (profile_id, day, model, calls, cost, input_tokens, output_tokens, cache_read, cache_write)
+    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+    ON CONFLICT(profile_id, day, model) DO UPDATE SET
+      calls = calls + 1, cost = cost + excluded.cost,
+      input_tokens = input_tokens + excluded.input_tokens,
+      output_tokens = output_tokens + excluded.output_tokens,
+      cache_read = cache_read + excluded.cache_read,
+      cache_write = cache_write + excluded.cache_write`)
+    .run(profileId, day, model, cost, inputTokens, outputTokens, cacheRead, cacheWrite)
+}
+
+/** Replace the recorded ACTIVE policy set for one agent from a `policies` result. */
+export function replaceInsurancePolicies(profileId: string, policies: Array<{
+  policy_id?: string; ship_class?: string; base_id?: string; coverage?: number; premium?: number; expires_at?: string
+}>): void {
+  const tx = db.transaction(() => {
+    db.query('DELETE FROM insurance_policies WHERE profile_id = ?').run(profileId)
+    const ins = db.query(`INSERT OR REPLACE INTO insurance_policies
+      (policy_id, profile_id, ship_class, base_id, coverage, premium, expires_at, last_seen)
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`)
+    for (const p of policies) {
+      if (!p.policy_id) continue
+      ins.run(p.policy_id, profileId, p.ship_class ?? '', p.base_id ?? '',
+        Number(p.coverage ?? 0) || 0, Number(p.premium ?? 0) || 0, p.expires_at ?? '')
+    }
+  })
+  tx()
+}
+
+/** Snapshot one empire's policy block, parsed from get_empire_info text. */
+export function recordEmpirePolicy(empire: string, parsed: {
+  property?: string; income?: string; salesCitizen?: string; evictionGrace?: number; fuelTax?: number
+}, raw: string): void {
+  db.query(`INSERT OR REPLACE INTO empire_policy_snapshots
+    (empire, fetched_at, property_rate, income_rate, sales_citizen_rate, eviction_grace_cycles, fuel_tax, raw)
+    VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?)`)
+    .run(empire, parsed.property ?? '', parsed.income ?? '', parsed.salesCitizen ?? '',
+      parsed.evictionGrace ?? 0, parsed.fuelTax ?? 0, raw.slice(0, 4000))
+}
+
+/** Replace one agent's ship registry from a live list_ships result — the cure for phantom ship_ids. */
+export function replaceShipsForProfile(profileId: string, ships: Array<{
+  ship_id?: string; class_id?: string; location_base_id?: string; is_active?: boolean; modules?: number; custom_name?: string
+}>): void {
+  const tx = db.transaction(() => {
+    db.query('DELETE FROM storage_ships WHERE profile_id = ?').run(profileId)
+    const ins = db.query(`INSERT OR REPLACE INTO storage_ships
+      (profile_id, station_id, ship_id, class, custom_name, module_count, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`)
+    for (const s of ships) {
+      if (!s.ship_id) continue
+      ins.run(profileId, s.is_active ? '__active__' : (s.location_base_id ?? ''),
+        s.ship_id, s.class_id ?? '', s.custom_name ?? '', Number(s.modules ?? 0) || 0)
+    }
+  })
+  tx()
+}
+
+/** Replace the fitted-module manifest for a profile's active ship from a get_ship result. */
+export function recordShipModules(profileId: string, shipId: string, modules: Array<{
+  name?: string; slot?: string; cpu_usage?: number; power_usage?: number
+}>): void {
+  const tx = db.transaction(() => {
+    db.query('DELETE FROM ship_modules WHERE profile_id = ?').run(profileId)
+    const ins = db.query(`INSERT OR REPLACE INTO ship_modules
+      (profile_id, ship_id, module_name, slot, cpu, power, captured_at)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`)
+    for (const m of modules) {
+      if (!m.name) continue
+      ins.run(profileId, shipId, m.name, m.slot ?? '', Number(m.cpu_usage ?? 0) || 0, Number(m.power_usage ?? 0) || 0)
+    }
+  })
+  tx()
+}
+
+/** Upsert freight contracts from any shipping list/accept/complete result. Status only moves forward. */
+export function upsertFreightContracts(profileId: string, rows: Array<{
+  contract_id?: string; id?: string; origin_base?: string; dest_base?: string; destination_base_id?: string
+  base_reward?: number; appraised_value?: number; status?: string; accepted_at?: string; completed_at?: string
+}>): void {
+  const rank: Record<string, number> = { open: 0, accepted: 1, delivered: 2, breached: 2 }
+  const tx = db.transaction(() => {
+    for (const r of rows) {
+      const id = r.contract_id ?? r.id
+      if (!id) continue
+      const status = r.status ?? 'open'
+      const existing = db.query('SELECT status FROM freight_contracts WHERE contract_id = ?').get(id) as { status: string } | undefined
+      const keep = existing && (rank[existing.status] ?? 0) > (rank[status] ?? 0) ? existing.status : status
+      db.query(`INSERT INTO freight_contracts
+        (contract_id, profile_id, origin_base, dest_base, base_reward, appraised_value, status, accepted_at, completed_at, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(contract_id) DO UPDATE SET
+          status = ?, completed_at = MAX(completed_at, excluded.completed_at), last_seen = datetime('now')`)
+        .run(id, profileId, r.origin_base ?? '', r.dest_base ?? r.destination_base_id ?? '',
+          Number(r.base_reward ?? 0) || 0, Number(r.appraised_value ?? 0) || 0,
+          keep, r.accepted_at ?? '', r.completed_at ?? '', keep)
+    }
+  })
+  tx()
+}
+
+/** Fold a wallet reading into the never-pruned daily min/max/close. Piggybacks the snapshot writer. */
+export function touchWalletDaily(profileId: string, balance: number): void {
+  if (!Number.isFinite(balance)) return
+  const day = new Date().toISOString().slice(0, 10)
+  db.query(`INSERT INTO wallet_daily (profile_id, day, close_balance, min_balance, max_balance)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(profile_id, day) DO UPDATE SET
+      close_balance = excluded.close_balance,
+      min_balance = MIN(min_balance, excluded.min_balance),
+      max_balance = MAX(max_balance, excluded.max_balance)`)
+    .run(profileId, day, balance, balance, balance)
+}
+
 /** Events for one agent after a timestamp, oldest first — the snapshot overlay. */
 export function getEventsSince(profileId: string, sinceIso: string): ActionEvent[] {
   const rows = db.query(`SELECT event_id, created_at, category, event_type, data
@@ -1542,6 +1741,9 @@ export function setGalaxyMap(data: GalaxyMapData): void {
 
 export function addFinancialSnapshot(profileId: string, wallet: number, storage: number): void {
   const db = getDb()
+  // Daily close survives snapshot pruning — and runs BEFORE the idle dedupe below, or a
+  // wallet static across midnight would never open the new day's row.
+  try { touchWalletDaily(profileId, wallet) } catch { /* accounting never blocks a snapshot */ }
   // Dedup idle runs: if the most-recent snapshot for this profile already has the
   // identical wallet+storage, skip the insert. Every real BALANCE CHANGE still lands
   // a row (the next differing value inserts); only consecutive identical idle samples
