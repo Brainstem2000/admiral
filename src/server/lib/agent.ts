@@ -488,10 +488,12 @@ export class Agent {
           consecutiveIdleTurns = 0
         }
 
-        // Safe dock check: if pending and agent is now docked (or timeout), auto-disconnect
+        // Safe dock check: if pending and agent is now docked (or timeout), auto-disconnect.
+        // Completion must be judged on a live get_status — the cached state has
+        // reported "docked" mid-macro and disconnected an agent in open space.
         if (this.pendingSafeDock) {
-          if (this.isDocked()) {
-            this.log('system', 'Safe dock complete — disconnecting.')
+          if (await this.isDockedLive()) {
+            this.log('system', 'Safe dock complete (live-verified) — disconnecting.')
             await this.stop()
             return
           }
@@ -586,9 +588,12 @@ export class Agent {
         }
       }
 
-      // Second safe dock check after status poll refreshes gameState
-      if (this.pendingSafeDock && this.isDocked()) {
-        this.log('system', 'Safe dock complete — disconnecting.')
+      // Second safe dock check between turns — live-verified: the status poll
+      // above is skipped entirely for push-capable connections, and the
+      // getLocalState refresh only advances on the player's own deltas, so
+      // neither guarantees the cached dock state is current.
+      if (this.pendingSafeDock && await this.isDockedLive()) {
+        this.log('system', 'Safe dock complete (live-verified) — disconnecting.')
         await this.stop()
         return
       }
@@ -795,7 +800,6 @@ export class Agent {
     this.abortController?.abort()
   }
 
-  /** Check if the agent is currently docked at a station. */
   /**
    * True when the game still owes this agent activity — a running macro or an
    * in-transit ship. Used to distinguish "waiting on work already started"
@@ -810,15 +814,34 @@ export class Agent {
     return /mine_until_full|goto_system|sell_cargo|deliver|Executing tool/i.test(activity)
   }
 
+  /** Check if the agent is currently docked, per the cached game state. */
   private isDocked(): boolean {
-    const gs = this._gameState
-    if (!gs) return false
-    // structuredContent has location.docked_at (station name or null)
-    const location = gs.location as Record<string, unknown> | undefined
-    if (location?.docked_at) return true
-    // Fallback checks for different response formats
-    const player = gs.player as Record<string, unknown> | undefined
-    return player?.docked === true || player?.is_docked === true || gs.docked === true
+    return this._gameState ? isDockedState(this._gameState) : false
+  }
+
+  /**
+   * Dock check against a LIVE get_status, for the safe-dock completion
+   * decision. The cached _gameState can be stale — captured mid-macro, or an
+   * arrival snapshot taken before the dock resolved — and trusting it once
+   * logged "Safe dock complete" for an agent left undocked in open space.
+   * get_status is a free query (no game tick). Any failure reads as "not
+   * docked": burning another safe-dock turn is recoverable, disconnecting an
+   * undocked shieldless ship is not.
+   */
+  private async isDockedLive(): Promise<boolean> {
+    if (!this.connection) return false
+    try {
+      const fresh = await this.connection.execute('get_status')
+      if (fresh.error) return false
+      const data = fresh.structuredContent ?? fresh.result
+      if (!data || typeof data !== 'object') return false
+      this.cacheGameState(fresh)
+      // Evaluate the fresh payload directly — never the cache, which
+      // cacheGameState may have left untouched on an unrecognized shape.
+      return isDockedState(data as Record<string, unknown>)
+    } catch {
+      return false
+    }
   }
 
   async stop(): Promise<void> {
@@ -835,6 +858,16 @@ export class Agent {
       this.log('connection', 'Disconnected')
     }
   }
+}
+
+/** Dock detection across the response shapes the different transports produce. */
+function isDockedState(gs: Record<string, unknown>): boolean {
+  // structuredContent has location.docked_at (station name or null)
+  const location = gs.location as Record<string, unknown> | undefined
+  if (location?.docked_at) return true
+  // Fallback checks for different response formats
+  const player = gs.player as Record<string, unknown> | undefined
+  return player?.docked === true || player?.is_docked === true || gs.docked === true
 }
 
 function createConnection(profile: Profile): GameConnection {
