@@ -213,6 +213,22 @@ const MAX_RESULT_CHARS = 4000
 const actionCooldowns = new Map<string, { timestamp: number; wasPending: boolean }>()
 const COOLDOWN_AFTER_SUCCESS = 4000   // 4s between actions when last succeeded (allows fast successive actions)
 const COOLDOWN_AFTER_PENDING = 10000  // 10s when last action was pending (match game tick cadence)
+// Residual cooldowns at or below this are absorbed at execution time — sleep them off and run the
+// command — instead of surfacing the block. Surfacing ends the turn, and the agent's next LLM call
+// exists only to reissue the same command a few seconds later (observed on every freight-circuit
+// station stop: dock arms the gate, the first shipping_list eats the block). Post-success residuals
+// (≤4s) always qualify; the post-pending 10s pacing still surfaces unless most of it has already
+// elapsed. Doubles as the hard cap on how long the executor will ever sleep.
+const COOLDOWN_ABSORB_MAX_MS = 5000
+
+// Remaining cooldown before this profile's next action command, or null if clear to act.
+function actionCooldownRemaining(profileId: string): number | null {
+  const lastAction = actionCooldowns.get(profileId)
+  if (!lastAction) return null
+  const cooldownMs = lastAction.wasPending ? COOLDOWN_AFTER_PENDING : COOLDOWN_AFTER_SUCCESS
+  const remainingMs = cooldownMs - (Date.now() - lastAction.timestamp)
+  return remainingMs > 0 ? remainingMs : null
+}
 
 // Track when memory is updated so system prompt caching can skip rebuilds
 export const memoryDirtyFlags = new Map<string, boolean>()
@@ -709,15 +725,18 @@ export async function executeTool(
     // Heuristic: commands starting with get_/view_/list_/query_/browse_/search_/find_/estimate_ are queries
     || /^(?:get_|view_|list_|query_|browse_|search_|find_|estimate_|help|scan|catalog)/.test(deepBare)
   if (!isQuery) {
-    const lastAction = actionCooldowns.get(ctx.profileId)
-    if (lastAction) {
-      const cooldownMs = lastAction.wasPending ? COOLDOWN_AFTER_PENDING : COOLDOWN_AFTER_SUCCESS
-      const elapsed = Date.now() - lastAction.timestamp
-      if (elapsed < cooldownMs) {
-        const waitSec = Math.ceil((cooldownMs - elapsed) / 1000)
-        ctx.log('tool_result', `Cooldown: ${command} blocked (${waitSec}s remaining)`)
-        return `${COOLDOWN_BLOCKED_SENTINEL} — cooldown active (${waitSec}s remaining). Game actions cost 1 tick (~10s). You just performed an action. Use query commands (get_status, get_cargo, view_market, read_todo, etc.) while waiting, or STOP calling tools and end your turn.`
-      }
+    let remainingMs = actionCooldownRemaining(ctx.profileId)
+    if (remainingMs !== null && remainingMs <= COOLDOWN_ABSORB_MAX_MS) {
+      // Short residual cooldown: wait it out here and re-check the gate once, transparently —
+      // the LLM never sees the block, so the turn continues instead of ending early.
+      ctx.log('system', `Cooldown: ${command} — ${(remainingMs / 1000).toFixed(1)}s remaining, absorbing server-side (wait + retry, not surfaced)`)
+      await new Promise<void>((r) => setTimeout(r, Math.min(remainingMs, COOLDOWN_ABSORB_MAX_MS)))
+      remainingMs = actionCooldownRemaining(ctx.profileId) // single retry; if re-armed meanwhile, surface below
+    }
+    if (remainingMs !== null) {
+      const waitSec = Math.ceil(remainingMs / 1000)
+      ctx.log('tool_result', `Cooldown: ${command} blocked (${waitSec}s remaining)`)
+      return `${COOLDOWN_BLOCKED_SENTINEL} — cooldown active (${waitSec}s remaining). Game actions cost 1 tick (~10s). You just performed an action. Use query commands (get_status, get_cargo, view_market, read_todo, etc.) while waiting, or STOP calling tools and end your turn.`
     }
     actionCooldowns.set(ctx.profileId, { timestamp: Date.now(), wasPending: false })
   }
