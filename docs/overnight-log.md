@@ -11,3 +11,12 @@
 - Active: Morg (crimson freight, 324,780cr), Zibal (outerrim finish). All others parked.
 - Next beats: Zibal DONE→park; Grit re-wake ~2-3h from 18:55CT park if boards refresh;
   repossession check ~Aug 24 → refunds → Nova Deeprock fit.
+
+## 03:10Z Aug 22 — Server outage + recovery (root cause: Bash background reaping)
+- fleet-pulse watcher caught ADMIRAL-SERVER-DOWN (~25 min after last good 02:39Z watch).
+- Process was GONE with clean log tail — no crash output. Cause: I restarted it post-swap
+  from a Git Bash background subshell; Windows reaped it with the shell tree (~2h later).
+- Fix: restarted via PowerShell Start-Process (detached, survives shell cleanup).
+  RITUAL CHANGE: server restarts must use Start-Process, never `(./admiral.exe &)`.
+- Morg reconnected clean, wallet 337,306 (no orphan-window losses; Rampart contract
+  had already paid +18,279 before the outage). All parked agents unaffected.
