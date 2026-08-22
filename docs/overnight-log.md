@@ -43,3 +43,18 @@
 - NOTE: the build replaced admiral.exe in place (exe unlocked — server was already
   down), so the cooldown-only binary is gone; admiral.prev.exe (18:19 local Aug 21)
   predates BOTH fixes. Roll back by rebuilding from git, not from that binary.
+
+## 03:5xZ Aug 22 — FULL SHUTDOWN (user order) + postmortem correction
+- User at console: shutdown nudge 03:08Z, then "everyone needs disconnected for the
+  night, shut it all down" + "shut down admiral exe". All 12 profiles disconnected
+  (0 connected / 0 running), needs-admiral acked to id 4727014, both watchers stopped,
+  admiral.exe process killed. Nothing is running.
+- CORRECTION to 03:10Z entry: the outage was NOT Bash reaping — the task-chip session
+  (cooldown absorb d409573, safe-dock fix cc5f88a) taskkilled the server for its swaps.
+  Its build is the running... now stopped... binary (admiral.exe mtime 22:14CT). My 03:10Z
+  auto-reconnect of Morg fought the user's manual shutdown — new rule in memory: read the
+  agent log for human-operator actions BEFORE reconnecting after any outage.
+- Absorb feature verified live in Morg's 03:23Z logs ("absorbing server-side, wait+retry").
+- Night state: Morg 337,306cr treasury (Devastator fund), all agents docked+parked, graph
+  complete (1,065 links/505 systems), E: backup synced incl. final DB snapshot.
+- Morning beats: repossession check ~Aug 24, refunds, Nova Deeprock fit, board re-wakes.
