@@ -1,4 +1,5 @@
-import { getDb } from './db'
+import { getDb, gameTimestamp } from './db'
+import { getFacility } from './catalog'
 import { safeTruncate } from './text-safe'
 import type { FleetIntelData, MarketIntel, SystemIntel, ThreatIntel, KillZone, PlayerSighting } from '../../shared/fleet-intel-types'
 
@@ -123,27 +124,54 @@ export class FleetIntelCollector {
     const stationId = str(r.base_id || r.station_id || '')
     if (!stationId) return
     const stationName = str(r.base_name || r.station_name || '')
-    const rows = [r.station_facilities, r.facilities, r.player_facilities, r.faction_facilities]
-      .filter(Array.isArray).flat() as Array<Record<string, unknown>>
-    if (rows.length === 0) return
+    // player_facilities rows belong to the CALLING agent — that array membership is
+    // the only ownership signal the payload carries.
+    const groups: Array<{ rows: unknown; owned: boolean }> = [
+      { rows: r.station_facilities, owned: false },
+      { rows: r.facilities, owned: false },
+      { rows: r.player_facilities, owned: true },
+      { rows: r.faction_facilities, owned: false },
+    ]
+    if (!groups.some(g => Array.isArray(g.rows) && g.rows.length > 0)) return
 
     const db = getDb()
+    // reportedBy is the profile display name (that is what every capture path passes);
+    // resolve it to the id once so ownership rows reference profiles properly.
+    const ownerId = (db.query('SELECT id FROM profiles WHERE name = ?').get(reportedBy) as { id: string } | undefined)?.id ?? null
     const q = db.query(`
       INSERT INTO fleet_intel_facilities
-        (station_id, facility_type, facility_name, station_name, status, maintenance, reported_by, last_seen)
-      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        (station_id, facility_type, facility_name, station_name, status, maintenance,
+         owned, owner_profile_id, build_cost, reported_by, last_seen)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       ON CONFLICT(station_id, facility_type) DO UPDATE SET
         facility_name = COALESCE(NULLIF(excluded.facility_name, ''), fleet_intel_facilities.facility_name),
         station_name  = COALESCE(NULLIF(excluded.station_name, ''),  fleet_intel_facilities.station_name),
         status        = COALESCE(NULLIF(excluded.status, ''),        fleet_intel_facilities.status),
         maintenance   = COALESCE(NULLIF(excluded.maintenance, ''),   fleet_intel_facilities.maintenance),
+        owned            = MAX(fleet_intel_facilities.owned, excluded.owned),
+        owner_profile_id = COALESCE(excluded.owner_profile_id, fleet_intel_facilities.owner_profile_id),
+        build_cost       = COALESCE(fleet_intel_facilities.build_cost, excluded.build_cost),
         last_seen     = datetime('now')
     `)
-    for (const f of rows) {
-      const type = str(f.type || f.facility_type || f.id || '')
-      if (!type) continue
-      q.run(stationId, type, str(f.name || ''), stationName,
-            str(f.status || ''), str(f.maintenance || ''), reportedBy)
+    for (const g of groups) {
+      if (!Array.isArray(g.rows)) continue
+      for (const f of g.rows as Array<Record<string, unknown>>) {
+        const type = str(f.type || f.facility_type || f.id || '')
+        if (!type) continue
+        // Live payload carries maintenance_level + maintenance_satisfied, not a
+        // `maintenance` string — the old read of f.maintenance left the column
+        // empty on all 254 rows.
+        const mLvl = typeof f.maintenance_level === 'number' ? f.maintenance_level : null
+        const maintenance = str(f.maintenance || '') ||
+          (mLvl !== null ? `L${mLvl}${f.maintenance_satisfied === false ? ' UNSATISFIED' : ''}` : '')
+        // The catalog knows every facility type's build cost; bank it at first sight.
+        // Look up by `type` first (the row key), then facility_id — payloads have
+        // carried the catalog id in either field depending on the array.
+        const buildCost = (getFacility(type) ?? getFacility(str(f.facility_id || '')))?.build_cost ?? null
+        q.run(stationId, type, str(f.name || ''), stationName,
+              str(f.status || ''), maintenance,
+              g.owned ? 1 : 0, g.owned ? ownerId : null, buildCost, reportedBy)
+      }
     }
   }
 
@@ -431,7 +459,16 @@ export class FleetIntelCollector {
     const humanize = (s: string) => s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
     const poiName = str(poiObj.name || r.poi_name || r.name || '') || (poiId ? humanize(poiId) : '')
     const poiType = str(poiObj.type || r.poi_type || '')
-    const systemId = str(poiObj.system_id || r.system_id || '')
+    let systemId = str(poiObj.system_id || r.system_id || '')
+    // get_nearby payloads sometimes carry no system at all — but POI ids embed their
+    // system as a prefix (ross_248_cryobelt → ross_248). Longest-prefix match against
+    // the known-systems table so a kill zone always lands on the map when possible.
+    if (!systemId && poiId) {
+      const hit = getDb().query(
+        `SELECT system_id FROM fleet_intel_systems WHERE ? LIKE system_id || '_%' ORDER BY LENGTH(system_id) DESC LIMIT 1`
+      ).get(poiId) as { system_id: string } | undefined
+      if (hit) systemId = hit.system_id
+    }
     const systemName = str(poiObj.system_name || r.system_name || '') || (systemId ? humanize(systemId) : '')
 
     // PLAYER-SIGHTING CAPTURE (ship-class census): every get_nearby lists the players at
@@ -582,7 +619,7 @@ export class FleetIntelCollector {
         str(w.killer_name || ''),
         num(w.salvage_value),
         safeTruncate(cargoSummary, 400, '...') || null,
-        str(w.expires_at || '') || null,
+        gameTimestamp(w.expires_at),
         reportedBy,
       )
     }

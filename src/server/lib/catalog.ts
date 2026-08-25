@@ -124,6 +124,7 @@ export function catalogVersion(): string | null {
 }
 
 export function getItem(id: string): CatalogItem | undefined { return itemsById.get(id) }
+export function getFacility(id: string): CatalogFacility | undefined { return facilitiesById.get(id) }
 
 // --- lookup (fuzzy across all kinds, or one kind) ---
 

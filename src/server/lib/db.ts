@@ -140,6 +140,27 @@ VERSIONED_MIGRATIONS.push({
   },
 })
 
+VERSIONED_MIGRATIONS.push({
+  version: 5,
+  name: 'killzone-system-backfill-by-poi-prefix',
+  up: (d) => {
+    // POI ids embed their system as a prefix (ross_248_cryobelt → ross_248). Resolve
+    // historical kill zones captured before the prefix fallback existed; ambiguous or
+    // unmatchable rows stay NULL until a richer payload re-observes them.
+    const rows = d.query('SELECT poi_id FROM fleet_intel_killzones WHERE system_id IS NULL').all() as { poi_id: string }[]
+    const humanize = (s: string) => s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+    for (const { poi_id } of rows) {
+      const hit = d.query(
+        `SELECT system_id FROM fleet_intel_systems WHERE ? LIKE system_id || '_%' ORDER BY LENGTH(system_id) DESC LIMIT 1`
+      ).get(poi_id) as { system_id: string } | undefined
+      if (hit) {
+        d.query('UPDATE fleet_intel_killzones SET system_id = ?, system_name = COALESCE(system_name, ?) WHERE poi_id = ?')
+          .run(hit.system_id, humanize(hit.system_id), poi_id)
+      }
+    }
+  },
+})
+
 function runVersionedMigrations(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
