@@ -165,3 +165,14 @@ owner/build_cost/maintenance; killzone rows missing `system_id`.
    inbox/outbox, and leases are declined as over-scale.
 4. **Intel decay: `fleet_intel_systems` is never age-pruned.** World facts persist;
    `updated_at` continues to carry staleness for danger grading.
+
+**P1 leftovers — landed 2026-08-25 (same day, second pass):** facilities capture now
+records ownership (player_facilities → owned + owner_profile_id), real maintenance
+state (maintenance_level/maintenance_satisfied — the old field read matched nothing),
+and catalog build costs (477/479 rows after one-time backfill). Kill zones resolve
+their system by longest POI-id prefix (migration v5 healed ross_248_cryobelt;
+voss_redoubt is honestly unresolvable). `scripts/db-doctor.ts` is the promised
+FK-alternative audit — schema-discovered orphan checks, sentinel sweep, JSON validity,
+coverage gauges; its first run found (and we fixed) a Go zero-time in
+fleet_intel_wrecks.expires_at. Post-fix run: CLEAN. Still pending observation, not
+code: balance_after fills on the next trade; turn_id on the next LLM turn.
