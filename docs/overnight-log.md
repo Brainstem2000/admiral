@@ -1,4 +1,26 @@
 
+## 18:35Z Aug 25 — Ledger swap: sender-side gift booking live (silent-path gap closed)
+- Root cause of Morg's three unbooked refund gifts (185,119 + 20,044 + 7,455 =
+  212,618cr at 17:37Z, zero ledger rows): ledger booking lived ONLY on the LLM tool
+  path — Agent.executeCommand (silent/manual API) never called LedgerCollector, and
+  mapResult had no send_gift case either. Both fixed: bookLedgerFromCommand() in
+  tools.ts is now the ONE chokepoint (query + action-pending guards inside), called
+  from executeTool AND executeCommand; new kind 'gift_sent' books credits_sent
+  negative, counterparty = recipient, balance_after = wallet_remaining.
+- Swap ritual: nothing was connected when the server stopped (CyberSapper + Bob's
+  game sessions had already expired); rotated to the 13:26 build, previous binary
+  kept at admiral.prev.exe; started via Start-Process ritual. Boot clean.
+- VERIFIED live: silent 1cr send_gift CyberSapper→Bob Comet (POST /command,
+  silent:true) booked exactly one row — id 10922, gift_sent, -1, counterparty
+  "Bob Comet", balance_after 14847 = wallet_remaining. API read side serves it.
+- State: server UP (PID 36784) on the ledger-fix build; CyberSapper + Bob left
+  game-connected (test pair, no LLM loops); all 12 LLM loops DOWN. Working tree
+  DIRTY — the fix is not yet committed.
+- OPEN: Morg's three 17:37Z gifts are NOT backfilled (operator decision pending) —
+  reconcile shows a matching ~212,618 residual for that window until then.
+  needs-admiral backlog (8 items: Nova HOLD at war_citadel awaiting orders,
+  CyberSpock Crew Bunk cancel NEED, Bob status) left UN-acked — not acted on.
+
 ## 01:05Z Aug 22 — Binary swap complete (sniffer object-form fix live)
 - Rook DONE: all 8 voidborn systems charted; parked. Vera parked earlier (7 empty
   circuits — freight boards are REP-GATED for foreigners; lesson in memory).

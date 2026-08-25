@@ -29,7 +29,7 @@ export class LedgerCollector {
    * Called ONLY on the normal success path for NON-query commands — must never throw.
    * Amounts are read verbatim from the result; rows without a readable number are skipped.
    */
-  static processCommandResult(command: string, result: unknown, profileId: string, profileName: string): void {
+  static processCommandResult(command: string, result: unknown, profileId: string, profileName: string, args?: R): void {
     try {
       if (!result || typeof result !== 'object') return
       let r = result as R
@@ -47,7 +47,7 @@ export class LedgerCollector {
         .replace(/^(?:market|storage|social|intel|faction|faction_admin|salvage|catalog|ship|battle|transfer|facility|auth)_/, '')
       const action = str(r.action) || bare
 
-      const rows = this.mapResult(action, r)
+      const rows = this.mapResult(action, r, args)
       for (const row of rows) this.insert(profileId, row, command, r)
     } catch { /* ledger must never break game execution */ }
   }
@@ -132,7 +132,7 @@ export class LedgerCollector {
   }
 
   /** Map a command result to zero or more ledger rows. Field names verified against live results. */
-  private static mapResult(action: string, r: R): LedgerRow[] {
+  private static mapResult(action: string, r: R, args?: R): LedgerRow[] {
     const balance = this.readBalance(r)
     const rows: LedgerRow[] = []
 
@@ -300,6 +300,23 @@ export class LedgerCollector {
         rows.push({ kind: 'withdraw', amount, counterparty: str(r.faction_name || r.base_id) || null, balance_after: balance })
         break
       }
+      case 'send_gift': {
+        // { action: send_gift, credits_sent, wallet_remaining, ... } — outbound credit
+        // gift. Item/ship gifts carry no credits_sent and book nothing (the ledger tracks
+        // credits, not inventory). Three silent refund gifts (212,618cr, 2026-08-25) left
+        // a wallet with zero ledger rows before this case existed. The result may not echo
+        // the recipient, so fall back to the command args; wallet_remaining beats the
+        // generic balance read here because a `credits` echo could be the gifted amount.
+        const credits = num(r.credits_sent)
+        if (credits === null || credits === 0) break
+        rows.push({
+          kind: 'gift_sent',
+          amount: -Math.abs(credits),
+          counterparty: str(r.recipient) || str(r.target) || str(args?.recipient) || null,
+          balance_after: num(r.wallet_remaining) ?? balance,
+        })
+        break
+      }
     }
 
     return rows
@@ -323,7 +340,9 @@ export class LedgerCollector {
     const player = (r.player && typeof r.player === 'object') ? (r.player as R) : null
     // Top-level `credits` is the wallet in SpaceMolt responses (get_cargo, travel,
     // trade results); player.credits/wallet alone matched 0 of 10,535 live rows.
-    return (player ? num(player.credits) : null) ?? num(r.wallet) ?? num(r.credits)
+    // wallet_remaining is send_gift's name for the post-action wallet — last so it
+    // can never shadow an authoritative read on results that carry both.
+    return (player ? num(player.credits) : null) ?? num(r.wallet) ?? num(r.credits) ?? num(r.wallet_remaining)
   }
 
   private static fillCounterparties(r: R): string | null {

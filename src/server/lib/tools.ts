@@ -285,6 +285,19 @@ const QUERY_COMMANDS = new Set([
   'battle_get_battle_status',
 ])
 
+/**
+ * Query vs action classification, shared by BOTH command paths (executeTool and the
+ * manual/API path via bookLedgerFromCommand). Queries are free — no game tick, no
+ * cooldown — and never move credits, so they are never booked to the ledger.
+ */
+export function isQueryCommand(command: string): boolean {
+  const bare = command.replace(/^spacemolt_/, '')
+  const deep = bare.replace(/^(?:market|storage|social|intel|faction|faction_admin|salvage|catalog|ship|battle|transfer|facility|auth)_/, '')
+  return QUERY_COMMANDS.has(command) || QUERY_COMMANDS.has(bare) || QUERY_COMMANDS.has(deep)
+    // Heuristic: commands starting with get_/view_/list_/query_/browse_/search_/find_/estimate_ are queries
+    || /^(?:get_|view_|list_|query_|browse_|search_|find_|estimate_|help|scan|catalog)/.test(deep)
+}
+
 export type LogFn = (type: string, summary: string, detail?: string) => void
 
 export interface ToolContext {
@@ -630,6 +643,45 @@ export function captureFromCommandResult(command: string, resultData: unknown, p
   }
 }
 
+/**
+ * Book credit movements from a command result — the ONE ledger chokepoint for BOTH
+ * command paths: executeTool's resolved-success path and Agent.executeCommand
+ * (manual/API, silent included). Booking used to live only on the tool path, so
+ * silent mutations bypassed the ledger entirely: three silent send_gift refunds
+ * (212,618cr) left Morg's wallet on 2026-08-25 with zero ledger rows while every
+ * response confirmed credits_sent.
+ *
+ * Queries book nothing (no credits move). Action-pending echoes book nothing — the
+ * resolved result repeats the same trade payload, and booking both double-counts
+ * (same rule as executeTool's sentinel path, which returns before its booking site).
+ * Callers pass success results only: a refused or errored command moved nothing.
+ */
+export function bookLedgerFromCommand(
+  command: string,
+  commandArgs: Record<string, unknown> | undefined,
+  resultData: unknown,
+  resultText: string,
+  profileId: string,
+  profileName: string,
+): void {
+  if (isQueryCommand(command)) return
+  const lower = resultText.toLowerCase()
+  if (lower.includes('action pending') || lower.includes('resolves next tick') || lower.includes('already pending')) return
+  try {
+    LedgerCollector.processCommandResult(command, resultData, profileId, profileName, commandArgs)
+  } catch { /* ledger must never break game execution */ }
+  // Player-to-player credit gifts via deposit{credits,target} carry no bookable
+  // fields in the result — book from the args (these bypassed the ledger until 2026-07-21).
+  try {
+    const bareG = command.replace(/^spacemolt_/, '').replace(/^storage_/, '')
+    const giftCredits = Number(commandArgs?.credits ?? 0)
+    const giftTarget = String(commandArgs?.target ?? '')
+    if (bareG === 'deposit' && giftCredits > 0 && giftTarget && giftTarget.toLowerCase() !== 'faction') {
+      LedgerCollector.bookGift(profileId, giftTarget, giftCredits)
+    }
+  } catch { /* ledger must never break game execution */ }
+}
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
@@ -807,9 +859,7 @@ export async function executeTool(
   const bareCommand = command.replace(/^spacemolt_/, '')
   // Also strip v2 tool group prefix (e.g. "market_view_market" → "view_market")
   const deepBare = bareCommand.replace(/^(?:market|storage|social|intel|faction|faction_admin|salvage|catalog|ship|battle|transfer|facility|auth)_/, '')
-  const isQuery = QUERY_COMMANDS.has(command) || QUERY_COMMANDS.has(bareCommand) || QUERY_COMMANDS.has(deepBare)
-    // Heuristic: commands starting with get_/view_/list_/query_/browse_/search_/find_/estimate_ are queries
-    || /^(?:get_|view_|list_|query_|browse_|search_|find_|estimate_|help|scan|catalog)/.test(deepBare)
+  const isQuery = isQueryCommand(command)
   if (!isQuery) {
     let remainingMs = actionCooldownRemaining(ctx.profileId)
     if (remainingMs !== null && remainingMs <= COOLDOWN_ABSORB_MAX_MS) {
@@ -1005,27 +1055,16 @@ export async function executeTool(
       recordCargoFromCommand(command, resultData, ctx.profileId)
     } catch { /* never break game execution */ }
 
-    // Book credit movements from the resolved result — ONLY here, on the resolved success
-    // path of action commands. The action-pending sentinel path above must NOT book: the
-    // resolved result echoes the same trade payload again, so booking both would
-    // double-count every trade. Notification-borne credits (bounties, fills, mission
+    // Book credit movements from the resolved result — via bookLedgerFromCommand, the
+    // chokepoint shared with Agent.executeCommand so silent/manual mutations book
+    // identically. The action-pending sentinel path above returned before this point
+    // (the resolved result echoes the same trade payload again; booking both would
+    // double-count every trade). Notification-borne credits (bounties, fills, mission
     // rewards) are NOT booked here: they attach to whatever response comes next (usually
     // a query) and are booked once in the Agent's onNotification handler — the chokepoint
     // every connection and command path funnels notifications through.
     if (!isQuery) {
-      try {
-        LedgerCollector.processCommandResult(command, resultData, ctx.profileId, ctx.profileName)
-      } catch { /* never break game execution */ }
-      // Book player-to-player credit gifts (deposit with credits+target) —
-      // these bypassed the ledger entirely until 2026-07-21.
-      try {
-        const bareG = command.replace(/^spacemolt_/, '').replace(/^storage_/, '')
-        const giftCredits = Number(commandArgs?.credits ?? 0)
-        const giftTarget = String(commandArgs?.target ?? '')
-        if (bareG === 'deposit' && giftCredits > 0 && giftTarget && giftTarget.toLowerCase() !== 'faction') {
-          LedgerCollector.bookGift(ctx.profileId, giftTarget, giftCredits)
-        }
-      } catch { /* never break game execution */ }
+      bookLedgerFromCommand(command, commandArgs, resultData, result, ctx.profileId, ctx.profileName)
       // Decrement Admiral sell quotas on successful locked-item sells/listings
       // (listing counts: escrowed stock has left vault control).
       try {

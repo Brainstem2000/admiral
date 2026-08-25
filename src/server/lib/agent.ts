@@ -11,7 +11,7 @@ import { LibV2Connection } from './connections/lib_v2'
 import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
-import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult } from './tools'
+import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
@@ -778,6 +778,19 @@ export class Agent {
       // freight, links, empire policy) — manual/API commands see the same truths.
       captureFromCommandResult(command, payload, this.profileId, 'manual')
     } catch { /* intel capture must never break command execution */ }
+
+    // Credit movements book on this path too, through the same chokepoint the LLM
+    // tool layer uses. Silent/manual mutations previously bypassed the ledger
+    // entirely: three silent send_gift refunds (212,618cr) left Morg's wallet on
+    // 2026-08-25 with zero ledger rows. Success only — an errored command moved
+    // nothing; the query gate here just skips stringifying big query payloads.
+    if (!result.error && !isQueryCommand(command)) {
+      try {
+        const payload = (result as { structuredContent?: unknown }).structuredContent ?? result.result
+        const text = typeof result.result === 'string' ? result.result : JSON.stringify(result.result ?? '')
+        bookLedgerFromCommand(command, args, payload, text, this.profileId, getProfile(this.profileId)?.name ?? 'manual')
+      } catch { /* ledger must never break command execution */ }
+    }
 
     if (!options?.silent) {
       if (result.error) {

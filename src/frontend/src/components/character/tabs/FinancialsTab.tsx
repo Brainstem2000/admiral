@@ -59,6 +59,7 @@ const KIND_COLORS: Record<string, string> = {
   deposit: 'var(--smui-frost-2)',
   withdraw: 'var(--smui-frost-2)',
   transfer: 'var(--smui-frost-2)',
+  gift_sent: 'var(--smui-red)',
   other: 'var(--muted-foreground)',
 }
 
