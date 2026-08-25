@@ -60,6 +60,7 @@ const KIND_COLORS: Record<string, string> = {
   withdraw: 'var(--smui-frost-2)',
   transfer: 'var(--smui-frost-2)',
   gift_sent: 'var(--smui-red)',
+  freight: 'var(--smui-green)',
   other: 'var(--muted-foreground)',
 }
 

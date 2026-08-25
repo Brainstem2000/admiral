@@ -39,7 +39,10 @@ export class LedgerCollector {
       // payload (total_earned, fills, ...) is nested at delta.details. Without
       // this unwrap every lib_v2 trade parsed as an empty row and was skipped
       // (observed: financial_ledger flatlined the moment agents moved to lib_v2).
-      if (!('action' in r) && r.details && typeof r.details === 'object') r = r.details as R
+      // Keep the outer delta too: the wallet echo (player.credits) lives there,
+      // not in details — discarding it left balance_after NULL on lib_v2 rows.
+      let outer: R | undefined
+      if (!('action' in r) && r.details && typeof r.details === 'object') { outer = r; r = r.details as R }
 
       // Normalize command: strip spacemolt_ and v2 group prefixes; the result's own
       // `action` field is the most authoritative dispatch key when present.
@@ -47,7 +50,7 @@ export class LedgerCollector {
         .replace(/^(?:market|storage|social|intel|faction|faction_admin|salvage|catalog|ship|battle|transfer|facility|auth)_/, '')
       const action = str(r.action) || bare
 
-      const rows = this.mapResult(action, r, args)
+      const rows = this.mapResult(action, r, args, outer)
       for (const row of rows) this.insert(profileId, row, command, r)
     } catch { /* ledger must never break game execution */ }
   }
@@ -132,8 +135,8 @@ export class LedgerCollector {
   }
 
   /** Map a command result to zero or more ledger rows. Field names verified against live results. */
-  private static mapResult(action: string, r: R, args?: R): LedgerRow[] {
-    const balance = this.readBalance(r)
+  private static mapResult(action: string, r: R, args?: R, outer?: R): LedgerRow[] {
+    const balance = this.readBalance(r) ?? (outer ? this.readBalance(outer) : null)
     const rows: LedgerRow[] = []
 
     switch (action) {
@@ -298,6 +301,25 @@ export class LedgerCollector {
         const amount = num(r.amount) ?? num(r.credits_withdrawn) ?? num(r.withdrawn)
         if (amount === null || amount === 0) break
         rows.push({ kind: 'withdraw', amount, counterparty: str(r.faction_name || r.base_id) || null, balance_after: balance })
+        break
+      }
+      case 'deliver':
+      case 'shipping_deliver': {
+        // Freight settlement — lib_v2 details: { action: deliver, carrier_payout,
+        // contract: { id, base_reward, shipping_house_id, ... } }. Four paid
+        // deliveries on 2026-08-25 booked nothing; freight was invisible to the
+        // ledger. carrier_payout is the settled number (reward ± bonus/fees).
+        const contract = (r.contract && typeof r.contract === 'object') ? (r.contract as R) : null
+        const payout = num(r.carrier_payout)
+          ?? (contract ? num(contract.carrier_payout) ?? num(contract.base_reward) : null)
+        if (payout === null || payout === 0) break
+        rows.push({
+          kind: 'freight',
+          amount: payout,
+          counterparty: contract ? (str(contract.shipping_house_id) || str(contract.origin_base_id) || null) : null,
+          order_id: contract ? (str(contract.id) || null) : null,
+          balance_after: balance,
+        })
         break
       }
       case 'send_gift': {

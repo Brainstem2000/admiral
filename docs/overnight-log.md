@@ -1,4 +1,63 @@
 
+## 19:45Z Aug 25 — Freight ledger fix live (kind 'freight'); lib_v2 balance_after fixed
+- mapResult now books shipping settlements: action 'deliver' / bare 'shipping_deliver'
+  → kind 'freight', amount = carrier_payout (fallback contract.base_reward),
+  counterparty = shipping_house/origin, order_id = contract id. Field names taken
+  from Vera's real 19:24Z delivery delta (log_entries id 4729655).
+- Bonus fix: the lib_v2 details-unwrap was discarding the outer delta, where
+  player.credits lives — balance_after was NULL on every lib_v2 mutation. The outer
+  read is now kept as fallback; harness test (real payload, scratch DB) shows
+  balance_after 58,533 captured. PASS on delta form, flat v1 form, and no-payout skip.
+- Swap ritual: nothing running (CyberSapper/Bob idle sessions dropped with restart —
+  they were minutes from expiry). Server UP PID 10396 on the 14:42 local build; prev
+  at admiral.prev.exe. Working tree DIRTY (freight fix uncommitted).
+- Verification status: harness-verified with the captured live payload; organic
+  live confirmation lands with the next real freight delivery (none possible right
+  now — Vera's boards are rep-gated dead).
+
+## 19:25Z Aug 25 — Vera circuit closed clean; SAFE-DOCK LIVE-VERIFIED (cc5f88a confirmed)
+- Vera's wake finished every leftover: pkg 33b2e1e6 delivered on boot (+2,345), two
+  more circuit deliveries, then the stuck anvil contract d1d23e8a (package 18c3d95d,
+  the one that would not cancel) — nudged with the deadline (~54 min from breach),
+  she ran anvil->load->iron_reach->deliver in 3 minutes flat: +1,445 on time, no
+  500cr debt, rep-eligible completion. Wallet 58,533. Circuit boards are DEAD at
+  Crimson standing 10 (rep-gated, no postings) — do not re-wake her for freight
+  until standing improves.
+- Safe-dock fired post-delivery: "Safe dock complete (live-verified) — disconnecting."
+  at 19:24:34 — first real-world confirmation of the cc5f88a isDockedLive() fix;
+  memory item closed. Vera parked DOCKED at iron_reach_mining_colony.
+- LEDGER GAP CONFIRMED x4: shipping_deliver rewards never book (no mapResult case) —
+  Vera's whole session shows one fuel row (−78) against four paid deliveries. Fix is
+  scoped, same family as the send_gift case; needs a binary swap to deploy.
+- State: all LLM loops down. CyberSapper + Bob hold idle game sessions (expire ~30min).
+- Fleet-wide `facility action=owned` sweep (free query, game-only connects, everyone
+  re-parked to found state): FOUR agents own FIVE rent-charging facilities — Nova
+  crew_bunk + ledger_desk @CCC (357/cyc EACH, 61,404/day), CyberSapper + CyberSpock +
+  Ledger Voss crew_bunks @grand_exchange (54/cyc, damaged). Other eight: zero.
+- KEY MECHANIC: facilities deep in arrears are HIDDEN from `owned` — Nova's 18:09Z
+  "ZERO owned = repossessed" was arrears-hold, not repossession. Morg's three 17:37Z
+  "refund" gifts (185,119 Nova / 20,044 CyberSapper / 7,455 CyberSpock) paid the
+  arrears and REVIVED the sinks: clawbacks in exact rent multiples (Nova −8,568 =
+  12×714; CyberSpock −4,644 = 86×54), then facilities reappeared in `owned` (live-
+  validated twice on Nova's own session). OPEN WRINKLE: Voss (wallet 43, cannot cover
+  one 54cr cycle) stayed VISIBLE in owned — the hide rule has a nuance; never infer
+  repossession from `owned` alone, check wallet-drain multiples.
+- Operator ruling: starve all. Drains via silent send_gift → Morg'Thar: CyberSpock
+  2,811 (ledger row 10923), Nova 174,409 (row 10925), CyberSapper 14,847 (row 10926)
+  — every one booked kind gift_sent by today's sender-side ledger fix. Voss at 43,
+  starving naturally.
+- Directives: CyberSpock's REPLACED (old cancel-order would retry the impossible
+  dismantle); Nova + CyberSapper appended STARVE-ADDENDUM (wallet stays 0, forward
+  stray credits to Morg). All PUTs hit non-running agents — no turn restarts.
+- Grace math: nebula + solarian eviction_grace_cycles = 260; cycle ≈16.74 min →
+  ≈72h35m. Clocks start at first unpayable cycle: CyberSpock 18:56Z, CyberSapper
+  ~19:12Z, Nova ~19:25Z → repossession ~Aug 28 evening UTC (a daily-batch evaluator
+  could slip it to Aug 29). STANDING RULE UNTIL DONE: send NO credits to Nova,
+  CyberSapper, CyberSpock, or Voss — one payment resets a clock.
+- State: Nova + CyberSpock re-parked; CyberSapper + Bob connected as found (no LLM);
+  Vera mid-circuit under session monitor (18c3d95d still pending); Morg to receive
+  ~192K async (inbound gifts are not ledger-booked — known gap).
+
 ## 18:35Z Aug 25 — Ledger swap: sender-side gift booking live (silent-path gap closed)
 - Root cause of Morg's three unbooked refund gifts (185,119 + 20,044 + 7,455 =
   212,618cr at 17:37Z, zero ledger rows): ledger booking lived ONLY on the LLM tool
