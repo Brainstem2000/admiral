@@ -16,7 +16,7 @@ import analytics from './routes/analytics'
 import schedules from './routes/schedules'
 import codexRoutes from './routes/codex'
 import { startScheduler } from './lib/scheduler'
-import { pruneOldData } from './lib/db'
+import { pruneOldData, backfillSystemsFromStations } from './lib/db'
 import { startCatalogService } from './lib/catalog'
 
 // Admiral manages long-running agent connections; a single escaped error must
@@ -113,6 +113,12 @@ if (isDev) {
 // Start cron scheduler
 startScheduler()
 startCatalogService()
+
+// Fill station presence + services for every system from the free public endpoint
+// (zero agent turns; only-fill, never overwrites gameplay observations).
+backfillSystemsFromStations()
+  .then(n => { if (n > 0) console.log(`[Intel] stations backfill touched ${n} systems`) })
+  .catch(err => console.warn('[Intel] stations backfill failed:', err?.message ?? err))
 
 // Prune aged logs/snapshots/intel on startup, then every 6 hours, so these
 // tables don't grow without bound.

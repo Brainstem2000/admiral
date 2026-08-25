@@ -1,4 +1,5 @@
-import { getPreference, setPreference } from './db'
+import fs from 'node:fs'
+import path from 'node:path'
 import { safeTruncate } from './text-safe'
 import type { GameCommandInfo, GameCommandParam } from '@shared/types'
 
@@ -17,23 +18,25 @@ export async function fetchOpenApiSpec(
   specUrl: string,
   log?: SpecLogFn,
 ): Promise<Record<string, unknown> | null> {
-  const cacheKey = `openapi_cache:${specUrl}`
-  const cacheTimeKey = `openapi_cache_time:${specUrl}`
+  // Disk cache beside catalog-cache.json — specs are ~2MB apiece and were making
+  // the preferences table 96% cache blobs (see docs/db-improvement-plan.md P1).
+  const cachePath = path.join(process.cwd(), 'data',
+    `openapi-cache-${specUrl.replace(/[^a-z0-9.]+/gi, '_')}.json`)
+  const readCache = (): { time: number; spec: Record<string, unknown> } | null => {
+    try { return JSON.parse(fs.readFileSync(cachePath, 'utf8')) } catch { return null }
+  }
 
   // Return fresh cache immediately without hitting the server
-  try {
-    const cached = getPreference(cacheKey)
-    const cachedTime = getPreference(cacheTimeKey)
-    if (cached) {
-      const age = cachedTime ? Date.now() - Number(cachedTime) : Infinity
+  {
+    const cached = readCache()
+    if (cached?.spec) {
+      const age = Date.now() - (cached.time || 0)
       if (age < SPEC_CACHE_TTL_MS) {
         const ageMin = Math.round(age / 60_000)
         log?.('info', `Using cached OpenAPI spec for ${specUrl} (${ageMin}m old)`)
-        return JSON.parse(cached)
+        return cached.spec
       }
     }
-  } catch {
-    // Cache read/parse failed -- fall through to fetch
   }
 
   // Cache missing or stale -- fetch from server
@@ -51,8 +54,7 @@ export async function fetchOpenApiSpec(
     const spec = await resp.json()
     // Cache on success
     try {
-      setPreference(cacheKey, JSON.stringify(spec))
-      setPreference(cacheTimeKey, String(Date.now()))
+      fs.writeFileSync(cachePath, JSON.stringify({ time: Date.now(), spec }))
     } catch {
       // Non-fatal -- caching is best-effort
     }
@@ -63,17 +65,14 @@ export async function fetchOpenApiSpec(
   }
 
   // Last resort: use stale cache
-  try {
-    const cached = getPreference(cacheKey)
-    if (cached) {
-      const cachedTime = getPreference(cacheTimeKey)
-      const age = cachedTime ? Date.now() - Number(cachedTime) : Infinity
+  {
+    const cached = readCache()
+    if (cached?.spec) {
+      const age = Date.now() - (cached.time || 0)
       const ageMin = Math.round(age / 60_000)
       log?.('warn', `Using stale cached OpenAPI spec for ${specUrl} (${ageMin}m old, fetch failed)`)
-      return JSON.parse(cached)
+      return cached.spec
     }
-  } catch {
-    // Cache parse failed
   }
 
   log?.('error', `No OpenAPI spec available for ${specUrl} (fetch failed, no cache)`)

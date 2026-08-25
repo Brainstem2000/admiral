@@ -120,6 +120,41 @@ context. Verified claim-by-claim:
 fresh-DB init in a temp dir diffed against live schema (2); one live buy/sell books a
 row with balance (3); re-run the profiler's queries and confirm the finding closed.
 
+## Execution log (2026-08-25)
+
+**P0 — landed and verified same day.** Fresh-DB init now converges with the evolved
+schema at `user_version=4` (idx_fis_police present, nullable freight timestamps,
+migrations ledgered). Live DB: sentinels 0/18, orphans 0, state history 2,374 → 699,
+file 218.3 → 203.2 MB via the existing incremental vacuum. `fleet_intel_systems` is
+no longer age-pruned — the pathfinder corpus is permanent. `balance_after` fix is in
+(top-level `credits` read); populates from the next real trade onward.
+
+**P1 — landed and verified, with two findings the plan didn't predict:**
+
+- **Manual/API commands ran NONE of the self-accounting captures.** The block lived
+  only in `executeTool` (LLM path); silent admin commands took `Agent.executeCommand`.
+  Extracted to `captureFromCommandResult()`, now called from both paths — ships,
+  policies, freight, links, and empire policy capture identically everywhere. The
+  capture catch also warns now instead of swallowing (the silence hid this for weeks).
+- **`get_empire_info` on http_v2 returns structured data, not the text report** —
+  `empires: [{empire_id, *_bps, eviction_grace_cycles, ...}]`. The hook now parses the
+  structured form (richer: basis-point rates, `policy_updated_at`) with the text regex
+  as v1 fallback. Verified live: all 5 empires captured, rates matching known values
+  (crimson 1%/wk property, grace 260 everywhere).
+- Stations backfill: 76 systems gained `has_station`/`station_services` from the free
+  endpoint at boot. (The endpoint carries no per-system empire; empire coverage keeps
+  filling from gameplay observations instead.)
+- `turn_id` correlation live on `log_entries` (indexed); `cancel_reason`/`superseded_by`
+  on `fleet_orders` with a `cancelFleetOrder()` helper all future cancels must use.
+- OpenAPI specs moved to `data/openapi-cache-*.json`; preferences shed 2.67 MB.
+- `fleet_intel_threats` emptiness is EXPLAINED, not broken: the pipeline works but its
+  triggers (combat notifications, scan results) never fire — the fleet avoids combat
+  and agents avoid `scan` because of the known QUERY_COMMANDS cooldown drift. No code
+  change; fixing the scan classification is the upstream item.
+
+**Deferred from P1** (small, next session): facilities capture for
+owner/build_cost/maintenance; killzone rows missing `system_id`.
+
 ## Decisions (operator, 2026-08-25)
 
 1. **Scope: P0 + P1 approved for execution.** P2 items stay parked in this doc.

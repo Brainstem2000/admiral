@@ -11,7 +11,7 @@ import { LibV2Connection } from './connections/lib_v2'
 import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
-import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand } from './tools'
+import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
@@ -161,8 +161,11 @@ export class Agent {
     }).catch(() => {}).finally(() => { this._factionFetchInFlight = false })
   }
 
+  /** Correlates every log row written during one agent turn (set per runAgentTurn call). */
+  private currentTurnId: string | null = null
+
   private log: LogFn = (type, summary, detail?) => {
-    const id = addLogEntry(this.profileId, type, summary, detail)
+    const id = addLogEntry(this.profileId, type, summary, detail, this.currentTurnId ?? undefined)
     this.events.emit('log', { id, profile_id: this.profileId, type, summary, detail, timestamp: new Date().toISOString() })
   }
 
@@ -408,6 +411,7 @@ export class Agent {
             : maxToolRounds
 
         this.setActivity(`${phasePrefix}Waiting for LLM response...`)
+        this.currentTurnId = crypto.randomUUID()
         const outcome = isCodexBusinessRole(turnRole)
           ? await runCodexAgentTurn({
               role: isPlanningTurn ? 'planner' : 'executor',
@@ -770,6 +774,9 @@ export class Agent {
       const payload = (result as { structuredContent?: unknown }).structuredContent ?? result.result
       recordStorageFromCommand(command, payload, this.profileId)
       recordCargoFromCommand(command, payload, this.profileId)
+      // Same self-accounting captures the LLM tool path runs (ships, policies,
+      // freight, links, empire policy) — manual/API commands see the same truths.
+      captureFromCommandResult(command, payload, this.profileId, 'manual')
     } catch { /* intel capture must never break command execution */ }
 
     if (!options?.silent) {

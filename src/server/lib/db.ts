@@ -120,6 +120,26 @@ const VERSIONED_MIGRATIONS: Array<{ version: number; name: string; up: (db: Data
   },
 ]
 
+VERSIONED_MIGRATIONS.push({
+  version: 4,
+  name: 'order-cancel-metadata, log turn correlation, openapi cache eviction',
+  up: (d) => {
+    const has = (t: string, c: string) =>
+      (d.query(`PRAGMA table_info(${t})`).all() as { name: string }[]).some(x => x.name === c)
+    // 75.8% of historical fleet_orders are cancels with no recorded why — give
+    // cancels a reason and a pointer to the order that replaced them.
+    if (!has('fleet_orders', 'cancel_reason')) d.exec('ALTER TABLE fleet_orders ADD COLUMN cancel_reason TEXT')
+    if (!has('fleet_orders', 'superseded_by')) d.exec('ALTER TABLE fleet_orders ADD COLUMN superseded_by TEXT')
+    // Lite turn correlation: every log row written during one agent turn shares a
+    // turn_id, so "what did this turn call, cost, and conclude" is a WHERE clause.
+    if (!has('log_entries', 'turn_id')) d.exec('ALTER TABLE log_entries ADD COLUMN turn_id TEXT')
+    d.exec('CREATE INDEX IF NOT EXISTS idx_log_turn ON log_entries(turn_id) WHERE turn_id IS NOT NULL')
+    // OpenAPI specs moved to a disk cache beside catalog-cache.json; evict the
+    // 2.67MB that made preferences 96% spec blobs.
+    d.exec("DELETE FROM preferences WHERE key LIKE 'openapi_cache%'")
+  },
+})
+
 function runVersionedMigrations(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -133,7 +153,9 @@ function runVersionedMigrations(db: Database): void {
       .run('imperative-baseline (migrate())')
     db.exec('PRAGMA user_version = 1')
   }
-  for (const m of VERSIONED_MIGRATIONS) {
+  // Sorted defensively: application order must follow version numbers, not
+  // array declaration order, or the <= gate silently skips a mis-ordered step.
+  for (const m of [...VERSIONED_MIGRATIONS].sort((a, b) => a.version - b.version)) {
     if (m.version <= uv()) continue
     const tx = db.transaction(() => {
       m.up(db)
@@ -1055,7 +1077,7 @@ export function reorderProfiles(orderedIds: string[]): void {
 
 // --- Log CRUD ---
 
-export function addLogEntry(profileId: string, type: string, summary: string, detail?: string): number {
+export function addLogEntry(profileId: string, type: string, summary: string, detail?: string, turnId?: string): number {
   // Cap only the PERSISTED copy of tool_result detail. The full result is still
   // handed to the LLM in-context by the caller; this truncation affects the DB row
   // alone, keeping the log_entries table from bloating on huge tool payloads.
@@ -1066,8 +1088,8 @@ export function addLogEntry(profileId: string, type: string, summary: string, de
     persistedDetail = persistedDetail.slice(0, TOOL_RESULT_DETAIL_CEILING) + `\n…[truncated ${dropped} bytes]`
   }
   const result = getDb().query(
-    'INSERT INTO log_entries (profile_id, type, summary, detail) VALUES (?, ?, ?, ?)'
-  ).run(profileId, type, summary, persistedDetail)
+    'INSERT INTO log_entries (profile_id, type, summary, detail, turn_id) VALUES (?, ?, ?, ?, ?)'
+  ).run(profileId, type, summary, persistedDetail, turnId ?? null)
   return Number(result.lastInsertRowid)
 }
 
@@ -1579,7 +1601,7 @@ export function replaceInsurancePolicies(profileId: string, policies: Array<{
 export function recordEmpirePolicy(empire: string, parsed: {
   property?: string; income?: string; salesCitizen?: string; evictionGrace?: number; fuelTax?: number
 }, raw: string): void {
-  db.query(`INSERT OR REPLACE INTO empire_policy_snapshots
+  getDb().query(`INSERT OR REPLACE INTO empire_policy_snapshots
     (empire, fetched_at, property_rate, income_rate, sales_citizen_rate, eviction_grace_cycles, fuel_tax, raw)
     VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?)`)
     .run(empire, parsed.property ?? '', parsed.income ?? '', parsed.salesCitizen ?? '',
@@ -2164,13 +2186,55 @@ export function getFleetOrders(opts: {
   return getDb().query(`SELECT * FROM fleet_orders ${where} ORDER BY created_at DESC`).all(...params) as FleetOrder[]
 }
 
-export function updateFleetOrder(id: string, updates: { status?: string; progress?: string }): void {
+export function updateFleetOrder(id: string, updates: { status?: string; progress?: string; cancel_reason?: string; superseded_by?: string }): void {
   const sets: string[] = ["updated_at = datetime('now')"]
   const vals: string[] = []
   if (updates.status !== undefined) { sets.push('status = ?'); vals.push(updates.status) }
   if (updates.progress !== undefined) { sets.push('progress = ?'); vals.push(updates.progress) }
+  if (updates.cancel_reason !== undefined) { sets.push('cancel_reason = ?'); vals.push(updates.cancel_reason) }
+  if (updates.superseded_by !== undefined) { sets.push('superseded_by = ?'); vals.push(updates.superseded_by) }
   vals.push(id)
   getDb().query(`UPDATE fleet_orders SET ${sets.join(', ')} WHERE id = ?`).run(...vals)
+}
+
+/**
+ * Cancel a fleet order WITH its why. 75.8% of historical orders are cancels with no
+ * recorded reason, actor, or replacement — every cancel (admin scripts included)
+ * should go through here rather than a bare status update.
+ */
+export function cancelFleetOrder(id: string, reason: string, supersededBy?: string): void {
+  updateFleetOrder(id, { status: 'cancelled', cancel_reason: reason, superseded_by: supersededBy })
+}
+
+/**
+ * Backfill fleet_intel_systems from the free public stations endpoint (no agent
+ * turns, no game ticks). Only-fill semantics: never overwrites a gameplay
+ * observation, and never touches updated_at on existing rows — API presence is
+ * not an in-system observation, and updated_at feeds danger-grade staleness.
+ */
+export async function backfillSystemsFromStations(): Promise<number> {
+  const resp = await fetch('https://game.spacemolt.com/api/stations', {
+    signal: AbortSignal.timeout(15_000),
+    headers: { 'User-Agent': 'SpaceMolt-Admiral' },
+  })
+  if (!resp.ok) return 0
+  const data = await resp.json() as { stations?: Array<{ system_id?: string; system_name?: string; services?: unknown }> }
+  const db = getDb()
+  let n = 0
+  for (const st of data.stations ?? []) {
+    if (!st.system_id) continue
+    const services = Array.isArray(st.services) ? st.services.join(',')
+      : typeof st.services === 'string' ? st.services : null
+    db.query(`INSERT INTO fleet_intel_systems (system_id, system_name, has_station, station_services, discovered_by)
+      VALUES (?, ?, 1, ?, 'stations-api')
+      ON CONFLICT(system_id) DO UPDATE SET
+        has_station = 1,
+        system_name = CASE WHEN system_name = '' OR system_name = system_id THEN excluded.system_name ELSE system_name END,
+        station_services = COALESCE(station_services, excluded.station_services)`)
+      .run(st.system_id, st.system_name ?? st.system_id, services)
+    n++
+  }
+  return n
 }
 
 export function getFleetOrdersByChain(chainId: string): FleetOrder[] {
