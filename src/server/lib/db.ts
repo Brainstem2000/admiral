@@ -53,7 +53,96 @@ export function getDb(): Database {
   db.exec('PRAGMA foreign_keys = ON')
 
   migrate(db)
+  runVersionedMigrations(db)
   return db
+}
+
+/**
+ * Normalize a game-API timestamp for storage: the API uses Go's zero time
+ * (0001-01-01T00:00:00Z) for "hasn't happened", which must become NULL, never a
+ * comparable-looking string. Empty strings also become NULL — '' as "unknown"
+ * breaks MAX()/COALESCE merges and date comparisons.
+ */
+export function gameTimestamp(v: unknown): string | null {
+  if (typeof v !== 'string' || v === '' || v.startsWith('0001-')) return null
+  return v
+}
+
+/**
+ * Versioned migration ledger. The imperative migrate() above remains the
+ * compatibility baseline (schema auto-migrates on startup — CLAUDE.md contract);
+ * everything from v2 onward is a numbered step here, recorded in
+ * schema_migrations and gated by PRAGMA user_version. This kills the drift class
+ * where a change lands only in a legacy ALTER branch and fresh databases never
+ * receive it (idx_fis_police, found 2026-08-25).
+ */
+const VERSIONED_MIGRATIONS: Array<{ version: number; name: string; up: (db: Database) => void }> = [
+  {
+    version: 2,
+    name: 'freight-nullable-timestamps',
+    up: (d) => {
+      // Historical rows captured the game's Go zero time verbatim, and the original
+      // DDL declared the columns NOT NULL DEFAULT '' — rebuild the (tiny) table with
+      // nullable timestamps and normalize sentinels in the copy. New writes are
+      // normalized by gameTimestamp() at capture.
+      d.exec(`CREATE TABLE freight_contracts_v2 (
+        contract_id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL,
+        origin_base TEXT NOT NULL DEFAULT '',
+        dest_base TEXT NOT NULL DEFAULT '',
+        base_reward INTEGER NOT NULL DEFAULT 0,
+        appraised_value INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'open',
+        accepted_at TEXT,
+        completed_at TEXT,
+        last_seen TEXT NOT NULL DEFAULT (datetime('now'))
+      )`)
+      d.exec(`INSERT INTO freight_contracts_v2
+        SELECT contract_id, profile_id, origin_base, dest_base, base_reward, appraised_value, status,
+          CASE WHEN accepted_at = '' OR accepted_at LIKE '0001-%' THEN NULL ELSE accepted_at END,
+          CASE WHEN completed_at = '' OR completed_at LIKE '0001-%' THEN NULL ELSE completed_at END,
+          last_seen
+        FROM freight_contracts`)
+      d.exec('DROP TABLE freight_contracts')
+      d.exec('ALTER TABLE freight_contracts_v2 RENAME TO freight_contracts')
+    },
+  },
+  {
+    version: 3,
+    name: 'danger-ref-stub-systems',
+    up: (d) => {
+      // system_danger_daily rows must resolve to a fleet_intel_systems row; stub
+      // unknown systems (discovered_by marks them synthetic) instead of orphaning.
+      d.exec(`INSERT OR IGNORE INTO fleet_intel_systems (system_id, system_name, discovered_by)
+        SELECT DISTINCT sd.system_id, sd.system_id, 'stub:danger-ref' FROM system_danger_daily sd
+        WHERE NOT EXISTS (SELECT 1 FROM fleet_intel_systems f WHERE f.system_id = sd.system_id)`)
+    },
+  },
+]
+
+function runVersionedMigrations(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`)
+  const uv = () => (db.query('PRAGMA user_version').get() as { user_version: number }).user_version
+  if (uv() === 0) {
+    // Pre-existing databases and fresh ones alike: everything migrate() does is v1.
+    db.query('INSERT OR IGNORE INTO schema_migrations (version, name) VALUES (1, ?)')
+      .run('imperative-baseline (migrate())')
+    db.exec('PRAGMA user_version = 1')
+  }
+  for (const m of VERSIONED_MIGRATIONS) {
+    if (m.version <= uv()) continue
+    const tx = db.transaction(() => {
+      m.up(db)
+      db.query('INSERT INTO schema_migrations (version, name) VALUES (?, ?)').run(m.version, m.name)
+    })
+    tx()
+    db.exec(`PRAGMA user_version = ${m.version}`)
+    console.log(`[DB] migration v${m.version} applied: ${m.name}`)
+  }
 }
 
 function migrate(db: Database): void {
@@ -589,8 +678,8 @@ function migrate(db: Database): void {
       base_reward INTEGER NOT NULL DEFAULT 0,
       appraised_value INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'open',    -- open | accepted | delivered | breached
-      accepted_at TEXT NOT NULL DEFAULT '',
-      completed_at TEXT NOT NULL DEFAULT '',
+      accepted_at TEXT,                       -- NULL = not yet accepted (v2 migration)
+      completed_at TEXT,                      -- NULL = not yet completed
       last_seen TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -771,11 +860,13 @@ function migrate(db: Database): void {
   const fisCols = db.query("PRAGMA table_info(fleet_intel_systems)").all() as { name: string }[]
   if (!fisCols.some(c => c.name === 'police_level')) {
     db.exec('ALTER TABLE fleet_intel_systems ADD COLUMN police_level INTEGER')
-    db.exec('CREATE INDEX IF NOT EXISTS idx_fis_police ON fleet_intel_systems(police_level)')
   }
   if (!fisCols.some(c => c.name === 'poi_types')) {
     db.exec('ALTER TABLE fleet_intel_systems ADD COLUMN poi_types TEXT')
   }
+  // Unconditional: when this lived only inside the legacy ALTER branch above, fresh
+  // databases (whose CREATE TABLE already has police_level) never got the index.
+  db.exec('CREATE INDEX IF NOT EXISTS idx_fis_police ON fleet_intel_systems(police_level)')
 
   // Migrate fleet_intel_market: record ORDER DEPTH alongside price.
   // The table stored what things cost and discarded how many were wanted at that price,
@@ -1126,7 +1217,7 @@ export function pruneOldData(opts?: {
   intelDays?: number
   ledgerDays?: number
   maxLogRows?: number
-}): { logs: number; snapshots: number; intel: number; ledger: number } {
+}): { logs: number; snapshots: number; intel: number; ledger: number; events: number; history: number } {
   const logDays = opts?.logDays ?? 14
   const snapshotDays = opts?.snapshotDays ?? 30
   const intelDays = opts?.intelDays ?? 7
@@ -1150,7 +1241,12 @@ export function pruneOldData(opts?: {
   const snapshots = db.query('DELETE FROM financial_snapshots WHERE timestamp < ?').run(cutoff(snapshotDays)).changes
   const intelCutoff = cutoff(intelDays)
   const m = db.query('DELETE FROM fleet_intel_market WHERE updated_at < ?').run(intelCutoff).changes
-  const s = db.query('DELETE FROM fleet_intel_systems WHERE updated_at < ?').run(intelCutoff).changes
+  // fleet_intel_systems is deliberately NOT pruned (2026-08-25 decision): police level,
+  // empire, and POI types are quasi-static world facts, upserted on revisit — age-pruning
+  // them was set to erase the entire 505-system pathfinder corpus a week after the sweep,
+  // and assessSystemDanger degrades unknown-police systems to RISKY. updated_at still
+  // carries staleness for the danger grade; 505 rows is a bounded table.
+  const s = 0
   // Kill zones are rare + high-value; retain ~4x longer than ordinary intel before pruning.
   // Ghost rows are pinned: ghost-only sightings never refresh updated_at (filtered at
   // capture), and a pruned phantom row could never be re-created — keep it for the UI tag.
@@ -1163,11 +1259,28 @@ export function pruneOldData(opts?: {
   const wr = db.query('DELETE FROM fleet_intel_wrecks WHERE last_seen < ?').run(cutoff(21)).changes
   const ledger = db.query('DELETE FROM financial_ledger WHERE timestamp < ?').run(cutoff(ledgerDays)).changes
 
+  // action_events grew unpruned since June (47k rows). Its timestamps are ISO T/Z
+  // format (game-API passthrough), so the cutoff must match that format for the
+  // string comparison to hold at day boundaries.
+  const eventsCutoffIso = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19) + 'Z'
+  const events = db.query('DELETE FROM action_events WHERE created_at < ?').run(eventsCutoffIso).changes
+
+  // profile_state_history: the triggers already skip no-op writes, so every row is a
+  // real change — but at ~7.5KB average a directive/memory edit war still grows the
+  // table forever. Keep the newest 20 versions per (profile, field); recovery has
+  // never needed to reach past the last few.
+  const history = db.query(`DELETE FROM profile_state_history WHERE id IN (
+    SELECT id FROM (
+      SELECT id, ROW_NUMBER() OVER (PARTITION BY profile_id, field ORDER BY id DESC) rn
+      FROM profile_state_history
+    ) WHERE rn > 20
+  )`).run().changes
+
   // Hand freed pages back to the OS so the file actually shrinks after a prune. No-op unless the
   // DB uses auto_vacuum = INCREMENTAL (set at init; existing DBs adopt it after the one-time VACUUM).
   try { db.exec('PRAGMA incremental_vacuum') } catch { /* ignore */ }
 
-  return { logs, snapshots, intel: m + s + kz + si + wr, ledger }
+  return { logs, snapshots, intel: m + s + kz + si + wr, ledger, events, history }
 }
 
 // --- Preferences CRUD ---
@@ -1525,10 +1638,17 @@ export function upsertFreightContracts(profileId: string, rows: Array<{
         (contract_id, profile_id, origin_base, dest_base, base_reward, appraised_value, status, accepted_at, completed_at, last_seen)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT(contract_id) DO UPDATE SET
-          status = ?, completed_at = MAX(completed_at, excluded.completed_at), last_seen = datetime('now')`)
+          status = ?,
+          accepted_at = COALESCE(accepted_at, excluded.accepted_at),
+          completed_at = CASE
+            WHEN excluded.completed_at IS NULL THEN completed_at
+            WHEN completed_at IS NULL THEN excluded.completed_at
+            WHEN excluded.completed_at > completed_at THEN excluded.completed_at
+            ELSE completed_at END,
+          last_seen = datetime('now')`)
         .run(id, profileId, r.origin_base ?? '', r.dest_base ?? r.destination_base_id ?? '',
           Number(r.base_reward ?? 0) || 0, Number(r.appraised_value ?? 0) || 0,
-          keep, r.accepted_at ?? '', r.completed_at ?? '', keep)
+          keep, gameTimestamp(r.accepted_at), gameTimestamp(r.completed_at), keep)
     }
   })
   tx()
@@ -1617,6 +1737,10 @@ export function assessSystemDanger(systemId: string): { grade: string; reasons: 
   // Trend snapshot: keep the WORST grade seen each day, so improvement/decay is visible
   // long after the raw evidence prunes.
   try {
+    // Keep the reference resolvable: stub the system row if intel has never seen it
+    // (migration v3 healed historical orphans; this prevents new ones).
+    db.query(`INSERT OR IGNORE INTO fleet_intel_systems (system_id, system_name, discovered_by)
+      VALUES (?, ?, 'stub:danger-ref')`).run(id, id)
     db.query(`INSERT INTO system_danger_daily (system_id, day, grade, evidence)
       VALUES (?, date('now'), ?, ?)
       ON CONFLICT(system_id, day) DO UPDATE SET

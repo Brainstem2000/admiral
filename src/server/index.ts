@@ -118,9 +118,9 @@ startCatalogService()
 // tables don't grow without bound.
 function runPrune() {
   try {
-    const { logs, snapshots, intel, ledger } = pruneOldData()
-    if (logs || snapshots || intel || ledger) {
-      console.log(`[Prune] removed ${logs} log rows, ${snapshots} snapshots, ${intel} intel rows, ${ledger} ledger rows`)
+    const { logs, snapshots, intel, ledger, events, history } = pruneOldData()
+    if (logs || snapshots || intel || ledger || events || history) {
+      console.log(`[Prune] removed ${logs} log rows, ${snapshots} snapshots, ${intel} intel rows, ${ledger} ledger rows, ${events} events, ${history} state-history rows`)
     }
   } catch (err) {
     console.warn('[Prune] failed:', err)

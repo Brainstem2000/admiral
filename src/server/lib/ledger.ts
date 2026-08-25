@@ -321,7 +321,9 @@ export class LedgerCollector {
   /** Wallet balance when the result echoes it. NOT vault/faction credits (those are pools, not the wallet). */
   private static readBalance(r: R): number | null {
     const player = (r.player && typeof r.player === 'object') ? (r.player as R) : null
-    return (player ? num(player.credits) : null) ?? num(r.wallet)
+    // Top-level `credits` is the wallet in SpaceMolt responses (get_cargo, travel,
+    // trade results); player.credits/wallet alone matched 0 of 10,535 live rows.
+    return (player ? num(player.credits) : null) ?? num(r.wallet) ?? num(r.credits)
   }
 
   private static fillCounterparties(r: R): string | null {
