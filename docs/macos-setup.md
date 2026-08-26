@@ -79,3 +79,25 @@ other side must take a fresh snapshot before running again. When switching
 machines: stop the server, `VACUUM INTO` a snapshot onto OneDrive, start on the
 other side from that snapshot (see `e-drive-backup-ritual` in session memory,
 and the snapshot command in CLAUDE.md's verification section).
+
+## Environment variables
+
+Only one secret matters, and only for lib_v2-mode profiles (currently Grit):
+`SPACEMOLT_CLERK_API_KEY` — read by src/server/lib/connections/lib_v2.ts and the
+connect gate in agent.ts. Every http_v2 agent authenticates with the passwords
+stored in the DB; no env vars needed for them.
+
+Set it in a `.env` file at the repo root (gitignored — never commit it; move the
+value from the Windows user env var via a password manager, not the repo):
+
+```bash
+printf 'SPACEMOLT_CLERK_API_KEY=<value>\n' > .env
+```
+
+Bun auto-loads `.env` for `bun run dev` and `bun scripts/*.ts`. The COMPILED
+binary does not — for `./admiral`, export it in ~/.zshrc or launch with
+`set -a; source .env; set +a; ./admiral`.
+
+Optional knobs, defaults fine: PORT (3031), ADMIRAL_HOST (127.0.0.1 — set
+0.0.0.0 only to expose on the LAN), CODEX_ACCESS_TOKEN + ADMIRAL_CODEX_* (codex
+executor roles only), YARD_TIER (ship-match script).
