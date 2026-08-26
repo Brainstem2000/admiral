@@ -38,3 +38,6 @@ admiral-stderr.log
 # Admiral watcher state (regenerated; not worth versioning)
 data/needs-admiral.jsonl
 data/needs-admiral.ack
+
+# location-specific marker that lives untracked in the OneDrive backup clone only
+_MOVED__DO_NOT_RUN.txt
