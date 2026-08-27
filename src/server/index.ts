@@ -18,6 +18,7 @@ import codexRoutes from './routes/codex'
 import { startScheduler } from './lib/scheduler'
 import { pruneOldData, backfillSystemsFromStations } from './lib/db'
 import { startCatalogService } from './lib/catalog'
+import { startGalaxyMarketCollector } from './lib/galaxy-market'
 
 // Admiral manages long-running agent connections; a single escaped error must
 // never kill the whole process. Known case: @spacemolt/lib rejects/throws
@@ -113,6 +114,9 @@ if (isDev) {
 // Start cron scheduler
 startScheduler()
 startCatalogService()
+
+// Galaxy-wide market feed relay (agents cannot fetch HTTP; briefings can).
+startGalaxyMarketCollector()
 
 // Fill station presence + services for every system from the free public endpoint
 // (zero agent turns; only-fill, never overwrites gameplay observations).

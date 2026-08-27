@@ -8,6 +8,7 @@
  */
 import type { GameConnection, CommandResult } from './connections/interface'
 import { listObligations } from './db'
+import { galaxyMarketLines } from './galaxy-market'
 
 const REFRESH_INTERVAL = 60_000 // 60 seconds
 
@@ -258,6 +259,14 @@ export function buildSituationalBriefing(profileId: string): string {
     lines.push(`Cargo: ${items.join(', ')}`)
   } else if (cache.cargo) {
     lines.push('Cargo: empty')
+  }
+
+  // Galaxy-wide market intel (public feed relay — agents cannot fetch HTTP).
+  // Rendered from a threshold-throttled snapshot so stable prices keep these
+  // lines byte-identical between fetches (see galaxy-market.ts header).
+  {
+    const cargoIds = (cache.cargo ?? []).map((c: unknown) => String((c as Record<string, unknown>).item_id ?? '')).filter(Boolean)
+    for (const line of galaxyMarketLines(cargoIds)) lines.push(line)
   }
 
   // Active missions
