@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -456,6 +456,42 @@ export function checkDoctrineGuards(
           if (qty > remaining) {
             return `BLOCKED: quota for ${itemId} has only ${remaining} remaining (you tried ${qty}). Sell at most ${Math.floor(remaining)} or leave it vaulted.`
           }
+        }
+      }
+    }
+  }
+
+  // Depth guard on market sells. A market `sell` has no limit price: quantity
+  // beyond the honest bid depth cascades down the book into 1cr lowballs (110
+  // circuit boards went 645 → 395 → 1cr on 2026-08-27, ~30k left on the table).
+  // "Depth before size" was prose doctrine; this makes it mechanical: a bulk
+  // sell requires a FRESH market observation and is capped to the observed depth.
+  {
+    const bareD = command.replace(/^spacemolt_/, '').replace(/^market_/, '')
+    if (bareD === 'sell' && getPreference('sell_depth_gate') !== 'off') {
+      const itemId = String(commandArgs?.item_id ?? commandArgs?.id ?? '').toLowerCase()
+      const qty = Number(commandArgs?.quantity ?? 0) || 0
+      if (itemId && itemId !== 'fuel' && qty > 5) {
+        const obs = getFreshMarketDepth(itemId, 30)
+        if (!obs) {
+          return (
+            `BLOCKED: no fresh market observation for ${itemId}. Run view_market here first ` +
+            `(free, no tick), then sell AT MOST the bid depth. Market sells walk the whole ` +
+            `book — quantity beyond the real depth fills at 1cr lowballs.`
+          )
+        }
+        if ((obs.best_buy ?? 0) <= 2) {
+          return (
+            `BLOCKED: best bid for ${itemId} is ${obs.best_buy ?? 0}cr (${obs.station_name}) — a lowball ` +
+            `trap. create_sell_order at a fair price or haul to a station that actually bids.`
+          )
+        }
+        if (obs.best_buy_qty !== null && qty > obs.best_buy_qty) {
+          return (
+            `BLOCKED: the ${itemId} bid is only ${obs.best_buy_qty} deep at ${obs.best_buy}cr ` +
+            `(you tried ${qty}). Sell at most ${obs.best_buy_qty} now, then create_sell_order ` +
+            `the remainder at a fair price — never dump past the depth.`
+          )
         }
       }
     }
@@ -1641,6 +1677,21 @@ async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, r
   if (!start.docked) return 'MACRO ABORT: not docked — dock at a station first.'
   if (start.cargo.length === 0) return 'sell_cargo DONE: cargo is empty, nothing to sell.'
 
+  // Depth map from a live market read: macro sells bypass checkDoctrineGuards,
+  // and a market `sell` walks the book past the honest depth into 1cr lowballs
+  // (the 2026-08-27 circuit-board cascade). view_market is free; read it once
+  // and cap every item at its observed bid depth.
+  const depth = new Map<string, { buy: number; qty: number | null }>()
+  try {
+    const mkt = await conn.execute('view_market')
+    const payload = (mkt.structuredContent ?? mkt.result) as Record<string, unknown> | undefined
+    const items = Array.isArray((payload as any)?.items) ? (payload as any).items : []
+    for (const it of items) {
+      const id = String(it.item_id ?? '').toLowerCase()
+      if (id) depth.set(id, { buy: Number(it.best_buy ?? 0), qty: typeof it.best_buy_qty === 'number' ? it.best_buy_qty : null })
+    }
+  } catch { /* no market data — items sell unguarded below only when qty <= 5 */ }
+
   const sold: string[] = []
   const skipped: string[] = []
   const failed: string[] = []
@@ -1652,7 +1703,19 @@ async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, r
       skipped.push(`${item.item_id} x${item.quantity} (${isBom ? 'BoM-locked — never sellable via this macro' : 'excluded'})`)
       continue
     }
-    const act = await macroAction(conn, 'sell', { item_id: item.item_id, quantity: item.quantity }, 3)
+    const obs = depth.get(item.item_id.toLowerCase())
+    let sellQty = item.quantity
+    if (item.quantity > 5) {
+      if (!obs || obs.buy <= 2) {
+        skipped.push(`${item.item_id} x${item.quantity} (${obs ? `lowball bid ${obs.buy}cr` : 'no local bid'} — deposit or create_sell_order instead)`)
+        continue
+      }
+      if (obs.qty !== null && obs.qty < item.quantity) {
+        sellQty = obs.qty
+        if (sellQty <= 0) { skipped.push(`${item.item_id} x${item.quantity} (bid depth 0)`); continue }
+      }
+    }
+    const act = await macroAction(conn, 'sell', { item_id: item.item_id, quantity: sellQty }, 3)
     if (!act.ok) {
       failed.push(`${item.item_id} x${item.quantity} [${act.errorCode}]`)
     } else {

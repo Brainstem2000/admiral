@@ -1949,6 +1949,24 @@ export interface RealisableValue {
  * uncapped figure would otherwise outbid every honest one -- when that happens the result
  * carries `depth_known: false` and the caller must treat `value` as a ceiling, not a price.
  */
+/**
+ * Freshest observed bid for an item, for the sell depth guard. A market `sell`
+ * has no limit price and walks the whole book — 110 circuit boards cascaded
+ * 645 → 395 → 1cr on 2026-08-27 because quantity exceeded the honest depth.
+ * Returns null when no observation is fresh enough to trust (depth moves in
+ * minutes; a stale row would bless a book that no longer exists).
+ */
+export function getFreshMarketDepth(itemId: string, maxAgeMinutes = 30):
+  { best_buy: number | null; best_buy_qty: number | null; station_name: string; updated_at: string } | null {
+  const row = getDb().query(
+    `SELECT best_buy, best_buy_qty, station_name, updated_at FROM fleet_intel_market
+     WHERE item_id = ? AND updated_at > datetime('now', ?)
+     ORDER BY updated_at DESC LIMIT 1`
+  ).get(itemId, `-${Math.max(1, maxAgeMinutes)} minutes`) as
+    { best_buy: number | null; best_buy_qty: number | null; station_name: string; updated_at: string } | undefined
+  return row ?? null
+}
+
 export function realisableValue(itemId: string, heldQty: number): RealisableValue {
   const held = Math.max(0, Math.floor(heldQty))
   const none: RealisableValue = {
