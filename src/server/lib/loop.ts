@@ -581,33 +581,59 @@ async function completeWithRetry(
  * Messages left with no content are dropped entirely.
  */
 function sanitizeToolPairing(context: Context): number {
+  // Existence-based pairing is NOT enough: the Anthropic API requires every
+  // tool_result to sit in the message(s) IMMEDIATELY after its tool_use.
+  // Compaction and mid-turn reconnects produce contexts where both halves of
+  // a pair exist but are no longer adjacent — the old existence check removed
+  // nothing while the API kept rejecting with a 400 on messages.N.content.M
+  // (observed on two agents overnight 2026-08-27, both needing manual loop
+  // restarts). Enforce adjacency: a toolResult is kept only while its id is
+  // pending from the assistant message just before it; unresolved calls are
+  // stripped the moment any other message intervenes.
   let removed = 0
-  const callIds = new Set<string>()
-  const resultIds = new Set<string>()
-  for (const msg of context.messages as any[]) {
-    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
-      for (const b of msg.content) if (b.type === 'toolCall' && b.id) callIds.add(b.id)
-    } else if (msg.role === 'toolResult' && msg.toolCallId) {
-      resultIds.add(msg.toolCallId)
-    }
-  }
   const kept: any[] = []
+  let pending: Set<string> | null = null
+  let pendingMsg: any = null
+
+  const flushPending = () => {
+    if (pending && pending.size > 0 && pendingMsg) {
+      const stale = pending
+      pendingMsg.content = pendingMsg.content.filter(
+        (b: any) => !(b.type === 'toolCall' && b.id && stale.has(b.id)))
+      removed += stale.size
+      if (pendingMsg.content.length === 0) {
+        const i = kept.indexOf(pendingMsg)
+        if (i >= 0) kept.splice(i, 1)
+        removed++
+      }
+    }
+    pending = null
+    pendingMsg = null
+  }
+
   for (const msg of context.messages as any[]) {
     if (msg.role === 'toolResult') {
-      if (!msg.toolCallId || !callIds.has(msg.toolCallId)) { removed++; continue }
-      kept.push(msg)
-    } else if (msg.role === 'assistant' && Array.isArray(msg.content)) {
-      const orphanCalls = msg.content.filter((b: any) => b.type === 'toolCall' && b.id && !resultIds.has(b.id))
-      if (orphanCalls.length > 0) {
-        removed += orphanCalls.length
-        msg.content = msg.content.filter((b: any) => !(b.type === 'toolCall' && b.id && !resultIds.has(b.id)))
-        if (msg.content.length === 0) { removed++; continue }
+      if (pending && msg.toolCallId && pending.has(msg.toolCallId)) {
+        pending.delete(msg.toolCallId)
+        kept.push(msg)
+        if (pending.size === 0) { pending = null; pendingMsg = null }
+      } else {
+        removed++ // orphaned or out-of-position result
       }
+      continue
+    }
+    flushPending()
+    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      const ids = msg.content
+        .filter((b: any) => b.type === 'toolCall' && b.id)
+        .map((b: any) => b.id as string)
       kept.push(msg)
+      if (ids.length > 0) { pending = new Set(ids); pendingMsg = msg }
     } else {
       kept.push(msg)
     }
   }
+  flushPending()
   context.messages = kept
   return removed
 }
