@@ -171,7 +171,9 @@ const SEVERITY_COLOR: Record<AlertItem['severity'], string> = {
 
 export function FinancialsTab({ profile, connected }: { profile: Profile; connected: boolean }) {
   const [period, setPeriod] = useState<Period>('24h')
-  const [sortKey, setSortKey] = useState<'amount' | 'time'>('amount')
+  // Default: newest first — a transactions list is read as a timeline. Amount
+  // sort stays one header-click away.
+  const [sortKey, setSortKey] = useState<'amount' | 'time'>('time')
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc')
   const { ledger, reconcile, snaps, liveWallet } = useFinancials(profile.id, connected, period)
 
