@@ -1276,12 +1276,41 @@ export function pruneOldData(opts?: {
   const cutoff = (days: number) =>
     new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ')
 
+  // Archive-before-delete: log history doubles as the fine-tuning corpus
+  // (corpus_v3 was built from it), so every row the prune is about to destroy
+  // is appended to data/archive/logs-YYYY-MM.jsonl first. Append-only, batched,
+  // and failure never blocks the prune — an unpruned table is recoverable, a
+  // deleted-unarchived corpus is not.
+  const archiveDoomed = (where: string, param: string | number): void => {
+    try {
+      const dir = path.join(DB_DIR, 'archive')
+      fs.mkdirSync(dir, { recursive: true })
+      const file = path.join(dir, `logs-${new Date().toISOString().slice(0, 7)}.jsonl`)
+      const names = new Map(db.query('SELECT id, name FROM profiles').all()
+        .map((p: any) => [p.id, p.name]))
+      let lastId = 0
+      for (;;) {
+        const batch = db.query(
+          `SELECT id, profile_id, timestamp, type, summary, detail, turn_id FROM log_entries
+           WHERE ${where} AND id > ? ORDER BY id LIMIT 5000`).all(param, lastId) as any[]
+        if (batch.length === 0) break
+        fs.appendFileSync(file, batch.map(r => JSON.stringify({
+          ...r, profile_name: names.get(r.profile_id) ?? null })).join('\n') + '\n')
+        lastId = batch[batch.length - 1].id
+      }
+    } catch (err) {
+      console.warn('[Prune] log archive failed (prune continues):', (err as Error)?.message ?? err)
+    }
+  }
+
+  archiveDoomed('timestamp < ?', cutoff(logDays))
   let logs = db.query('DELETE FROM log_entries WHERE timestamp < ?').run(cutoff(logDays)).changes
   // Row-count cap: find the id of the maxLogRows-th most-recent row and delete everything older.
   // Uses the primary-key index, so it stays cheap even on a large table.
   const threshold = db.query('SELECT id FROM log_entries ORDER BY id DESC LIMIT 1 OFFSET ?')
     .get(maxLogRows) as { id: number } | undefined
   if (threshold) {
+    archiveDoomed('id < ?', threshold.id)
     logs += db.query('DELETE FROM log_entries WHERE id < ?').run(threshold.id).changes
   }
   const snapshots = db.query('DELETE FROM financial_snapshots WHERE timestamp < ?').run(cutoff(snapshotDays)).changes

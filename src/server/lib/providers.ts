@@ -22,20 +22,30 @@ const DEFAULT_URLS: Record<string, string> = {
 export async function detectLocalProviders(customUrls?: Record<string, string>): Promise<DetectResult[]> {
   const results: DetectResult[] = []
 
-  // Check Ollama
+  // Check Ollama. The slot may be repointed at any OpenAI-compatible local
+  // server (e.g. mlx_lm.server on 1235, 2026-08-27), which has no /api/tags —
+  // fall back to the OpenAI-dialect /v1/models before declaring it dead.
   const ollamaUrl = customUrls?.ollama || getProvider('ollama')?.base_url?.replace(/\/v1\/?$/, '') || DEFAULT_URLS.ollama
-  try {
-    const resp = await fetch(`${ollamaUrl}/api/tags`, { signal: AbortSignal.timeout(3000) })
-    if (resp.ok) {
+  {
+    let ok = false
+    try {
+      const resp = await fetch(`${ollamaUrl}/api/tags`, { signal: AbortSignal.timeout(3000) })
+      ok = resp.ok
+    } catch { /* fall through to OpenAI dialect */ }
+    if (!ok) {
+      try {
+        const resp = await fetch(`${ollamaUrl}/v1/models`, { signal: AbortSignal.timeout(3000) })
+        ok = resp.ok
+      } catch { /* unreachable */ }
+    }
+    const baseUrl = `${ollamaUrl}/v1`
+    if (ok) {
       const existing = getProvider('ollama')
-      const baseUrl = `${ollamaUrl}/v1`
       upsertProvider('ollama', existing?.api_key || '', baseUrl, 'valid')
       results.push({ id: 'ollama', status: 'valid', baseUrl })
     } else {
-      results.push({ id: 'ollama', status: 'unreachable', baseUrl: `${ollamaUrl}/v1` })
+      results.push({ id: 'ollama', status: 'unreachable', baseUrl })
     }
-  } catch {
-    results.push({ id: 'ollama', status: 'unreachable', baseUrl: `${ollamaUrl}/v1` })
   }
 
   // Check LM Studio
