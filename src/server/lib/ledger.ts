@@ -23,6 +23,12 @@ interface LedgerRow {
   balance_after?: number | null
 }
 
+/** Shipping actions whose results silently move escrow/bond credits. */
+const SHIPPING_ESCROW_ACTIONS = new Set([
+  'accept', 'shipping_accept', 'deliver', 'shipping_deliver',
+  'post', 'shipping_post', 'cancel', 'shipping_cancel', 'shipping',
+])
+
 export class LedgerCollector {
   /**
    * Extract credit movements from a game command result and book them as ledger rows.
@@ -52,6 +58,31 @@ export class LedgerCollector {
 
       const rows = this.mapResult(action, r, args, outer)
       for (const row of rows) this.insert(profileId, row, command, r)
+      // Shipping escrow/bond flows carry NO explicit amount fields anywhere in
+      // their results, yet move real credits: post-escrow out, carrier bonds
+      // (appraised value) out on accept and back on deliver, expiry refunds.
+      // The 2026-08-27 audit found every nonzero reconcile residual since the
+      // gift fix was this family (±15,750 / +36,000 / ±20,097 ...). Book the
+      // movement the explicit rows do NOT explain, anchored on the wallet echo
+      // vs the last booked balance. Caveat (same as trade_accept): any other
+      // unbooked movement since the last row is absorbed under 'escrow'.
+      if (SHIPPING_ESCROW_ACTIONS.has(action)) {
+        const after = this.readBalance(r) ?? (outer ? this.readBalance(outer) : null)
+        const prev = this.lastBookedBalance(profileId)
+        if (after !== null && prev !== null) {
+          const explained = rows.reduce((s, row) => s + row.amount, 0)
+          const residual = (after - prev) - explained
+          if (residual !== 0) {
+            const contract = (r.contract && typeof r.contract === 'object') ? (r.contract as R) : null
+            this.insert(profileId, {
+              kind: 'escrow',
+              amount: residual,
+              order_id: contract ? (str(contract.id) || null) : (str(r.shipment_id) || str(args?.shipment_id) || null),
+              balance_after: after,
+            }, command, r)
+          }
+        }
+      }
       // Fleet-internal gifts: the recipient side is silent, so the send is the
       // only place their +credits can be booked from.
       if (action === 'send_gift' || action.endsWith('_send_gift')) {

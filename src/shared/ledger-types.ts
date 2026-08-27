@@ -3,7 +3,7 @@ export type LedgerKind =
   | 'order_create' | 'order_fill' | 'order_cancel'
   | 'mission_reward' | 'fuel' | 'repair' | 'dock_fee' | 'combat'
   | 'insurance' | 'commission'
-  | 'deposit' | 'withdraw' | 'transfer' | 'gift_sent' | 'gift_received' | 'trade' | 'freight' | 'other'
+  | 'deposit' | 'withdraw' | 'transfer' | 'gift_sent' | 'gift_received' | 'trade' | 'freight' | 'escrow' | 'other'
 
 export interface LedgerEntry {
   id: number
