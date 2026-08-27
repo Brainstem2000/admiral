@@ -34,6 +34,10 @@ admiral*.exe
 # runtime output logs
 admiral-stdout.log
 admiral-stderr.log
+logs/
+
+# macOS Finder metadata
+.DS_Store
 
 # Admiral watcher state (regenerated; not worth versioning)
 data/needs-admiral.jsonl
