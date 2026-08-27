@@ -230,6 +230,46 @@ function actionCooldownRemaining(profileId: string): number | null {
   return remainingMs > 0 ? remainingMs : null
 }
 
+// Identical-failure loop breaker. Agents across model families get stuck reissuing the SAME
+// failing call (same command, same args, same error) because an unchanged context deterministically
+// reproduces the same output — observed: muse-v2 fb7eb134 lookups (2026-08-26), muse-v3 jumping to
+// "alnita" 6+ times (2026-08-27, needed a manual nudge). Directive prose ("same command fails
+// twice → STOP") does not break it; only changing the context does. So on the Nth identical
+// failure inside the window we append a loud LOOP BREAK block to the error — the distinctive text
+// itself perturbs the context enough that the next completion is no longer a replay.
+// Maps profileId → recent failure fingerprints (command + canonical args + error code).
+const recentFailures = new Map<string, Array<{ key: string; timestamp: number }>>()
+const FAILURE_LOOP_WINDOW_MS = 5 * 60_000
+const FAILURE_LOOP_THRESHOLD = 3   // fire on the 3rd identical failure
+const FAILURE_LOOP_KEEP = 20       // per-profile history cap — this is a breaker, not a log
+
+// JSON with object keys sorted at every depth, so key order cannot split a fingerprint.
+// (JSON.stringify's replacer-array form is NOT usable here — it filters nested keys.)
+function stableStringify(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`
+  if (v && typeof v === 'object') {
+    return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stableStringify((v as Record<string, unknown>)[k])}`).join(',')}}`
+  }
+  return JSON.stringify(v) ?? 'null'
+}
+
+// Record one failed game command and return how many identical failures (same command, same
+// args, same error code) this profile has produced inside the window, including this one.
+function recordFailureAndCountRepeats(
+  profileId: string,
+  command: string,
+  commandArgs: Record<string, unknown> | undefined,
+  errorCode: string,
+): number {
+  const key = `${command}|${stableStringify(commandArgs ?? {})}|${errorCode}`
+  const now = Date.now()
+  const list = (recentFailures.get(profileId) ?? []).filter((f) => now - f.timestamp < FAILURE_LOOP_WINDOW_MS)
+  list.push({ key, timestamp: now })
+  if (list.length > FAILURE_LOOP_KEEP) list.splice(0, list.length - FAILURE_LOOP_KEEP)
+  recentFailures.set(profileId, list)
+  return list.filter((f) => f.key === key).length
+}
+
 // Track when memory is updated so system prompt caching can skip rebuilds
 export const memoryDirtyFlags = new Map<string, boolean>()
 
@@ -241,6 +281,7 @@ export const memoryDirtyFlags = new Map<string, boolean>()
 export function cleanupProfileToolState(profileId: string): void {
   actionCooldowns.delete(profileId)
   memoryDirtyFlags.delete(profileId)
+  recentFailures.delete(profileId)
   const prefix = `${profileId}:`
   for (const key of queryCache.keys()) {
     if (key.startsWith(prefix)) queryCache.delete(key)
@@ -1000,6 +1041,25 @@ export async function executeTool(
       if (errCode === 'invalid_payload') {
         if (deepBare === 'view_market' || deepBare === 'market_view_market') {
           errMsg += `\n\n💡 HINT: view_market accepts only "item_id" and "category" parameters. There is no "scope" or "search" parameter. Use catalog(search="...", type="items") to search items first, then view_market(item_id="exact_id") to see market data. For galaxy-wide trade intel, use intel_query_trade_intel(item_id="...").`
+        }
+      }
+
+      // Identical-failure loop breaker (see recentFailures above): on the 3rd identical
+      // (command, args, error) inside the window, make the result visibly DIFFERENT so the
+      // agent's context stops deterministically reproducing the same retry.
+      {
+        const repeats = recordFailureAndCountRepeats(ctx.profileId, command, commandArgs, String(errCode))
+        if (repeats >= FAILURE_LOOP_THRESHOLD) {
+          errMsg +=
+            `\n\n🔁🔁🔁 LOOP BREAK — READ THIS 🔁🔁🔁\n` +
+            `You have now issued this EXACT call (same command, same arguments) ${repeats} times ` +
+            `in the last few minutes and received the SAME error every time. The game state that ` +
+            `produced this error has not changed, so repeating the call CANNOT succeed. Do NOT ` +
+            `issue it again. Choose a DIFFERENT approach: change the arguments, run a free query ` +
+            `(get_status, get_poi, get_system, find_route, help) to re-check the assumption behind ` +
+            `this call, pick a different command entirely, or end your turn and record the blocker ` +
+            `in your status/todo so the Admiral can see it.`
+          ctx.log('system', `[loop-break] ${command} failed identically ${repeats}x within ${FAILURE_LOOP_WINDOW_MS / 60_000}min ([${errCode}]) — injected LOOP BREAK`)
         }
       }
 
