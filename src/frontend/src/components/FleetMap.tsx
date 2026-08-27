@@ -261,10 +261,10 @@ export function FleetMap({ profiles, statuses, playerDataMap, activeId, onSelect
     return m
   }, [agentPositions, activeId, selActivity, statuses])
 
-  // Fetch galaxy data
-  const fetchGalaxy = useCallback(async (forceRefresh = false) => {
-    setLoading(true)
-    setError(null)
+  // Fetch galaxy data. `quiet` skips the loading spinner — used by the
+  // background re-fetch so the map doesn't flicker while tracking discoveries.
+  const fetchGalaxy = useCallback(async (forceRefresh = false, quiet = false) => {
+    if (!quiet) { setLoading(true); setError(null) }
     try {
       let resp = await fetch('/api/galaxy')
       if (resp.status === 404 || forceRefresh) {
@@ -272,15 +272,26 @@ export function FleetMap({ profiles, statuses, playerDataMap, activeId, onSelect
       }
       if (!resp.ok) throw new Error(`Failed: ${resp.status}`)
       const data: GalaxyMapData = await resp.json()
-      setGalaxyData(data)
+      setGalaxyData(prev => {
+        // Skip the state update (and the r3f re-render) when nothing changed.
+        if (quiet && prev && prev.fetched_at === data.fetched_at) return prev
+        return data
+      })
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      if (!quiet) setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setLoading(false)
+      if (!quiet) setLoading(false)
     }
   }, [])
 
   useEffect(() => { fetchGalaxy() }, [fetchGalaxy])
+
+  // Track discoveries: the server re-caches get_map every 10 min through the
+  // best-informed agent (explorer preferred); pick the new snapshot up quietly.
+  useEffect(() => {
+    const t = setInterval(() => { void fetchGalaxy(false, true) }, 5 * 60_000)
+    return () => clearInterval(t)
+  }, [fetchGalaxy])
 
   // r3f can mount the Canvas before its container is measured (it gets stuck at
   // the default 300x150). Nudge a few resizes once the galaxy loads — spaced out
