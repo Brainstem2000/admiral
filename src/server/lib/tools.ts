@@ -1072,6 +1072,27 @@ export async function executeTool(
     const resultData = resp.structuredContent ?? resp.result
     let result = formatToolResult(command, resultData, resp.notifications)
 
+    // Query-loop breaker: the failure breaker's success-side twin. Bob (v3,
+    // 2026-08-27) re-read the same mission board 6+ times with an identical
+    // thought — every call SUCCEEDED, so the failure breaker never fired, and
+    // an unchanged context kept reproducing the same re-read instead of a
+    // decision. get_status is exempt: agents legitimately re-poll it while a
+    // jump or macro is in flight.
+    {
+      const bareQ = command.replace(/^spacemolt_/, '')
+      if (bareQ !== 'get_status' && isQueryCommand(command)) {
+        const repeats = recordFailureAndCountRepeats(ctx.profileId, command, commandArgs, '__ok__')
+        if (repeats >= 4) {
+          result +=
+            `\n\n🔁 QUERY LOOP — you have run this exact query ${repeats} times in a few minutes ` +
+            `and the answer is not changing. You already have this information. Your next action ` +
+            `must be a DECISION that uses it (accept something, travel somewhere, buy/sell, or ` +
+            `record a blocker and move on) — never this query again.`
+          ctx.log('system', `[loop-break] ${command} repeated identically ${repeats}x while succeeding — injected QUERY LOOP note`)
+        }
+      }
+    }
+
     // A commission_quote is the only authoritative statement of what the ship needs, and it is
     // a FREE query — so bank it whenever one goes past. The craft guard below reads these rows
     // instead of a hardcoded list, which means it tracks delivered lines as the order evolves.
