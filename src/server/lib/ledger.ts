@@ -1,4 +1,4 @@
-import { getDb } from './db'
+import { getDb, listProfiles } from './db'
 import type { LedgerEntry, LedgerKind, LedgerSummary, ReconcileWindow } from '../../shared/ledger-types'
 
 type R = Record<string, unknown>
@@ -52,6 +52,13 @@ export class LedgerCollector {
 
       const rows = this.mapResult(action, r, args, outer)
       for (const row of rows) this.insert(profileId, row, command, r)
+      // Fleet-internal gifts: the recipient side is silent, so the send is the
+      // only place their +credits can be booked from.
+      if (action === 'send_gift' || action.endsWith('_send_gift')) {
+        const credits = num(r.credits_sent)
+        const recipient = str(r.recipient) || str(r.target) || str(args?.recipient)
+        if (credits && recipient) this.mirrorFleetGift(profileName, recipient, credits, command)
+      }
     } catch { /* ledger must never break game execution */ }
   }
 
@@ -331,17 +338,76 @@ export class LedgerCollector {
         // generic balance read here because a `credits` echo could be the gifted amount.
         const credits = num(r.credits_sent)
         if (credits === null || credits === 0) break
+        const recipient = str(r.recipient) || str(r.target) || str(args?.recipient) || null
         rows.push({
           kind: 'gift_sent',
           amount: -Math.abs(credits),
-          counterparty: str(r.recipient) || str(r.target) || str(args?.recipient) || null,
+          counterparty: recipient,
           balance_after: num(r.wallet_remaining) ?? balance,
+        })
+        break
+      }
+      case 'trade_accept':
+      case 'accept_trade': {
+        // Accepting a trade offer settles credits, but the result carries NO amount
+        // fields — only the trade_id and the post-trade wallet (your_credits). The
+        // 18,676cr Vera fuel-cell settlement on 2026-08-26 booked nothing. Book the
+        // movement as the delta against this profile's last booked balance: it is
+        // anchored, self-consistent with the balance chain, and reconcile treats the
+        // window as closed. Caveat (documented, accepted): any OTHER unbooked movement
+        // since the last row is absorbed into this delta — better one honest
+        // approximation than an invisible transfer.
+        const after = num(r.your_credits) ?? balance
+        if (after === null) break
+        const prev = LedgerCollector.lastBookedBalance(profileId)
+        if (prev === null) break
+        const delta = after - prev
+        if (delta === 0) break
+        rows.push({
+          kind: 'trade',
+          amount: delta,
+          order_id: str(r.trade_id) || null,
+          balance_after: after,
         })
         break
       }
     }
 
     return rows
+  }
+
+  /** Most recent booked wallet balance for a profile, or null if none exists. */
+  private static lastBookedBalance(profileId: string): number | null {
+    try {
+      const row = getDb().query(
+        'SELECT balance_after FROM financial_ledger WHERE profile_id = ? AND balance_after IS NOT NULL ORDER BY id DESC LIMIT 1'
+      ).get(profileId) as { balance_after: number } | undefined
+      return typeof row?.balance_after === 'number' ? row.balance_after : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Fleet-internal mirror booking: incoming gifts are SILENT on the recipient side
+   * (no notification, no command — verified 2026-08-26 when 104,226cr of sweep gifts
+   * arrived without a single hookable event). But when the SENDER is one of our own
+   * profiles, the send itself tells us everything: mirror a gift_received row onto
+   * the recipient's ledger. External senders remain invisible (reconcile flags them).
+   */
+  private static mirrorFleetGift(senderName: string, recipient: string, credits: number, sourceCommand: string): void {
+    try {
+      const rec = recipient.trim().toLowerCase()
+      if (!rec || rec.startsWith('faction:')) return
+      const match = listProfiles().find(p =>
+        (p.username && p.username.toLowerCase() === rec) || (p.player_id && p.player_id.toLowerCase() === rec))
+      if (!match) return
+      this.insert(match.id, {
+        kind: 'gift_received',
+        amount: Math.abs(credits),
+        counterparty: senderName,
+      }, `${sourceCommand}~mirror`, { mirrored_from: senderName, credits })
+    } catch { /* ledger must never break game execution */ }
   }
 
   /** Listing fee is booked separately from escrow (kind 'other', same order_id). */
@@ -390,6 +456,8 @@ export class LedgerCollector {
         amount: -Math.abs(credits),
         counterparty: target,
       }, 'deposit', { gift: true, target, credits })
+      const sender = listProfiles().find(p => p.id === profileId)
+      this.mirrorFleetGift(sender?.username || sender?.name || profileId, target, credits, 'deposit')
     } catch { /* ledger must never break game execution */ }
   }
 
