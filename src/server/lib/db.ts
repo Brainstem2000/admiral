@@ -1494,6 +1494,14 @@ export function getStorageForProfile(profileId: string, stationId?: string): Sto
  * than merges — an item absent from a fresh read has been sold, deposited or
  * spent, and merging would resurrect it forever.
  */
+/** Last-known cargo quantity of one item (from the cargo snapshot capture). */
+export function getCargoQuantity(profileId: string, itemId: string): number {
+  const row = getDb().query(
+    'SELECT quantity FROM cargo_inventory WHERE profile_id = ? AND item_id = ?'
+  ).get(profileId, itemId) as { quantity: number } | undefined
+  return row?.quantity ?? 0
+}
+
 export function recordCargoSnapshot(profileId: string, items: StorageItem[], shipId = ''): void {
   const tx = db.transaction(() => {
     db.query('DELETE FROM cargo_inventory WHERE profile_id = ?').run(profileId)

@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -497,6 +497,31 @@ export function checkDoctrineGuards(
           if (qty > remaining) {
             return `BLOCKED: quota for ${itemId} has only ${remaining} remaining (you tried ${qty}). Sell at most ${Math.floor(remaining)} or leave it vaulted.`
           }
+        }
+      }
+    }
+  }
+
+  // Fuel-cell hoarding guard. Fuel cells deliver fuel at 60+cr/unit vs 2-20cr
+  // from any station tank, and directive prose ("never buy another fuel cell")
+  // failed THREE times in one day — 42 cells (66.5k), 15 cells (19.7k), then
+  // 113 cells (180k) on 2026-08-27. Fleet doctrine: cells are an emergency
+  // reserve of at most 8; purchases only top the reserve back up.
+  {
+    const bareF = command.replace(/^spacemolt_/, '').replace(/^market_/, '')
+    if (bareF === 'buy' && getPreference('fuel_cell_gate') !== 'off') {
+      const itemId = String(commandArgs?.item_id ?? commandArgs?.id ?? '').toLowerCase()
+      if (itemId === 'fuel_cell' || itemId === 'premium_fuel_cell' || itemId === 'military_fuel_cell') {
+        const qty = Number(commandArgs?.quantity ?? 0) || 0
+        const held = getCargoQuantity(profileId, itemId)
+        const allowance = Math.max(0, 8 - held)
+        if (qty > allowance) {
+          return (
+            `BLOCKED: fuel cells are an EMERGENCY RESERVE of at most 8 — you hold ${held} and ` +
+            `tried to buy ${qty}${allowance > 0 ? ` (you may buy at most ${allowance})` : ' (you may buy none)'}. ` +
+            `Cells cost 60+cr per fuel unit; station tanks cost 2-20cr. Refuel from the station ` +
+            `tank while docked, and plan long routes station-to-station.`
+          )
         }
       }
     }
