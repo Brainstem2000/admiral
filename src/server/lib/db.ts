@@ -1261,14 +1261,17 @@ export function pruneOldData(opts?: {
   ledgerDays?: number
   maxLogRows?: number
 }): { logs: number; snapshots: number; intel: number; ledger: number; events: number; history: number } {
-  const logDays = opts?.logDays ?? 14
+  const logDays = opts?.logDays ?? 90
   const snapshotDays = opts?.snapshotDays ?? 30
   const intelDays = opts?.intelDays ?? 7
   const ledgerDays = opts?.ledgerDays ?? 90
   // Hard ceiling on log rows. Age-based pruning alone cannot bound this table when write volume
   // is high (many agents each logging every turn), so we ALSO cap absolute row count and drop the
-  // oldest rows beyond it. With the trimmed llm_call detail this is a few hundred MB at most.
-  const maxLogRows = opts?.maxLogRows ?? 120_000
+  // oldest rows beyond it. Log history doubles as the fine-tuning corpus (2026-08-26), so the
+  // window is 90 days and the ceiling ~2M rows (~2.2GB at the measured ~1.1KB/row). Note a
+  // 20-agent fleet running flat out writes ~15k rows/hour — if that becomes sustained reality,
+  // archive to JSONL before prune rather than raising this further.
+  const maxLogRows = opts?.maxLogRows ?? 2_000_000
   const db = getDb()
   const cutoff = (days: number) =>
     new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ')
