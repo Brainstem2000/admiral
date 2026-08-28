@@ -465,7 +465,13 @@ export class HttpV2Connection implements GameConnection {
       // Merge so enrichment keys stamped on the cached player survive partial payloads
       cur.player = { ...(cur.player as Record<string, unknown> | undefined ?? {}), ...(data.player as Record<string, unknown>) }
     }
-    if (typeof data.credits === 'number') {
+    // Top-level `credits` is only the PLAYER wallet on player-scoped results
+    // (get_cargo, refuel, sell — they carry ship/cargo/player alongside).
+    // Other results reuse the field for other treasuries: view_faction_storage's
+    // `credits` is the FACTION bank, which briefly showed Morg at 256,300
+    // instead of 1,744,058 (2026-08-28).
+    const playerScoped = has('player') || has('ship') || has('cargo')
+    if (typeof data.credits === 'number' && playerScoped) {
       cur.credits = data.credits
       cur.player = { ...(cur.player as Record<string, unknown> | undefined ?? {}), credits: data.credits }
     }
