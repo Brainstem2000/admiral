@@ -808,10 +808,12 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
               className="text-[10px] text-[hsl(var(--smui-purple))] cursor-pointer hover:text-foreground transition-colors"
               onClick={openProviderEditor}
             >
-              {profile.provider}/{profile.model}
               {profile.planner_model && (
-                <span className="text-[hsl(var(--smui-frost-2))] ml-1">+planner</span>
+                <span className="text-[hsl(var(--smui-frost-2))]">planner: {profile.planner_model}<span className="text-muted-foreground/60 mx-1.5">·</span></span>
               )}
+              <span title={`executor: ${profile.provider}/${profile.model}`}>
+                {profile.planner_model ? 'exec: ' : ''}{profile.provider}/{profile.model}
+              </span>
               {!!profile.codex_executor_enabled && (
                 <span className="text-primary ml-1">+Codex exec</span>
               )}

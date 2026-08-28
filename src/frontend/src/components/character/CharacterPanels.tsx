@@ -52,8 +52,10 @@ export function CharacterHeader({ profile, status, onOpenEditor }: {
 
       {profile.provider && profile.model && (
         <span className="text-[10px] text-[hsl(var(--smui-purple))]">
-          {profile.provider}/{profile.model}
-          {profile.planner_model && <span className="text-[hsl(var(--smui-frost-2))] ml-1">+planner</span>}
+          {profile.planner_model && (
+            <span className="text-[hsl(var(--smui-frost-2))]">planner: {profile.planner_model}<span className="text-muted-foreground/60 mx-1.5">·</span></span>
+          )}
+          {profile.planner_model ? 'exec: ' : ''}{profile.provider}/{profile.model}
         </span>
       )}
 
