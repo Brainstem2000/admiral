@@ -31,7 +31,8 @@ if (STATUS_PATH && existsSync(STATUS_PATH)) { try { ts = JSON.parse(readFileSync
 let lossPoints: Array<{ it: number; loss: number }> = []
 let lastTrainLine = ''
 if (TRAIN_LOG && existsSync(TRAIN_LOG)) {
-  const lines = readFileSync(TRAIN_LOG, 'utf8').split('\n')
+  // mlx_lm colorizes its output — strip ANSI escapes before parsing/rendering
+  const lines = readFileSync(TRAIN_LOG, 'utf8').replace(/\x1b\[[0-9;]*m/g, '').split('\n')
   for (const l of lines) {
     const m = l.match(/Iter (\d+):.*?(?:Train |val )?loss ([\d.]+)/i) ?? l.match(/Iter (\d+).*?loss[=: ]+([\d.]+)/i)
     if (m) lossPoints.push({ it: +m[1], loss: +m[2] })
