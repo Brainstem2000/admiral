@@ -35,6 +35,9 @@ export function IntelDashboard() {
   const [data, setData] = useState<DashData | null>(null)
   const [loading, setLoading] = useState(false)
   const [kindFilter, setKindFilter] = useState<string | null>(null)
+  const [feedText, setFeedText] = useState('')
+  const [sortKey, setSortKey] = useState<'time' | 'name'>('time')
+  const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc')
 
   const fetchDash = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true)
@@ -62,7 +65,24 @@ export function IntelDashboard() {
   const c = data.coverage
   const f = data.fresh
   const surveyPct = c.galaxy_charted ? Math.round((c.systems_surveyed / c.galaxy_charted) * 100) : 0
-  const feed = kindFilter ? data.feed.filter(r => r.kind === kindFilter) : data.feed
+  const needle = feedText.trim().toLowerCase()
+  const feed = data.feed
+    .filter(r => (!kindFilter || r.kind === kindFilter))
+    .filter(r => !needle ||
+      r.name.toLowerCase().includes(needle) ||
+      (r.detail ?? '').toLowerCase().includes(needle) ||
+      (r.by ?? '').toLowerCase().includes(needle))
+    .slice()
+    .sort((a, b) => {
+      const cmp = sortKey === 'name'
+        ? a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+        : a.at.localeCompare(b.at)
+      return sortDir === 'asc' ? cmp : -cmp
+    })
+  const toggleSort = (key: 'time' | 'name') => {
+    if (sortKey === key) setSortDir(d => (d === 'desc' ? 'asc' : 'desc'))
+    else { setSortKey(key); setSortDir(key === 'name' ? 'asc' : 'desc') }
+  }
 
   const cards: Array<{ label: string; value: string; sub: string; icon: typeof Globe; hot?: boolean }> = [
     { label: 'Galaxy surveyed', value: `${c.systems_surveyed} / ${c.galaxy_charted}`, sub: `${surveyPct}% ground-truthed · ${f.systems_24h} updated 24h`, icon: Globe, hot: f.systems_24h > 0 },
@@ -112,6 +132,27 @@ export function IntelDashboard() {
                 </button>
               ))}
             </div>
+          </div>
+          <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border/60">
+            <input
+              value={feedText}
+              onChange={e => setFeedText(e.target.value)}
+              placeholder='filter — e.g. "aeth" for player names…'
+              className="flex-1 min-w-0 bg-transparent border border-border px-2 py-0.5 text-[11px] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary"
+            />
+            {feedText && (
+              <button onClick={() => setFeedText('')} className="text-[10px] text-muted-foreground hover:text-foreground">clear</button>
+            )}
+            <span className="text-[9px] uppercase tracking-wider text-muted-foreground">sort:</span>
+            <button onClick={() => toggleSort('time')}
+              className={`px-1.5 py-0.5 text-[9px] uppercase tracking-wider border ${sortKey === 'time' ? 'border-primary text-primary' : 'border-border text-muted-foreground hover:text-foreground'}`}>
+              time {sortKey === 'time' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+            </button>
+            <button onClick={() => toggleSort('name')}
+              className={`px-1.5 py-0.5 text-[9px] uppercase tracking-wider border ${sortKey === 'name' ? 'border-primary text-primary' : 'border-border text-muted-foreground hover:text-foreground'}`}>
+              name {sortKey === 'name' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+            </button>
+            <span className="text-[10px] text-muted-foreground/60 tabular-nums">{feed.length}</span>
           </div>
           <div className="max-h-[480px] overflow-y-auto divide-y divide-border/50">
             {feed.length === 0 && (
