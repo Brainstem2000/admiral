@@ -29,15 +29,41 @@ type TStatus = { stage: string; detail: string; started_at?: string; eta?: strin
 let ts: TStatus = { stage: 'corpus', detail: 'corpus build + smoke test running', stages_done: [] }
 if (STATUS_PATH && existsSync(STATUS_PATH)) { try { ts = JSON.parse(readFileSync(STATUS_PATH, 'utf8')) } catch {} }
 let lossPoints: Array<{ it: number; loss: number }> = []
+let valPoints: Array<{ it: number; loss: number }> = []
 let lastTrainLine = ''
+let lastIter = 0
+let lastTokS = 0
 if (TRAIN_LOG && existsSync(TRAIN_LOG)) {
-  // mlx_lm colorizes its output — strip ANSI escapes before parsing/rendering
+  // mlx_lm colorizes its output — strip ANSI escapes before parsing/rendering.
+  // Table format:  "    10    2.874 ▼       69      6.8k"  /  "     1    val 3.137    5.71s"
   const lines = readFileSync(TRAIN_LOG, 'utf8').replace(/\x1b\[[0-9;]*m/g, '').split('\n')
   for (const l of lines) {
-    const m = l.match(/Iter (\d+):.*?(?:Train |val )?loss ([\d.]+)/i) ?? l.match(/Iter (\d+).*?loss[=: ]+([\d.]+)/i)
-    if (m) lossPoints.push({ it: +m[1], loss: +m[2] })
-    if (l.trim()) lastTrainLine = l.trim().slice(0, 140)
+    let m = l.match(/^\s*(\d+)\s+val\s+([\d.]+)/)
+    if (m) { valPoints.push({ it: +m[1], loss: +m[2] }); lastIter = Math.max(lastIter, +m[1]); continue }
+    m = l.match(/^\s*(\d+)\s+([\d.]+)\s*[▼▲]?\s+(\d+)\s/)
+    if (m) { lossPoints.push({ it: +m[1], loss: +m[2] }); lastIter = Math.max(lastIter, +m[1]); lastTokS = +m[3]; continue }
+    if (l.includes('Error') || l.includes('RuntimeError')) lastTrainLine = l.trim().slice(0, 140)
   }
+  if (!lastTrainLine && lossPoints.length) {
+    const p = lossPoints[lossPoints.length - 1]
+    lastTrainLine = `iter ${p.it} · train loss ${p.loss.toFixed(3)} · ${lastTokS} tok/s`
+  }
+}
+// Progress meter + ETA
+const totalIters = Number((ts as any).total_iters ?? 0)
+let meterHtml = ''
+if (totalIters > 0 && lastIter > 0) {
+  const pct = Math.min(100, (lastIter / totalIters) * 100)
+  let etaStr = ''
+  if (ts.started_at) {
+    const elapsedMin = (Date.now() - Date.parse(ts.started_at)) / 60000
+    if (elapsedMin > 1) {
+      const remMin = Math.max(0, (totalIters - lastIter) * (elapsedMin / lastIter))
+      etaStr = ` · ~${Math.floor(remMin / 60)}h ${Math.round(remMin % 60)}m remaining`
+    }
+  }
+  meterHtml = `<div class="rail" style="margin-top:12px"><div class="fill" style="width:${pct.toFixed(1)}%;background:linear-gradient(90deg,#2A5A50,var(--moon))"></div></div>
+  <div class="rail-labels"><span><b>iter ${lastIter} / ${totalIters}</b> (${pct.toFixed(1)}%)</span><span>${lastTokS ? lastTokS + ' tok/s' : ''}${etaStr}</span></div>`
 }
 
 const STAGES = [
@@ -156,6 +182,7 @@ const html = `<title>Night Watch</title>
     <h2>v4 Training Pipeline<span class="sub">QLoRA on Qwen3.6-35B-A3B · GPU cleared, servers parked</span></h2>
     <div class="stages">${stageRow}</div>
     <div class="detail">${esc(ts.detail)}${ts.eta ? ` <small>· ETA ${esc(ts.eta)}</small>` : ''}</div>
+    ${meterHtml}
     ${lastTrainLine ? `<div class="detail" style="margin-top:6px"><small>${esc(lastTrainLine)}</small></div>` : ''}
     ${lossSvg ? `<div style="margin-top:12px">${lossSvg}</div>` : ''}
   </section>
