@@ -1,4 +1,4 @@
-import { getDb, listProfiles } from './db'
+import { getDb, listProfiles, consumeFreshMarketDepth } from './db'
 import type { LedgerEntry, LedgerKind, LedgerSummary, ReconcileWindow } from '../../shared/ledger-types'
 
 type R = Record<string, unknown>
@@ -208,6 +208,9 @@ export class LedgerCollector {
           counterparty: this.fillCounterparties(r),
           balance_after: balance,
         })
+        // Our fill consumed the bid — burn it down in the observation the
+        // sell-depth gate serves, so a follow-up sell can't ride the stale depth.
+        if (qty && qty > 0) consumeFreshMarketDepth(str(r.item_id) || '', qty)
         break
       }
       case 'create_buy_order': {

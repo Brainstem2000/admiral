@@ -2004,6 +2004,22 @@ export function getFreshMarketDepth(itemId: string, maxAgeMinutes = 30):
   return row ?? null
 }
 
+/**
+ * Consume observed bid depth after one of our own sells fills. The sell-depth
+ * gate serves the most recent observation; without this, a second sell against
+ * the same (now exhausted) observation walks the book — Vera sold 120
+ * trade_crystal at 666 into a ~120-deep bid, then 55 more "within depth" at
+ * 1cr (2026-08-28). Decrements the same row getFreshMarketDepth would serve.
+ */
+export function consumeFreshMarketDepth(itemId: string, qtySold: number): void {
+  if (!itemId || qtySold <= 0) return
+  getDb().query(
+    `UPDATE fleet_intel_market SET best_buy_qty = MAX(0, COALESCE(best_buy_qty,0) - ?)
+     WHERE rowid = (SELECT rowid FROM fleet_intel_market WHERE item_id = ?
+                    ORDER BY updated_at DESC LIMIT 1)`
+  ).run(Math.floor(qtySold), itemId)
+}
+
 /** Highest unit price this profile PAID for an item in the recent window (loss-churn gate). */
 export function getRecentBuyUnitPrice(profileId: string, itemId: string, windowMinutes = 45): number | null {
   const row = getDb().query(
