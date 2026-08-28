@@ -31,10 +31,21 @@ interface EmpireQuote {
   depth: number // bid_quantity_reasonable: excludes predatory 1cr walls
 }
 
+interface EmpireAsk {
+  empire: string
+  ask: number
+  depth: number // ask_quantity_reasonable
+}
+
 // item_id -> best few empire quotes, refreshed each fetch
 let quotes = new Map<string, EmpireQuote[]>()
-// The throttled snapshot the briefing actually renders from
+// Ask side (cheapest first). Kept since 2026-08-28: the bid-only feed left
+// buy-leg agents blind (Morg flew the flex circuit's sell hub with an empty
+// hold on 40-min-old directive numbers).
+let askQuotes = new Map<string, EmpireAsk[]>()
+// The throttled snapshots the briefing actually renders from
 let snapshot = new Map<string, EmpireQuote>()
+let askSnapshot = new Map<string, EmpireAsk>()
 let oreBoard: Array<{ item: string; q: EmpireQuote }> = []
 let lastFetchOk = 0
 let timer: ReturnType<typeof setInterval> | null = null
@@ -47,18 +58,30 @@ async function fetchFeed(): Promise<void> {
     const items = Array.isArray(data) ? data : (data as Record<string, unknown>)?.items
     if (!Array.isArray(items)) return // rate-limited shell or shape change — keep old data
     const next = new Map<string, EmpireQuote[]>()
+    const nextAsks = new Map<string, EmpireAsk[]>()
     for (const raw of items) {
       const it = raw as Record<string, unknown>
       const id = String(it.item_id ?? '')
+      if (!id) continue
       const bid = Number(it.best_bid ?? 0)
       const depth = Number(it.bid_quantity_reasonable ?? it.bid_quantity_at_best ?? 0)
-      if (!id || bid <= 0 || depth <= 0) continue
-      const arr = next.get(id) ?? []
-      arr.push({ empire: String(it.empire ?? '?'), bid, depth })
-      next.set(id, arr)
+      if (bid > 0 && depth > 0) {
+        const arr = next.get(id) ?? []
+        arr.push({ empire: String(it.empire ?? '?'), bid, depth })
+        next.set(id, arr)
+      }
+      const ask = Number(it.best_ask ?? 0)
+      const askDepth = Number(it.ask_quantity_reasonable ?? it.ask_quantity_at_best ?? 0)
+      if (ask > 0 && askDepth > 0) {
+        const arr = nextAsks.get(id) ?? []
+        arr.push({ empire: String(it.empire ?? '?'), ask, depth: askDepth })
+        nextAsks.set(id, arr)
+      }
     }
     for (const arr of next.values()) arr.sort((a, b) => b.bid * Math.min(b.depth, 100) - a.bid * Math.min(a.depth, 100))
+    for (const arr of nextAsks.values()) arr.sort((a, b) => a.ask - b.ask) // cheapest source first
     quotes = next
+    askQuotes = nextAsks
     lastFetchOk = Date.now()
     maybeRefreshSnapshot()
   } catch {
@@ -101,6 +124,16 @@ function maybeRefreshSnapshot(): void {
   if (oreChanged || itemChanged) {
     // nothing else to do — buildSituationalBriefing re-renders lazily
   }
+
+  // Ask-side snapshot, same per-item threshold so stable prices stay byte-identical.
+  for (const [id, arr] of askQuotes) {
+    const q = arr[0]
+    const prev = askSnapshot.get(id)
+    const move = (x: number, y: number) => Math.abs(x - y) / Math.max(x, 1)
+    if (!prev || prev.empire !== q.empire || move(prev.ask, q.ask) > RERENDER_THRESHOLD || move(prev.depth, q.depth) > RERENDER_THRESHOLD) {
+      askSnapshot.set(id, q)
+    }
+  }
 }
 
 export function startGalaxyMarketCollector(): void {
@@ -140,4 +173,30 @@ export function galaxyMarketLines(cargoItemIds: string[]): string[] {
     lines.push(`Best sellable ores galaxy-wide: ${board.join(' | ')} (empire-level — find the station with analyze_market/trade intel when docked)`)
   }
   return lines
+}
+
+/**
+ * Both-sides galaxy quotes for items the agent's DIRECTIVE names. A buy-leg
+ * agent holds nothing, so the cargo-keyed relay above tells it nothing — this
+ * keys on the mission text instead, so directive numbers self-refresh instead
+ * of aging into wrong ones. Rendered from the same threshold-throttled
+ * snapshots (prompt-cache safe). Empty when the feed has never succeeded.
+ */
+export function directiveMarketLines(directiveText: string): string[] {
+  if (lastFetchOk === 0 || !directiveText) return []
+  const mentioned = new Set<string>()
+  for (const id of new Set([...snapshot.keys(), ...askSnapshot.keys()])) {
+    if (id.length >= 5 && directiveText.includes(id)) mentioned.add(id)
+    if (mentioned.size >= 8) break
+  }
+  const parts: string[] = []
+  for (const id of mentioned) {
+    const a = askSnapshot.get(id)
+    const b = snapshot.get(id)
+    const side: string[] = []
+    if (a) side.push(`cheapest ask ${a.empire} ${a.ask} x${a.depth}`)
+    if (b) side.push(`best bid ${b.empire} ${b.bid} x${b.depth}`)
+    if (side.length) parts.push(`${id}: ${side.join(', ')}`)
+  }
+  return parts.length ? [`Galaxy quotes for your directive items (empire-level, ~10min): ${parts.join(' | ')}`] : []
 }

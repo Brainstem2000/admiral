@@ -7,8 +7,8 @@
  * Kill switch: preference "situational_briefing" = "off" disables injection.
  */
 import type { GameConnection, CommandResult } from './connections/interface'
-import { listObligations } from './db'
-import { galaxyMarketLines } from './galaxy-market'
+import { listObligations, getProfile } from './db'
+import { galaxyMarketLines, directiveMarketLines } from './galaxy-market'
 
 const REFRESH_INTERVAL = 60_000 // 60 seconds
 
@@ -267,6 +267,10 @@ export function buildSituationalBriefing(profileId: string): string {
   {
     const cargoIds = (cache.cargo ?? []).map((c: unknown) => String((c as Record<string, unknown>).item_id ?? '')).filter(Boolean)
     for (const line of galaxyMarketLines(cargoIds)) lines.push(line)
+    // Both-sides quotes for items the directive names — buy-leg agents hold
+    // nothing, so cargo-keyed lines alone leave them on stale directive numbers.
+    const directive = getProfile(profileId)?.directive ?? ''
+    for (const line of directiveMarketLines(directive)) lines.push(line)
   }
 
   // Active missions
