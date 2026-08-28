@@ -13,8 +13,8 @@ const OUT = process.argv[2]
 if (!OUT) { console.error('usage: bun scripts/mission-board.ts <output.html>'); process.exit(1) }
 
 const API = 'http://127.0.0.1:3031'
-const QUOTE = 1_601_744
-const TRIGGER = 1_650_000
+const QUOTE = 1_747_571
+const TRIGGER = 1_800_000
 const MORG = 'a9e3b41a-ed67-4891-b847-eb5a806fffb2'
 
 const db = new Database('data/admiral.db', { readonly: true })
@@ -184,8 +184,8 @@ const html = `<title>Admiral Mission Board</title>
       <div class="rail"><div class="fill"></div><div class="tick target"></div><div class="tick trigger"></div></div>
       <div class="rail-labels">
         <span><b class="money">${fmt(wallet)}</b> wallet at snapshot</span>
-        <span><b class="money">1,601,744</b> quoted fee (materials provided)</span>
-        <span><b class="money">1,650,000</b> order trigger → Brian's go/no-go</span>
+        <span><b class="money">1,747,571</b> quoted fee (materials provided)</span>
+        <span><b class="money">1,800,000</b> order trigger → Brian's go/no-go</span>
       </div>
     </div>
     <p class="note">The order is never placed autonomously. The Admiral UI is the second-by-second source; this board regenerates from live state on every fleet-watch tick.</p>

@@ -14,8 +14,8 @@ const TRAIN_LOG = process.argv[4]
 if (!OUT) { console.error('usage: bun scripts/night-watch.ts <out.html> [status.json] [train.log]'); process.exit(1) }
 
 const API = 'http://127.0.0.1:3031'
-const QUOTE = 1_601_744
-const TRIGGER = 1_650_000
+const QUOTE = 1_747_571
+const TRIGGER = 1_800_000
 const MORG = 'a9e3b41a-ed67-4891-b847-eb5a806fffb2'
 const NIGHT_START = '2026-08-28 04:00'
 
@@ -189,7 +189,7 @@ const html = `<title>Night Watch</title>
 
   <section>
     <h2>Commission<span class="sub">the go/no-go waits for Brian — never auto-placed</span></h2>
-    <div class="detail"><b class="amt">${fmt(wallet)}</b> cr of <b class="amt">1,650,000</b> trigger <small>(quote ${fmt(QUOTE)})</small></div>
+    <div class="detail"><b class="amt">${fmt(wallet)}</b> cr of <b class="amt">1,800,000</b> trigger <small>(quote ${fmt(QUOTE)})</small></div>
     <div class="rail"><div class="fill"></div><div class="tick"></div></div>
     <div class="rail-labels"><span><b>${trigPct}%</b> to trigger</span><span>at trigger: Morg docks War Citadel, quotes, and HOLDS</span></div>
   </section>
