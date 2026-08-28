@@ -560,6 +560,22 @@ function migrate(db: Database): void {
     );
   `)
 
+  // Own-order fill tracking. Sell-order fills credit the wallet with NO game
+  // notification, so ~50k of Cass's crystal fills (and Morg's Aug-27 fills)
+  // never reached the ledger. view_orders results carry filled_quantity per
+  // order — we book the delta each time an agent reads its own orders.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS own_order_fills (
+      order_id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      order_type TEXT NOT NULL,
+      price_each REAL NOT NULL,
+      booked_filled INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+  `)
+
   // Fleet-wide storage ledger: what each agent holds at each station.
   //
   // The directives make every agent keep a prose STORAGE LEDGER in memory, but
@@ -2018,6 +2034,45 @@ export function consumeFreshMarketDepth(itemId: string, qtySold: number): void {
      WHERE rowid = (SELECT rowid FROM fleet_intel_market WHERE item_id = ?
                     ORDER BY updated_at DESC LIMIT 1)`
   ).run(Math.floor(qtySold), itemId)
+}
+
+/**
+ * Book sell-order fills from a view_orders result. Fills credit the wallet
+ * silently (no notification), so this diff against filled_quantity is the only
+ * way the ledger sees order income. Buy-order fills spend escrow already booked
+ * at order_create, so only sell fills produce income rows.
+ */
+export function bookOrderFillsFromView(profileId: string, resultData: unknown): void {
+  try {
+    const d = resultData as Record<string, unknown> | undefined
+    const orders = d?.orders
+    if (!Array.isArray(orders)) return
+    const db = getDb()
+    for (const raw of orders) {
+      const o = raw as Record<string, unknown>
+      const orderId = String(o.order_id ?? '')
+      const filled = Number(o.filled_quantity ?? 0) || 0
+      const price = Number(o.price_each ?? 0) || 0
+      const itemId = String(o.item_id ?? '')
+      const type = String(o.order_type ?? '')
+      if (!orderId || !itemId || price <= 0) continue
+      const row = db.query(`SELECT booked_filled FROM own_order_fills WHERE order_id = ?`).get(orderId) as { booked_filled: number } | undefined
+      const booked = row?.booked_filled ?? 0
+      if (!row) {
+        db.query(`INSERT INTO own_order_fills (order_id, profile_id, item_id, order_type, price_each, booked_filled) VALUES (?,?,?,?,?,?)`)
+          .run(orderId, profileId, itemId, type, price, filled)
+      } else if (filled > booked) {
+        db.query(`UPDATE own_order_fills SET booked_filled = ?, updated_at = datetime('now') WHERE order_id = ?`).run(filled, orderId)
+      }
+      const delta = filled - booked
+      if (delta > 0 && type === 'sell') {
+        db.query(
+          `INSERT INTO financial_ledger (profile_id, kind, item_id, quantity, unit_price, amount_signed, counterparty, order_id, source_command)
+           VALUES (?, 'order_fill', ?, ?, ?, ?, 'market order', ?, 'view_orders~fill')`
+        ).run(profileId, itemId, delta, price, Math.round(delta * price), orderId)
+      }
+    }
+  } catch { /* booking must never break command execution */ }
 }
 
 /** Highest unit price this profile PAID for an item in the recent window (loss-churn gate). */

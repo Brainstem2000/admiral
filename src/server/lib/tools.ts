@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -728,6 +728,11 @@ export function captureFromCommandResult(command: string, resultData: unknown, p
   const bare = command.replace(/^spacemolt_/, '').replace(/^(salvage_|ship_|facility_|social_)/, '')
   try {
     const d = resultData as Record<string, unknown> | undefined
+    if (bare === 'view_orders' || bare === 'market_view_orders') {
+      // Sell-order fills credit the wallet with no notification — this diff is
+      // the only path that books them (Cass's 50.7k of crystal fills, 2026-08-28).
+      bookOrderFillsFromView(profileId, d)
+    }
     if (bare === 'policies' && Array.isArray(d?.policies)) {
       replaceInsurancePolicies(profileId, d!.policies as never[])
     } else if (bare === 'list_ships' && Array.isArray(d?.ships)) {
