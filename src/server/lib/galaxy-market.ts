@@ -63,6 +63,10 @@ async function fetchFeed(): Promise<void> {
       const it = raw as Record<string, unknown>
       const id = String(it.item_id ?? '')
       if (!id) continue
+      // Pirate-empire quotes are unusable temptation: the fleet is barred from
+      // pirate space, so a 4,914 pirate bid relayed as "best" sends an unarmed
+      // hauler toward forbidden systems (Morg, 2026-08-28). Exclude entirely.
+      if (String(it.empire ?? '') === 'pirates') continue
       const bid = Number(it.best_bid ?? 0)
       const depth = Number(it.bid_quantity_reasonable ?? it.bid_quantity_at_best ?? 0)
       if (bid > 0 && depth > 0) {
