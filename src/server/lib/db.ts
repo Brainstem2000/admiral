@@ -576,6 +576,32 @@ function migrate(db: Database): void {
     );
   `)
 
+  // Combat kill ledger. The Record card's aggregates (63 pirates destroyed) come
+  // from server stats, but WHAT died, WHERE, and what kind of fight it was lives
+  // only in per-battle summaries. Base rows seed from combat.battle_ended action
+  // events; the free `summary` battle query enriches them with category
+  // (pirate/wildlife/pvp), the destroyed names, and opponents.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS combat_battles (
+      battle_id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      ended_at TEXT NOT NULL,
+      system_id TEXT,
+      system_name TEXT,
+      category TEXT,
+      outcome TEXT,
+      kills INTEGER NOT NULL DEFAULT 0,
+      ships_destroyed INTEGER NOT NULL DEFAULT 0,
+      destroyed_names TEXT,
+      opponents TEXT,
+      damage_dealt INTEGER NOT NULL DEFAULT 0,
+      damage_taken INTEGER NOT NULL DEFAULT 0,
+      duration_ticks INTEGER NOT NULL DEFAULT 0,
+      enriched INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_battles_profile ON combat_battles(profile_id, ended_at);
+  `)
+
   // Fleet-wide storage ledger: what each agent holds at each station.
   //
   // The directives make every agent keep a prose STORAGE LEDGER in memory, but
@@ -2153,6 +2179,73 @@ export function getStorageShips(profileId?: string): Array<Record<string, unknow
     ? 'SELECT * FROM storage_ships WHERE profile_id = ? ORDER BY station_id'
     : 'SELECT * FROM storage_ships ORDER BY profile_id, station_id'
   return (profileId ? db.query(sql).all(profileId) : db.query(sql).all()) as Array<Record<string, unknown>>
+}
+
+/**
+ * Seed base battle rows from stored combat.battle_ended action events. Idempotent
+ * (INSERT OR IGNORE on battle_id) — safe to run on every read; enrichment never
+ * regresses because seeding only inserts missing rows.
+ */
+export function seedBattlesFromEvents(profileId?: string): number {
+  const where = profileId ? `AND profile_id = ?` : ''
+  const q = db.query(`
+    INSERT OR IGNORE INTO combat_battles
+      (battle_id, profile_id, ended_at, system_id, kills, outcome, damage_dealt, damage_taken, duration_ticks)
+    SELECT
+      json_extract(data, '$.battle_id'), profile_id, created_at,
+      json_extract(data, '$.system_id'),
+      COALESCE(json_extract(data, '$.kills'), 0),
+      json_extract(data, '$.outcome'),
+      COALESCE(json_extract(data, '$.damage_dealt'), 0),
+      COALESCE(json_extract(data, '$.damage_taken'), 0),
+      COALESCE(json_extract(data, '$.duration'), 0)
+    FROM action_events
+    WHERE event_type = 'combat.battle_ended'
+      AND json_extract(data, '$.battle_id') IS NOT NULL ${where}
+  `)
+  const r = profileId ? q.run(profileId) : q.run()
+  return r.changes
+}
+
+export function enrichBattle(battleId: string, s: {
+  category?: string; outcome?: string; system_name?: string
+  destroyed_names?: string[]; opponents?: string[]; ships_destroyed?: number
+}): void {
+  db.query(`UPDATE combat_battles SET
+      category = COALESCE(?, category),
+      outcome = COALESCE(?, outcome),
+      system_name = COALESCE(?, system_name),
+      destroyed_names = ?,
+      opponents = ?,
+      ships_destroyed = COALESCE(?, ships_destroyed),
+      enriched = 1
+    WHERE battle_id = ?`)
+    .run(s.category ?? null, s.outcome ?? null, s.system_name ?? null,
+      JSON.stringify(s.destroyed_names ?? []), JSON.stringify(s.opponents ?? []),
+      s.ships_destroyed ?? null, battleId)
+}
+
+export function listBattles(profileId: string, limit = 300): Array<Record<string, unknown>> {
+  return db.query(`SELECT * FROM combat_battles WHERE profile_id = ? ORDER BY ended_at DESC LIMIT ?`)
+    .all(profileId, limit) as Array<Record<string, unknown>>
+}
+
+export function listUnenrichedBattles(profileId: string, limit = 50): Array<{ battle_id: string }> {
+  return db.query(`SELECT battle_id FROM combat_battles WHERE profile_id = ? AND enriched = 0 ORDER BY ended_at DESC LIMIT ?`)
+    .all(profileId, limit) as Array<{ battle_id: string }>
+}
+
+/** Our own ship losses, straight from the action log (combat.ship_destroyed). */
+export function listDeathEvents(profileId: string, limit = 200): Array<Record<string, unknown>> {
+  return db.query(`
+    SELECT created_at, json_extract(data,'$.cause') AS cause,
+           json_extract(data,'$.ship_class') AS ship_class,
+           json_extract(data,'$.system_id') AS system_id,
+           json_extract(data,'$.wreck_id') AS wreck_id
+    FROM action_events
+    WHERE profile_id = ? AND event_type = 'combat.ship_destroyed'
+    ORDER BY created_at DESC LIMIT ?`)
+    .all(profileId, limit) as Array<Record<string, unknown>>
 }
 
 export function setSellQuota(profileId: string, itemId: string, remaining: number): void {

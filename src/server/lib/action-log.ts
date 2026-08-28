@@ -24,7 +24,7 @@
  *   (trading.exchange_fill, faction.deposit/withdraw) adjust storage directly.
  */
 import {
-  recordActionEvents, getActionCursor, markStorageDirty,
+  recordActionEvents, getActionCursor, markStorageDirty, seedBattlesFromEvents, enrichBattle,
   recordCargoSnapshot, getCargoForProfile, recordObligations, type ActionEvent,
 } from './db'
 import type { GameConnection } from './connections/interface'
@@ -206,5 +206,36 @@ export async function ingestActionLog(
       [...cargo.entries()].filter(([, q]) => q > 0).map(([item_id, quantity]) => ({ item_id, quantity })))
   }
   if (dirty) markStorageDirty(profileId, 'deposit/withdraw/gift since last view_storage')
+
+  // Kill ledger: seed base rows for fresh battles and enrich them right away via
+  // the free `summary` query while the connection is warm. Cap per ingest so a
+  // burst of battles cannot stall the turn; the /api/combat enrich endpoint and
+  // later ingests pick up any remainder.
+  const battles = fresh.filter(e => e.event_type === 'combat.battle_ended').slice(0, 3)
+  if (battles.length) {
+    try {
+      seedBattlesFromEvents(profileId)
+      for (const e of battles) {
+        const battleId = String(e.data?.battle_id ?? '')
+        if (!battleId) continue
+        try {
+          const r = await connection.execute('summary', { id: battleId }) as { structuredContent?: Record<string, any> }
+          const sc = r?.structuredContent
+          if (sc?.battle_id) {
+            const players = new Set((Array.isArray(sc.player_names) ? sc.player_names : []).map((x: unknown) => String(x)))
+            const opponents = (Array.isArray(sc.sides) ? sc.sides : [])
+              .flatMap((s: any) => (Array.isArray(s.participants) ? s.participants : []))
+              .filter((n: string) => !players.has(n))
+            enrichBattle(battleId, {
+              category: sc.category, outcome: sc.outcome, system_name: sc.system_name,
+              destroyed_names: sc.destroyed_names ?? [], opponents,
+              ships_destroyed: sc.ships_destroyed,
+            })
+          }
+        } catch { /* summary unavailable — /api/combat enrich retries later */ }
+      }
+    } catch { /* ledger never blocks the turn */ }
+  }
+
   return { added, cargoApplied, dirty }
 }

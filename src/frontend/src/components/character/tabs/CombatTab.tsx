@@ -17,6 +17,33 @@ interface Skill {
 
 interface CombatStats { stats: Record<string, number>; empireSkill: Skill | null }
 
+interface BattleRow {
+  battle_id: string
+  ended_at: string
+  system_id: string | null
+  system_name: string | null
+  category: string | null
+  outcome: string | null
+  kills: number
+  ships_destroyed: number
+  destroyed_names: string[]
+  opponents: string[]
+  damage_dealt: number
+  damage_taken: number
+  duration_ticks: number
+  enriched: number
+}
+
+interface DeathRow { created_at: string; cause: string | null; ship_class: string | null; system_id: string | null }
+
+interface LedgerData { battles: BattleRow[]; deaths: DeathRow[]; unenriched: number }
+
+const CATEGORY_COLOR: Record<string, string> = {
+  pirate: 'var(--smui-red)',
+  wildlife: 'var(--smui-green, 150 60% 45%)',
+  pvp: 'var(--smui-orange)',
+}
+
 const combatCache = new Map<string, CombatStats>()
 
 const WATCH_KEY = 'admiral-watchlist'
@@ -82,7 +109,31 @@ export function CombatTab({ profile, connected }: { profile: Profile; connected:
   // Persist the seed once on mount (not in the initializer — no render-phase writes).
   useEffect(() => { saveWatchlist(loadWatchlist()) }, [])
   const [logEntries, setLogEntries] = useState<LogEntry[]>([])
+  const [ledger, setLedger] = useState<LedgerData | null>(null)
+  const [ledgerFilter, setLedgerFilter] = useState<'all' | 'pirate' | 'wildlife' | 'pvp' | 'losses'>('all')
+  const [ledgerText, setLedgerText] = useState('')
+  const [enriching, setEnriching] = useState(false)
   const profileIdRef = useRef(profile.id)
+
+  const fetchLedger = useCallback(async () => {
+    const targetId = profile.id
+    try {
+      const resp = await fetch(`/api/combat/${targetId}`)
+      if (!resp.ok) return
+      const d = await resp.json()
+      if (profileIdRef.current !== targetId) return
+      setLedger({ battles: d.battles ?? [], deaths: d.deaths ?? [], unenriched: d.unenriched ?? 0 })
+    } catch { /* keep last */ }
+  }, [profile.id])
+
+  const runEnrich = useCallback(async () => {
+    if (!connected) return
+    setEnriching(true)
+    try {
+      await fetch(`/api/combat/${profile.id}/enrich?limit=40`, { method: 'POST' })
+      await fetchLedger()
+    } catch { /* ignore */ } finally { setEnriching(false) }
+  }, [profile.id, connected, fetchLedger])
 
   useEffect(() => {
     profileIdRef.current = profile.id
@@ -151,9 +202,32 @@ export function CombatTab({ profile, connected }: { profile: Profile; connected:
   useEffect(() => {
     fetchKillZones()
     fetchLogs()
-    const t = setInterval(() => { fetchKillZones(); fetchLogs() }, 60_000)
+    fetchLedger()
+    const t = setInterval(() => { fetchKillZones(); fetchLogs(); fetchLedger() }, 60_000)
     return () => clearInterval(t)
-  }, [fetchKillZones, fetchLogs])
+  }, [fetchKillZones, fetchLogs, fetchLedger])
+
+  const ledgerRows = useMemo(() => {
+    if (!ledger) return []
+    const needle = ledgerText.trim().toLowerCase()
+    if (ledgerFilter === 'losses') return []
+    return ledger.battles
+      .filter(b => ledgerFilter === 'all' || (b.category ?? '') === ledgerFilter)
+      .filter(b => !needle ||
+        (b.system_name ?? b.system_id ?? '').toLowerCase().includes(needle) ||
+        b.destroyed_names.join(' ').toLowerCase().includes(needle) ||
+        b.opponents.join(' ').toLowerCase().includes(needle) ||
+        (b.category ?? '').includes(needle))
+  }, [ledger, ledgerFilter, ledgerText])
+
+  const lossRows = useMemo(() => {
+    if (!ledger) return []
+    const needle = ledgerText.trim().toLowerCase()
+    return ledger.deaths.filter(d => !needle ||
+      (d.system_id ?? '').toLowerCase().includes(needle) ||
+      (d.cause ?? '').toLowerCase().includes(needle) ||
+      (d.ship_class ?? '').toLowerCase().includes(needle))
+  }, [ledger, ledgerText])
 
   const stats = combat?.stats
   const deaths = stats
@@ -228,6 +302,98 @@ export function CombatTab({ profile, connected }: { profile: Profile; connected:
             <StatCell label="Damage Dealt" value={Number(stats.damage_dealt || 0).toLocaleString()} />
           </div>
         )}
+      </DossierCard>
+
+      <DossierCard
+        title="Kill Ledger"
+        icon={<Crosshair size={12} />}
+        source="Server"
+        className="min-h-[120px]"
+        action={
+          <span className="flex items-center gap-2">
+            {ledger && ledger.unenriched > 0 && (
+              <button
+                onClick={runEnrich}
+                disabled={!connected || enriching}
+                title="Fetch battle summaries for rows missing kill details (free queries via this agent)"
+                className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 border border-primary/40 text-primary hover:bg-primary/10 disabled:opacity-30"
+              >
+                {enriching ? 'fetching…' : `detail ${ledger.unenriched} more`}
+              </button>
+            )}
+            <button onClick={fetchLedger} className="text-muted-foreground hover:text-foreground transition-colors">
+              <RefreshCw size={11} />
+            </button>
+          </span>
+        }
+      >
+        <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-border/40 flex-wrap">
+          {(['all', 'pirate', 'wildlife', 'pvp', 'losses'] as const).map(k => (
+            <button key={k} onClick={() => setLedgerFilter(k)}
+              className={`px-1.5 py-0.5 text-[9px] uppercase tracking-wider border ${ledgerFilter === k ? 'border-primary text-primary' : 'border-border text-muted-foreground hover:text-foreground'}`}>
+              {k}
+            </button>
+          ))}
+          <input
+            value={ledgerText}
+            onChange={e => setLedgerText(e.target.value)}
+            placeholder='filter — system, name…'
+            className="flex-1 min-w-[120px] ml-1 bg-transparent border border-border px-1.5 py-0.5 text-[10.5px] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:border-primary/50"
+          />
+          <span className="text-[10px] text-muted-foreground tabular-nums">
+            {ledgerFilter === 'losses' ? `${lossRows.length} losses` : `${ledgerRows.length} battles`}
+          </span>
+        </div>
+        <div className="max-h-[380px] overflow-y-auto">
+          {ledgerFilter !== 'losses' ? (
+            ledger == null ? (
+              <div className="px-3 py-3 text-[11px] text-muted-foreground/50 italic">Loading…</div>
+            ) : ledgerRows.length === 0 ? (
+              <div className="px-3 py-3 text-[11px] text-muted-foreground/50 italic">No battles on record for this filter.</div>
+            ) : ledgerRows.map(b => {
+              const color = CATEGORY_COLOR[b.category ?? ''] ?? 'var(--smui-red)'
+              const killed = b.destroyed_names.length ? b.destroyed_names.join(', ')
+                : b.kills > 0 ? `${b.kills} kill${b.kills > 1 ? 's' : ''} (details pending)` : '—'
+              const foe = b.opponents.length ? b.opponents.join(', ') : null
+              return (
+                <div key={b.battle_id} className="flex items-baseline gap-2.5 px-3 py-1.5 border-t border-border/30 first:border-t-0 text-xs">
+                  <span className="w-[76px] shrink-0 text-[10px] text-muted-foreground tabular-nums" title={b.ended_at}>{ageOf(b.ended_at)} ago</span>
+                  <span className="w-[58px] shrink-0 text-[9px] uppercase tracking-wider" style={{ color: `hsl(${color})` }}>
+                    {b.category ?? '?'}
+                  </span>
+                  <span className="flex-1 min-w-0 truncate" title={foe ? `vs ${foe}` : undefined}>
+                    <span className={b.kills > 0 ? 'text-foreground/90' : 'text-muted-foreground'}>{killed}</span>
+                    {foe && !b.destroyed_names.length && <span className="text-muted-foreground/60"> · vs {foe}</span>}
+                  </span>
+                  <span className="w-24 shrink-0 truncate text-[10px] text-muted-foreground hidden sm:block">
+                    {(b.system_name ?? b.system_id ?? '—').replace(/_/g, ' ')}
+                  </span>
+                  <span className="w-[74px] shrink-0 text-right text-[10px] tabular-nums text-muted-foreground" title="damage dealt / taken">
+                    {b.damage_dealt}<span className="text-muted-foreground/40">/</span>{b.damage_taken}
+                  </span>
+                  <span className={`w-12 shrink-0 text-right text-[9px] uppercase tracking-wider ${b.outcome === 'won' || b.outcome === 'victory' ? 'text-foreground/70' : ''}`}
+                    style={b.outcome && b.outcome !== 'won' && b.outcome !== 'victory' ? { color: 'hsl(var(--smui-red))' } : undefined}>
+                    {b.outcome ?? '—'}
+                  </span>
+                </div>
+              )
+            })
+          ) : (
+            lossRows.length === 0 ? (
+              <div className="px-3 py-3 text-[11px] text-muted-foreground/50 italic">No recorded ship losses.</div>
+            ) : lossRows.map((d, i) => (
+              <div key={i} className="flex items-baseline gap-2.5 px-3 py-1.5 border-t border-border/30 first:border-t-0 text-xs">
+                <span className="w-[76px] shrink-0 text-[10px] text-muted-foreground tabular-nums" title={d.created_at}>{ageOf(d.created_at)} ago</span>
+                <span className="w-[58px] shrink-0 text-[9px] uppercase tracking-wider" style={{ color: 'hsl(var(--smui-red))' }}>lost</span>
+                <span className="flex-1 min-w-0 truncate text-foreground/90">{d.ship_class ?? 'ship'} <span className="text-muted-foreground/70">destroyed by {d.cause ?? '?'}</span></span>
+                <span className="w-24 shrink-0 truncate text-[10px] text-muted-foreground hidden sm:block">{(d.system_id ?? '—').replace(/_/g, ' ')}</span>
+              </div>
+            ))
+          )}
+        </div>
+        <div className="px-3 py-1.5 border-t border-border/40 text-[9.5px] text-muted-foreground/60">
+          From the game's own action log. “Details pending” rows need a battle-summary fetch — use the detail button (free queries). Very old battles may have expired server-side and keep only kills/damage/system.
+        </div>
       </DossierCard>
 
       <DossierCard title={combat?.empireSkill?.name || 'Empire Skill'} icon={<Flame size={12} />} source="Server" className="min-h-[80px]" bodyClassName="p-3">
