@@ -42,7 +42,12 @@ function slimGameState(raw: Record<string, unknown> | null): SlimGameState {
   const clanTag = player?.clan_tag as string | undefined
 
   return {
-    credits: player?.credits,
+    // Top-level credits (when present) is the query-derived override getLocalState
+    // stamps for INCOMING transfers (gifts, freight payouts, order fills) — the
+    // lib's player.credits only advances on own-mutation deltas and can lag.
+    credits: typeof (raw as Record<string, unknown>).credits === 'number'
+      ? (raw as Record<string, unknown>).credits
+      : player?.credits,
     system: player?.current_system || location?.system_name || location?.system_id,
     poi: player?.current_poi || location?.poi_name || location?.poi_id,
     empire: player?.empire,
