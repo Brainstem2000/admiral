@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -579,6 +579,36 @@ export function checkDoctrineGuards(
             `(you tried ${qty}). Sell at most ${obs.best_buy_qty} now, then create_sell_order ` +
             `the remainder at a fair price — never dump past the depth.`
           )
+        }
+      }
+    }
+  }
+
+  // Loss-churn gate. Grit (Qwen, 2026-08-28) read `best_buy: 596 / best_sell: 3000`
+  // as "buy at 596, sell at 3000", bought 6 cells AT THE ASK (3,000) and sold them
+  // into the BID (596) minutes later — −14,424 in four minutes. Morg's carbon-ore
+  // buy was the same inversion. A sell within the window at a bid far below what
+  // was just paid is near-certainly that misread, never a strategy — block it and
+  // spell out which side is which.
+  {
+    const bareL = command.replace(/^spacemolt_/, '').replace(/^market_/, '')
+    if (bareL === 'sell' && getPreference('loss_churn_gate') !== 'off') {
+      const itemId = String(commandArgs?.item_id ?? commandArgs?.id ?? '').toLowerCase()
+      const qty = Number(commandArgs?.quantity ?? 0) || 0
+      if (itemId && qty > 0) {
+        const paid = getRecentBuyUnitPrice(profileId, itemId, 45)
+        if (paid !== null && paid > 0) {
+          const obs = getFreshMarketDepth(itemId, 30)
+          if (obs?.best_buy != null && obs.best_buy < paid * 0.8) {
+            return (
+              `BLOCKED: you BOUGHT ${itemId} at ${paid}cr within the last 45 minutes and are now ` +
+              `selling into a ${obs.best_buy}cr bid — a guaranteed ${Math.round((paid - obs.best_buy) * qty)}cr loss. ` +
+              `You are almost certainly misreading the order book: best_sell (the ASK) is what YOU PAY ` +
+              `to buy; best_buy (the BID) is what the station pays YOU. There is no profit buying at the ` +
+              `ask and selling into the bid at the same station. Keep the goods (use fuel cells via ` +
+              `refuel; haul cargo to a station whose BID exceeds what you paid) or ask the Admiral.`
+            )
+          }
         }
       }
     }

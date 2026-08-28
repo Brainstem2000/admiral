@@ -2004,6 +2004,16 @@ export function getFreshMarketDepth(itemId: string, maxAgeMinutes = 30):
   return row ?? null
 }
 
+/** Highest unit price this profile PAID for an item in the recent window (loss-churn gate). */
+export function getRecentBuyUnitPrice(profileId: string, itemId: string, windowMinutes = 45): number | null {
+  const row = getDb().query(
+    `SELECT MAX(unit_price) AS p FROM financial_ledger
+     WHERE profile_id = ? AND item_id = ? AND kind = 'buy' AND unit_price IS NOT NULL
+       AND timestamp > datetime('now', ?)`
+  ).get(profileId, itemId, `-${Math.max(1, windowMinutes)} minutes`) as { p: number | null } | undefined
+  return row?.p ?? null
+}
+
 export function realisableValue(itemId: string, heldQty: number): RealisableValue {
   const held = Math.max(0, Math.floor(heldQty))
   const none: RealisableValue = {
