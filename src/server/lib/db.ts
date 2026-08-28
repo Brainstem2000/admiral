@@ -2394,34 +2394,43 @@ export function getIntelDashboard(): Record<string, unknown> {
   }
   // Cross-domain discovery feed — newest first. first_seen everywhere it
   // exists so re-observations don't masquerade as discoveries.
+  // Per-kind caps (not one global cap): the map crawl updates system rows
+  // continuously, so a single newest-first window would be all 'system' and
+  // the other kinds' filter tabs would come up empty.
   const feed = db.query(`
-    SELECT * FROM (
-      SELECT 'system' AS kind, system_name AS name,
+    SELECT * FROM (SELECT 'system' AS kind, system_name AS name,
              'police ' || COALESCE(police_level,'?') || ' · ' || COALESCE(poi_count,0) || ' POIs' || COALESCE(' · ' || NULLIF(empire,''),'') AS detail,
              discovered_by AS by, updated_at AS at FROM fleet_intel_systems WHERE police_level IS NOT NULL
-      UNION ALL
-      SELECT 'player', username,
+             ORDER BY updated_at DESC LIMIT 40)
+    UNION ALL
+    SELECT * FROM (SELECT 'player', username,
              COALESCE(NULLIF(ship_class,''),'?') || COALESCE(' [' || NULLIF(faction_tag,'') || ']','') || COALESCE(' @ ' || NULLIF(system_name,''),''),
              COALESCE(reported_by,''), first_seen FROM fleet_intel_sightings
-      UNION ALL
-      SELECT 'deposit', COALESCE(NULLIF(item_name,''),item_id),
+             ORDER BY first_seen DESC LIMIT 40)
+    UNION ALL
+    SELECT * FROM (SELECT 'deposit', COALESCE(NULLIF(item_name,''),item_id),
              COALESCE(NULLIF(poi_name,''),poi_id) || ' (' || COALESCE(NULLIF(system_name,''),system_id) || ') richness ' || richness,
              reported_by, first_seen FROM fleet_intel_deposits
-      UNION ALL
-      SELECT 'facility', facility_type,
+             ORDER BY first_seen DESC LIMIT 40)
+    UNION ALL
+    SELECT * FROM (SELECT 'facility', facility_type,
              COALESCE(NULLIF(station_name,''),station_id) || COALESCE(' (' || NULLIF(system_name,'') || ')',''),
              reported_by, first_seen FROM fleet_intel_facilities
-      UNION ALL
-      SELECT 'threat', threat_type, system_name || ': ' || substr(description,1,90), reported_by, reported_at FROM fleet_intel_threats
-      UNION ALL
-      SELECT 'wreck', COALESCE(NULLIF(ship_class,''),wreck_type),
+             ORDER BY first_seen DESC LIMIT 40)
+    UNION ALL
+    SELECT * FROM (SELECT 'threat', threat_type, system_name || ': ' || substr(description,1,90), reported_by, reported_at FROM fleet_intel_threats
+             ORDER BY reported_at DESC LIMIT 40)
+    UNION ALL
+    SELECT * FROM (SELECT 'wreck', COALESCE(NULLIF(ship_class,''),wreck_type),
              COALESCE('victim ' || NULLIF(victim_name,''),'') || COALESCE(' · salvage ' || NULLIF(salvage_value,0),''),
              COALESCE(reported_by,''), first_seen FROM fleet_intel_wrecks
-      UNION ALL
-      SELECT 'killzone', COALESCE(NULLIF(poi_name,''),poi_id),
+             ORDER BY first_seen DESC LIMIT 40)
+    UNION ALL
+    SELECT * FROM (SELECT 'killzone', COALESCE(NULLIF(poi_name,''),poi_id),
              COALESCE(NULLIF(system_name,''),system_id) || ' · pirates ' || pirate_seen || ' · wrecks ' || wreck_seen,
              discovered_by, updated_at FROM fleet_intel_killzones
-    ) ORDER BY at DESC LIMIT 120
+             ORDER BY updated_at DESC LIMIT 40)
+    ORDER BY at DESC
   `).all()
   // Per-agent contribution leaderboard (all-time + last 24h)
   const leaderboard = db.query(`
