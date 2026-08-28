@@ -112,6 +112,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   const [showDirectiveModal, setShowDirectiveModal] = useState(false)
   const [directiveValue, setDirectiveValue] = useState(profile.directive || '')
   const [showNudgeModal, setShowNudgeModal] = useState(false)
+  const [quickResult, setQuickResult] = useState<{ title: string; text: string; loading?: boolean } | null>(null)
   const [nudgeValue, setNudgeValue] = useState('')
   const [nudgeHistoryIndex, setNudgeHistoryIndex] = useState(-1)
   const [nudgePending, setNudgePending] = useState('')
@@ -557,6 +558,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   }
 
   const handleSendCommand = useCallback(async (command: string, args?: Record<string, unknown>) => {
+    setQuickResult({ title: command, text: 'Running…', loading: true })
     try {
       const resp = await fetch(`/api/profiles/${profile.id}/command`, {
         method: 'POST',
@@ -564,6 +566,12 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
         body: JSON.stringify({ command, args }),
       })
       const result = await resp.json()
+      const text = result.error
+        ? `[${result.error.code ?? 'error'}] ${result.error.message ?? JSON.stringify(result.error)}`
+        : typeof result.result === 'string'
+          ? result.result
+          : JSON.stringify(result.structuredContent ?? result.result ?? result, null, 2)
+      setQuickResult({ title: command, text })
 
       if (command === 'get_status') {
         const data = result.structuredContent ?? result.result
@@ -574,10 +582,33 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
           if (parsed) onPlayerData(parsed)
         }
       }
-    } catch {
-      // Error logged by agent
+    } catch (e) {
+      setQuickResult({ title: command, text: `Request failed: ${e instanceof Error ? e.message : String(e)}` })
     }
   }, [profile.id])
+
+  const handleFleetShips = useCallback(async () => {
+    setQuickResult({ title: 'Fleet ships', text: 'Loading…', loading: true })
+    try {
+      const resp = await fetch('/api/inventory/ships')
+      const d = await resp.json()
+      const ships = (d.ships ?? []) as Array<{ agent: string; class: string; custom_name: string; station_id: string; module_count: number; updated_at: string }>
+      if (!ships.length) { setQuickResult({ title: 'Fleet ships', text: 'No ships on record yet.' }); return }
+      const loc = (s: { station_id: string }) =>
+        s.station_id === '__active__' ? 'ACTIVE (flying)' : s.station_id.replace(/_/g, ' ')
+      const rows = ships
+        .slice()
+        .sort((a, b) => a.agent.localeCompare(b.agent) || a.class.localeCompare(b.class))
+        .map(s => {
+          const name = s.custom_name ? `${s.class} “${s.custom_name}”` : s.class
+          return `${s.agent.split(' - ')[0].padEnd(16)} ${name.padEnd(24)} ${loc(s).padEnd(30)} ${s.module_count} mod · seen ${String(s.updated_at).slice(5, 16)}Z`
+        })
+      const header = `${'OWNER'.padEnd(16)} ${'SHIP'.padEnd(24)} ${'WHERE'.padEnd(30)} FIT / LAST SEEN\n${'-'.repeat(88)}`
+      setQuickResult({ title: `Fleet ships — ${ships.length} hulls`, text: `${header}\n${rows.join('\n')}` })
+    } catch (e) {
+      setQuickResult({ title: 'Fleet ships', text: `Request failed: ${e instanceof Error ? e.message : String(e)}` })
+    }
+  }, [])
 
   function renderCodexOverlayControls() {
     if (!codexBusinessProvider || !editProvider || editProvider === 'manual') return null
@@ -1113,8 +1144,26 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
         showSidePane={showSidePane}
         onToggleSidePane={() => setShowSidePane(v => { const next = !v; try { localStorage.setItem('admiral-sidepane-open', String(next)) } catch {}; return next })}
         onNudge={openNudgeModal}
+        onFleetShips={handleFleetShips}
         running={status.running}
       />
+
+      {/* Quick command result overlay */}
+      {quickResult && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80" onClick={() => setQuickResult(null)}>
+          <div className="bg-card border border-border shadow-lg w-full max-w-3xl mx-4 max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
+              <span className="font-jetbrains text-xs font-semibold tracking-[1.5px] text-primary uppercase">{quickResult.title}</span>
+              <button onClick={() => setQuickResult(null)} className="text-muted-foreground hover:text-foreground transition-colors">
+                <X size={14} />
+              </button>
+            </div>
+            <pre className={`px-4 py-3 text-[11.5px] leading-relaxed whitespace-pre overflow-auto font-jetbrains ${quickResult.loading ? 'text-muted-foreground animate-pulse' : 'text-foreground'}`}>
+              {quickResult.text}
+            </pre>
+          </div>
+        </div>
+      )}
 
       {/* Log pane + side pane */}
       <div ref={containerRef} className="flex flex-1 min-h-0">

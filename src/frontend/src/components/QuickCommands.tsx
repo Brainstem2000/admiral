@@ -1,4 +1,4 @@
-import { PanelRight, PanelRightClose, MessageSquare } from 'lucide-react'
+import { PanelRight, PanelRightClose, MessageSquare, Rocket } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
 interface Props {
@@ -7,6 +7,7 @@ interface Props {
   showSidePane: boolean
   onToggleSidePane: () => void
   onNudge: () => void
+  onFleetShips: () => void
   running: boolean
 }
 
@@ -22,7 +23,7 @@ const QUICK_COMMANDS = [
   { label: 'Log', command: 'captains_log_list' },
 ]
 
-export function QuickCommands({ onSend, disabled, showSidePane, onToggleSidePane, onNudge, running }: Props) {
+export function QuickCommands({ onSend, disabled, showSidePane, onToggleSidePane, onNudge, onFleetShips, running }: Props) {
   return (
     <div data-tour="quick-commands" className="flex items-center gap-1.5 px-3.5 py-2.5 bg-card border-b border-border overflow-x-auto">
       <span className="text-[11px] text-muted-foreground uppercase tracking-[1.5px] shrink-0 mr-1">Quick</span>
@@ -38,6 +39,16 @@ export function QuickCommands({ onSend, disabled, showSidePane, onToggleSidePane
           {q.label}
         </Button>
       ))}
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={onFleetShips}
+        className="text-[10px] text-muted-foreground hover:text-primary shrink-0 px-3 gap-1.5"
+        title="Every ship the fleet owns — who owns it and where it sits"
+      >
+        <Rocket size={10} />
+        Fleet ships
+      </Button>
       <div className="w-px h-5 bg-border/50 shrink-0 mx-1" />
       <Button
         data-tour="nudge-btn"
