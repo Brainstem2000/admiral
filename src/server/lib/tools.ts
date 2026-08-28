@@ -1161,6 +1161,24 @@ export async function executeTool(
     const resultData = resp.structuredContent ?? resp.result
     let result = formatToolResult(command, resultData, resp.notifications)
 
+    // Order-book legend. The game's field names are adversarial — `best_buy` is
+    // the BID (station pays you) and `best_sell` is the ASK (you pay). Three
+    // agents across two model families have inverted them (Grit −14,424cr,
+    // Morg's carbon ore, v2 throughout). Gloss every market read at the source
+    // so no model has to infer the semantics from bare field names.
+    {
+      const bareM = command.replace(/^spacemolt_/, '').replace(/^market_/, '')
+      if (bareM === 'view_market' || bareM === 'analyze_market' || bareM === 'view_orders') {
+        result =
+          `ORDER BOOK LEGEND — read before acting:\n` +
+          `  best_buy  = BID = what the station PAYS YOU when you sell (with best_buy_qty depth).\n` +
+          `  best_sell = ASK = what YOU PAY when you buy.\n` +
+          `  Profit means selling into a BID somewhere that is HIGHER than the ASK you paid.\n` +
+          `  Buying at the ask and selling into the bid at the SAME station is always a loss.\n` +
+          result
+      }
+    }
+
     // Query-loop breaker: the failure breaker's success-side twin. Bob (v3,
     // 2026-08-27) re-read the same mission board 6+ times with an identical
     // thought — every call SUCCEEDED, so the failure breaker never fired, and
