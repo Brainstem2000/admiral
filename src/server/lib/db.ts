@@ -2037,6 +2037,33 @@ export function consumeFreshMarketDepth(itemId: string, qtySold: number): void {
 }
 
 /**
+ * Best known bid per item from the fleet's own market observations — for the
+ * inventory UI's "last known value" columns. Prefers the highest real bid seen
+ * in the last 7 days; falls back to the most recent older observation.
+ */
+export function getBestKnownBids(itemIds: string[]): Record<string, { price: number; qty: number | null; station: string; observed_at: string }> {
+  const out: Record<string, { price: number; qty: number | null; station: string; observed_at: string }> = {}
+  if (itemIds.length === 0) return out
+  const db = getDb()
+  const ph = itemIds.map(() => '?').join(',')
+  const rows = db.query(
+    `SELECT item_id, station_name, best_buy, best_buy_qty, updated_at FROM fleet_intel_market
+     WHERE item_id IN (${ph}) AND best_buy > 0`
+  ).all(...itemIds) as Array<{ item_id: string; station_name: string; best_buy: number; best_buy_qty: number | null; updated_at: string }>
+  const cutoff = new Date(Date.now() - 7 * 86400_000).toISOString().slice(0, 19).replace('T', ' ')
+  for (const r of rows) {
+    const cur = out[r.item_id]
+    const recent = r.updated_at >= cutoff
+    const curRecent = cur && cur.observed_at >= cutoff
+    const better = !cur
+      || (recent && !curRecent)
+      || (recent === !!curRecent && r.best_buy > cur.price)
+    if (better) out[r.item_id] = { price: r.best_buy, qty: r.best_buy_qty, station: r.station_name, observed_at: r.updated_at }
+  }
+  return out
+}
+
+/**
  * Book sell-order fills from a view_orders result. Fills credit the wallet
  * silently (no notification), so this diff against filled_quantity is the only
  * way the ledger sees order income. Buy-order fills spend escrow already booked

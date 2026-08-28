@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import {
+  getBestKnownBids,
   getStorageForProfile,
   getCargoForProfile,
   findItemAcrossFleet,
@@ -83,13 +84,18 @@ inventory.get('/profile/:id', (c) => {
   for (const r of rows) {
     ;(byStation[r.station_id] ??= []).push({ item_id: r.item_id, quantity: r.quantity, updated_at: r.updated_at })
   }
+  const cargo = getCargoForProfile(id).map(r => ({ item_id: r.item_id, quantity: r.quantity, updated_at: r.updated_at }))
+  const itemIds = [...new Set([...rows.map(r => r.item_id), ...cargo.map(r => r.item_id)])]
   return c.json({
     profile_id: id,
     station_count: Object.keys(byStation).length,
     total_units: rows.reduce((n, r) => n + r.quantity, 0),
     stations: byStation,
-    cargo: getCargoForProfile(id).map(r => ({ item_id: r.item_id, quantity: r.quantity, updated_at: r.updated_at })),
+    cargo,
     ships: getStorageShips(id),
+    // Last known value per item from the fleet's own market observations:
+    // { item_id: { price, qty, station, observed_at } }
+    bids: getBestKnownBids(itemIds),
   })
 })
 

@@ -2,15 +2,18 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { RefreshCw, Package } from 'lucide-react'
 import type { Profile } from '@/types'
 
+interface Bid { price: number; qty: number | null; station: string; observed_at: string }
+
 interface Row {
   item_id: string
   quantity: number
   location: string   // 'Ship cargo' or station id
   inCargo: boolean
   updated_at: string
+  bid?: Bid
 }
 
-type SortKey = 'item' | 'quantity' | 'location' | 'updated'
+type SortKey = 'item' | 'quantity' | 'location' | 'updated' | 'bid'
 
 function age(iso: string): string {
   if (!iso) return '—'
@@ -41,13 +44,14 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
       const resp = await fetch(`/api/inventory/profile/${profile.id}`)
       if (resp.ok) {
         const d = await resp.json()
+        const bids: Record<string, Bid> = d.bids ?? {}
         const out: Row[] = []
         for (const c of d.cargo ?? []) {
-          out.push({ item_id: c.item_id, quantity: c.quantity, location: 'Ship cargo', inCargo: true, updated_at: c.updated_at ?? '' })
+          out.push({ item_id: c.item_id, quantity: c.quantity, location: 'Ship cargo', inCargo: true, updated_at: c.updated_at ?? '', bid: bids[c.item_id] })
         }
         for (const [station, items] of Object.entries(d.stations ?? {})) {
           for (const it of items as Array<{ item_id: string; quantity: number; updated_at: string }>) {
-            out.push({ item_id: it.item_id, quantity: it.quantity, location: station, inCargo: false, updated_at: it.updated_at ?? '' })
+            out.push({ item_id: it.item_id, quantity: it.quantity, location: station, inCargo: false, updated_at: it.updated_at ?? '', bid: bids[it.item_id] })
           }
         }
         setRows(out)
@@ -64,7 +68,7 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))
-    else { setSortKey(key); setSortDir(key === 'quantity' || key === 'updated' ? 'desc' : 'asc') }
+    else { setSortKey(key); setSortDir(key === 'quantity' || key === 'updated' || key === 'bid' ? 'desc' : 'asc') }
   }
 
   const view = useMemo(() => {
@@ -78,6 +82,7 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
         if (sortKey === 'item') cmp = a.item_id.localeCompare(b.item_id)
         else if (sortKey === 'quantity') cmp = a.quantity - b.quantity
         else if (sortKey === 'location') cmp = a.location.localeCompare(b.location)
+        else if (sortKey === 'bid') cmp = (a.bid?.price ?? -1) - (b.bid?.price ?? -1)
         else cmp = (a.updated_at || '').localeCompare(b.updated_at || '')
         return sortDir === 'asc' ? cmp : -cmp
       })
@@ -123,19 +128,27 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
             <tr className="border-b border-border">
               <th className={th} onClick={() => toggleSort('item')}>Item{arrow('item')}</th>
               <th className={`${th} text-right`} onClick={() => toggleSort('quantity')}>Qty{arrow('quantity')}</th>
+              <th className={`${th} text-right`} onClick={() => toggleSort('bid')}>Unit bid{arrow('bid')}</th>
+              <th className={th}>Mkt seen at</th>
               <th className={th} onClick={() => toggleSort('location')}>Stored at{arrow('location')}</th>
               <th className={`${th} text-right`} onClick={() => toggleSort('updated')}>Seen{arrow('updated')}</th>
             </tr>
           </thead>
           <tbody>
             {rows === null ? (
-              <tr><td colSpan={4} className="px-3 py-6 text-center text-muted-foreground text-[11px]">Loading…</td></tr>
+              <tr><td colSpan={6} className="px-3 py-6 text-center text-muted-foreground text-[11px]">Loading…</td></tr>
             ) : view.length === 0 ? (
-              <tr><td colSpan={4} className="px-3 py-6 text-center text-muted-foreground text-[11px]">No matching inventory.</td></tr>
+              <tr><td colSpan={6} className="px-3 py-6 text-center text-muted-foreground text-[11px]">No matching inventory.</td></tr>
             ) : view.map((r, i) => (
               <tr key={`${r.item_id}-${r.location}-${i}`} className="border-b border-border/40">
                 <td className="px-3 py-1.5 font-medium">{r.item_id}</td>
                 <td className="px-3 py-1.5 text-right">{r.quantity.toLocaleString()}</td>
+                <td className="px-3 py-1.5 text-right">
+                  {r.bid ? r.bid.price.toLocaleString() : <span className="text-muted-foreground/40">—</span>}
+                </td>
+                <td className="px-3 py-1.5 text-muted-foreground text-[11.5px]">
+                  {r.bid ? `${r.bid.station} · ${age(r.bid.observed_at)}` : <span className="text-muted-foreground/40">no lookup</span>}
+                </td>
                 <td className={`px-3 py-1.5 ${r.inCargo ? 'text-[hsl(var(--smui-frost-2))]' : 'text-muted-foreground'}`}>
                   {r.inCargo ? 'Ship cargo' : stationLabel(r.location)}
                 </td>
