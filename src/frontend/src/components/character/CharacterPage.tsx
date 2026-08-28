@@ -13,7 +13,7 @@
  * ctab from the URL on each switch — that's what makes the tab persist across agents.
  */
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
-import { ScrollText, LayoutDashboard, TrendingUp, GraduationCap, Rocket, Crosshair, Radio, BookOpen, Coins } from 'lucide-react'
+import { ScrollText, LayoutDashboard, TrendingUp, GraduationCap, Rocket, Crosshair, Radio, BookOpen, Coins, Package } from 'lucide-react'
 import type { Profile, LogEntry } from '@/types'
 import { deriveActivity, type LogRef } from '@/lib/activity'
 import { ActivityGraphic } from './ActivityGraphic'
@@ -22,6 +22,7 @@ import {
   RecentActivityFeed, FinancialSparkline,
 } from './CharacterPanels'
 import { FinancialsTab } from './tabs/FinancialsTab'
+import { InventoryTab } from './tabs/InventoryTab'
 import { SkillsTab } from './tabs/SkillsTab'
 import { ShipTab } from './tabs/ShipTab'
 import { CombatTab } from './tabs/CombatTab'
@@ -42,6 +43,7 @@ const TABS = [
   { id: 'activity', label: 'Activity', icon: <ScrollText size={12} /> },
   { id: 'overview', label: 'Overview', icon: <LayoutDashboard size={12} /> },
   { id: 'financials', label: 'Financials', icon: <TrendingUp size={12} /> },
+  { id: 'inventory', label: 'Inventory', icon: <Package size={12} /> },
   { id: 'skills', label: 'Skills', icon: <GraduationCap size={12} /> },
   { id: 'ship', label: 'Ship', icon: <Rocket size={12} /> },
   { id: 'combat', label: 'Combat', icon: <Crosshair size={12} /> },
@@ -268,6 +270,8 @@ export function CharacterPage({ profile, status, playerData, onOpenEditor }: Pro
             )}
 
             {tab === 'financials' && <FinancialsTab profile={profile} connected={status.connected} />}
+
+            {tab === 'inventory' && <InventoryTab profile={profile} connected={status.connected} />}
 
             {tab === 'skills' && <SkillsTab profile={profile} connected={status.connected} />}
 
