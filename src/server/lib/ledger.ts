@@ -436,6 +436,12 @@ export class LedgerCollector {
       const match = listProfiles().find(p =>
         (p.username && p.username.toLowerCase() === rec) || (p.player_id && p.player_id.toLowerCase() === rec))
       if (!match) return
+      // Recipient-side dedupe — both sender booking paths call this mirror.
+      const dup = getDb().query(
+        `SELECT id FROM financial_ledger WHERE profile_id = ? AND kind = 'gift_received'
+         AND amount_signed = ? AND timestamp > datetime('now','-15 seconds') LIMIT 1`
+      ).get(match.id, Math.abs(credits))
+      if (dup) return
       this.insert(match.id, {
         kind: 'gift_received',
         amount: Math.abs(credits),
@@ -485,6 +491,15 @@ export class LedgerCollector {
    */
   static bookGift(profileId: string, target: string, credits: number): void {
     try {
+      // Dedupe against the result-parsing path: a send_gift whose result was
+      // parsed already booked kind 'gift_sent' (and mirrored). Without this,
+      // one gift produced FOUR rows — gift_sent + transfer on the sender and
+      // two gift_received mirrors on the recipient (observed 2026-08-28 07:13).
+      const dup = getDb().query(
+        `SELECT id FROM financial_ledger WHERE profile_id = ? AND kind IN ('gift_sent','transfer')
+         AND amount_signed = ? AND timestamp > datetime('now','-15 seconds') LIMIT 1`
+      ).get(profileId, -Math.abs(credits))
+      if (dup) return
       this.insert(profileId, {
         kind: 'transfer',
         amount: -Math.abs(credits),

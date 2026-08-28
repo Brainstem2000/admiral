@@ -558,22 +558,27 @@ export function checkDoctrineGuards(
     if (bareD === 'sell' && getPreference('sell_depth_gate') !== 'off') {
       const itemId = String(commandArgs?.item_id ?? commandArgs?.id ?? '').toLowerCase()
       const qty = Number(commandArgs?.quantity ?? 0) || 0
-      if (itemId && itemId !== 'fuel' && qty > 5) {
+      if (itemId && itemId !== 'fuel' && qty > 0) {
         const obs = getFreshMarketDepth(itemId, 30)
+        // Fresh-observation and depth-cap requirements apply to bulk sells only;
+        // the lowball block below applies to ANY quantity (Zibal sold phase
+        // crystals worth ~500cr each into a 1cr bid four at a time — the old
+        // qty>5 threshold let micro-dumps through).
         if (!obs) {
-          return (
+          if (qty <= 5) { /* small sell with no observation — allowed */ }
+          else return (
             `BLOCKED: no fresh market observation for ${itemId}. Run view_market here first ` +
             `(free, no tick), then sell AT MOST the bid depth. Market sells walk the whole ` +
             `book — quantity beyond the real depth fills at 1cr lowballs.`
           )
         }
-        if ((obs.best_buy ?? 0) <= 2) {
+        if (obs && (obs.best_buy ?? 0) <= 2) {
           return (
             `BLOCKED: best bid for ${itemId} is ${obs.best_buy ?? 0}cr (${obs.station_name}) — a lowball ` +
             `trap. create_sell_order at a fair price or haul to a station that actually bids.`
           )
         }
-        if (obs.best_buy_qty !== null && qty > obs.best_buy_qty) {
+        if (obs && qty > 5 && obs.best_buy_qty !== null && qty > obs.best_buy_qty) {
           return (
             `BLOCKED: the ${itemId} bid is only ${obs.best_buy_qty} deep at ${obs.best_buy}cr ` +
             `(you tried ${qty}). Sell at most ${obs.best_buy_qty} now, then create_sell_order ` +

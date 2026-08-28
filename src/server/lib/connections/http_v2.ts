@@ -411,6 +411,7 @@ export class HttpV2Connection implements GameConnection {
             if (data.structuredContent !== undefined && data.structuredContent !== null) {
               data.result = data.structuredContent
             }
+            this.harvestLocalState(data as CommandResult)
             return data as CommandResult
           } catch {
             return { error: { code: 'http_error', message: `HTTP ${retryResp.status}` } }
