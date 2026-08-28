@@ -2357,3 +2357,100 @@ export function getFinancialSnapshots(opts: {
     `SELECT profile_id, timestamp, wallet, storage, total FROM financial_snapshots ${where} ORDER BY timestamp DESC LIMIT ?`
   ).all(...params, limit).reverse() as Array<{ profile_id: string; timestamp: string; wallet: number; storage: number; total: number }>
 }
+
+/**
+ * Central intelligence dashboard: coverage counts, freshness, a cross-domain
+ * discovery feed, and a per-agent leaderboard. Powers /api/fleet-intel/dashboard.
+ * "Surveyed" means an agent actually visited (police_level captured) — the
+ * galaxy_map seed charts every system but carries no ground truth.
+ */
+export function getIntelDashboard(): Record<string, unknown> {
+  const db = getDb()
+  const one = (sql: string): number => {
+    const r = db.query(sql).get() as Record<string, number> | undefined
+    return r ? (Object.values(r)[0] ?? 0) : 0
+  }
+  const coverage = {
+    galaxy_charted: one(`SELECT COALESCE(json_array_length(data,'$.systems'),0) FROM galaxy_map`),
+    systems_surveyed: one(`SELECT COUNT(*) FROM fleet_intel_systems WHERE police_level IS NOT NULL`),
+    links_known: one(`SELECT COUNT(*) FROM system_links`),
+    stations_priced: one(`SELECT COUNT(DISTINCT station_id) FROM fleet_intel_market`),
+    market_quotes: one(`SELECT COUNT(*) FROM fleet_intel_market`),
+    items_priced: one(`SELECT COUNT(DISTINCT item_id) FROM fleet_intel_market`),
+    players_sighted: one(`SELECT COUNT(*) FROM fleet_intel_sightings`),
+    deposits: one(`SELECT COUNT(*) FROM fleet_intel_deposits`),
+    facilities: one(`SELECT COUNT(*) FROM fleet_intel_facilities`),
+    killzones: one(`SELECT COUNT(*) FROM fleet_intel_killzones`),
+    wrecks: one(`SELECT COUNT(*) FROM fleet_intel_wrecks`),
+    threats_active: one(`SELECT COUNT(*) FROM fleet_intel_threats WHERE expires_at IS NULL OR expires_at > datetime('now')`),
+  }
+  const fresh = {
+    systems_24h: one(`SELECT COUNT(*) FROM fleet_intel_systems WHERE police_level IS NOT NULL AND updated_at > datetime('now','-1 day')`),
+    market_24h: one(`SELECT COUNT(*) FROM fleet_intel_market WHERE updated_at > datetime('now','-1 day')`),
+    sightings_24h: one(`SELECT COUNT(*) FROM fleet_intel_sightings WHERE last_seen > datetime('now','-1 day')`),
+    deposits_24h: one(`SELECT COUNT(*) FROM fleet_intel_deposits WHERE last_seen > datetime('now','-1 day')`),
+    facilities_24h: one(`SELECT COUNT(*) FROM fleet_intel_facilities WHERE last_seen > datetime('now','-1 day')`),
+    market_fresh_30m: one(`SELECT COUNT(*) FROM fleet_intel_market WHERE updated_at > datetime('now','-30 minutes')`),
+  }
+  // Cross-domain discovery feed — newest first. first_seen everywhere it
+  // exists so re-observations don't masquerade as discoveries.
+  const feed = db.query(`
+    SELECT * FROM (
+      SELECT 'system' AS kind, system_name AS name,
+             'police ' || COALESCE(police_level,'?') || ' · ' || COALESCE(poi_count,0) || ' POIs' || COALESCE(' · ' || NULLIF(empire,''),'') AS detail,
+             discovered_by AS by, updated_at AS at FROM fleet_intel_systems WHERE police_level IS NOT NULL
+      UNION ALL
+      SELECT 'player', username,
+             COALESCE(NULLIF(ship_class,''),'?') || COALESCE(' [' || NULLIF(faction_tag,'') || ']','') || COALESCE(' @ ' || NULLIF(system_name,''),''),
+             COALESCE(reported_by,''), first_seen FROM fleet_intel_sightings
+      UNION ALL
+      SELECT 'deposit', COALESCE(NULLIF(item_name,''),item_id),
+             COALESCE(NULLIF(poi_name,''),poi_id) || ' (' || COALESCE(NULLIF(system_name,''),system_id) || ') richness ' || richness,
+             reported_by, first_seen FROM fleet_intel_deposits
+      UNION ALL
+      SELECT 'facility', facility_type,
+             COALESCE(NULLIF(station_name,''),station_id) || COALESCE(' (' || NULLIF(system_name,'') || ')',''),
+             reported_by, first_seen FROM fleet_intel_facilities
+      UNION ALL
+      SELECT 'threat', threat_type, system_name || ': ' || substr(description,1,90), reported_by, reported_at FROM fleet_intel_threats
+      UNION ALL
+      SELECT 'wreck', COALESCE(NULLIF(ship_class,''),wreck_type),
+             COALESCE('victim ' || NULLIF(victim_name,''),'') || COALESCE(' · salvage ' || NULLIF(salvage_value,0),''),
+             COALESCE(reported_by,''), first_seen FROM fleet_intel_wrecks
+      UNION ALL
+      SELECT 'killzone', COALESCE(NULLIF(poi_name,''),poi_id),
+             COALESCE(NULLIF(system_name,''),system_id) || ' · pirates ' || pirate_seen || ' · wrecks ' || wreck_seen,
+             discovered_by, updated_at FROM fleet_intel_killzones
+    ) ORDER BY at DESC LIMIT 120
+  `).all()
+  // Per-agent contribution leaderboard (all-time + last 24h)
+  const leaderboard = db.query(`
+    SELECT by, SUM(n) AS total, SUM(n24) AS last_24h,
+           SUM(CASE WHEN kind='system' THEN n ELSE 0 END) AS systems,
+           SUM(CASE WHEN kind='market' THEN n ELSE 0 END) AS market,
+           SUM(CASE WHEN kind='player' THEN n ELSE 0 END) AS players,
+           SUM(CASE WHEN kind='deposit' THEN n ELSE 0 END) AS deposits,
+           SUM(CASE WHEN kind='facility' THEN n ELSE 0 END) AS facilities
+    FROM (
+      SELECT 'system' AS kind, discovered_by AS by, COUNT(*) AS n,
+             SUM(updated_at > datetime('now','-1 day')) AS n24 FROM fleet_intel_systems WHERE police_level IS NOT NULL GROUP BY discovered_by
+      UNION ALL SELECT 'market', reported_by, COUNT(*), SUM(updated_at > datetime('now','-1 day')) FROM fleet_intel_market GROUP BY reported_by
+      UNION ALL SELECT 'player', COALESCE(reported_by,''), COUNT(*), SUM(first_seen > datetime('now','-1 day')) FROM fleet_intel_sightings GROUP BY reported_by
+      UNION ALL SELECT 'deposit', reported_by, COUNT(*), SUM(first_seen > datetime('now','-1 day')) FROM fleet_intel_deposits GROUP BY reported_by
+      UNION ALL SELECT 'facility', reported_by, COUNT(*), SUM(first_seen > datetime('now','-1 day')) FROM fleet_intel_facilities GROUP BY reported_by
+    ) WHERE by != '' GROUP BY by ORDER BY last_24h DESC, total DESC
+  `).all() as Array<Record<string, unknown>>
+  // Attribution strings vary between tables ("Grit Vane - Miner" vs "Grit Vane")
+  // — merge on the base name so each agent gets one row.
+  const merged = new Map<string, Record<string, number> & { by: string }>()
+  for (const r of leaderboard) {
+    const key = String(r.by).split(' - ')[0].trim()
+    const row = merged.get(key) ?? { by: key, total: 0, last_24h: 0, systems: 0, market: 0, players: 0, deposits: 0, facilities: 0 }
+    for (const f of ['total', 'last_24h', 'systems', 'market', 'players', 'deposits', 'facilities'] as const) {
+      row[f] += Number(r[f] ?? 0)
+    }
+    merged.set(key, row)
+  }
+  const board = [...merged.values()].sort((a, b) => b.last_24h - a.last_24h || b.total - a.total).slice(0, 15)
+  return { coverage, fresh, feed, leaderboard: board, generated_at: new Date().toISOString() }
+}

@@ -1,8 +1,19 @@
 import { Hono } from 'hono'
 import { FleetIntelCollector } from '../lib/fleet-intel'
-import { findDeposits, getPoiDeposits, depositStats, realisableValue, getFleetItemTotals, listObligations } from '../lib/db'
+import { findDeposits, getPoiDeposits, depositStats, realisableValue, getFleetItemTotals, listObligations, getIntelDashboard } from '../lib/db'
 
 const fleetIntel = new Hono()
+
+// GET /api/fleet-intel/dashboard — central intelligence dashboard: coverage,
+// freshness, cross-domain discovery feed, per-agent contribution leaderboard.
+fleetIntel.get('/dashboard', (c) => {
+  try {
+    return c.json(getIntelDashboard())
+  } catch (e) {
+    console.error('[fleet-intel] dashboard failed:', e)
+    return c.json({ coverage: {}, fresh: {}, feed: [], leaderboard: [] }, 500)
+  }
+})
 
 // GET /api/fleet-intel — all aggregated fleet intelligence.
 // GET /api/fleet-intel?hunting=true[&threshold=N] — Hunting Grounds: low-police belt systems.
