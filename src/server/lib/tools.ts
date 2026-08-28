@@ -1855,25 +1855,13 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
 // Devastator BoM lock list — sell_cargo refuses to sell these regardless of the
 // caller's exclude list. Observed live: an agent passed exclude=[] with iron_ore
 // aboard and the macro sold a locked item. Doctrine must not depend on LLM diligence.
-const SELL_CARGO_ALWAYS_EXCLUDE = new Set([
-  'shield_emitter', 'station_reactor_core', 'neutronium_ingot', 'hull_plating', 'fury_alloy',
-  'targeting_computer', 'weapon_housing', 'durasteel_plate', 'weapon_core', 'weapon_battery',
-  'capital_ship_frame', 'armor_plate', 'power_distribution_grid', 'reinforced_bulkhead',
-  'crimson_siege_plating', 'crimson_ordnance_bay', 'railgun_capacitor', 'fury_crystal',
-  'iron_ore', 'titanium_ore', 'titanium_alloy', 'steel_plate', 'fury_cannon',
-  // Enhanced Driver Workshop feedstock. Added 2026-08-05 after agents sold the very
-  // ore the build needs — 64 sell events in 90 min — because the funding mandate
-  // asked for credits. Fleet iron stayed flat near 12,000 while Morg bought steel
-  // plate back at 150 against a base value of 18. An 8x loss per unit, in a loop.
-  'copper_ore', 'copper_wiring', 'copper_piping', 'vanadium_ore', 'tungsten_ore',
-  'tungsten_rod', 'control_node', 'barrel_assembly',
-  'piercing_railgun_ii', 'railgun_ii', 'mass_driver', 'crimson_berserker_plating', 'darksteel_armor',
-  'reactive_armor_hardener', // required x1 by the live commission quote (2026-07-19) — was missing from the original 28
-  // Crafting inputs for open BoM lines (emitter + hull_plating chains). Doctrine
-  // always locked these, but the code guard didn't — Bob sold 35 focused_crystal
-  // via sell_cargo(exclude=[]) on 2026-07-20 before this was added.
-  'focused_crystal', 'superconductor', 'energy_crystal', 'circuit_board',
-])
+// EMPTIED 2026-08-28 on Brian's order: the Crimson Devastator commission was
+// placed and paid (7f4c3f0c, materials consumed by the yard), so the campaign
+// this list protected is over. The mechanism stays — sell/gift guards and the
+// sell_quotas release valve all key off this set — so the NEXT commission locks
+// its BoM by repopulating the list (and setCommissionRequirements for the craft
+// guard). History of what it held and why: git log this block.
+const SELL_CARGO_ALWAYS_EXCLUDE = new Set<string>([])
 
 async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
   const narrate = makeMacroNarrator(ctx, 'sell_cargo', reason)

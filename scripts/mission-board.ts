@@ -13,9 +13,15 @@ const OUT = process.argv[2]
 if (!OUT) { console.error('usage: bun scripts/mission-board.ts <output.html>'); process.exit(1) }
 
 const API = 'http://127.0.0.1:3031'
-const QUOTE = 1_747_571
-const TRIGGER = 1_800_000
 const MORG = 'a9e3b41a-ed67-4891-b847-eb5a806fffb2'
+
+// Commission 7f4c3f0c — PLACED 2026-08-28 16:43:35Z, 1,797,923 cr, materials provided.
+// Build clock is tick-anchored: 3,900 ticks at a measured 10.0 s/tick.
+const BUILD_START_MS = Date.parse('2026-08-28T16:43:36Z')
+const BUILD_TICKS = 3_900
+const TICK_SECONDS = 10
+const BUILD_END_MS = BUILD_START_MS + BUILD_TICKS * TICK_SECONDS * 1000
+const COMMISSION_PAID = 1_797_923
 
 const db = new Database('data/admiral.db', { readonly: true })
 const profiles = (await (await fetch(`${API}/api/profiles`)).json()) as Array<Record<string, any>>
@@ -26,9 +32,13 @@ const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 const morg = profiles.find(p => p.id === MORG)
 const wallet = Number(morg?.gameState?.credits ?? 0) ||
   Number((db.query(`SELECT balance_after FROM financial_ledger WHERE profile_id=? AND balance_after IS NOT NULL ORDER BY id DESC LIMIT 1`).get(MORG) as any)?.balance_after ?? 0)
-const gap = Math.max(0, QUOTE - wallet)
-const fillPct = Math.min(100, (wallet / TRIGGER) * 100).toFixed(1)
-const targetPct = ((QUOTE / TRIGGER) * 100).toFixed(1)
+const buildPct = Math.min(100, Math.max(0, ((Date.now() - BUILD_START_MS) / (BUILD_END_MS - BUILD_START_MS)) * 100))
+const buildDone = Date.now() >= BUILD_END_MS
+const etaLeftMs = Math.max(0, BUILD_END_MS - Date.now())
+const etaH = Math.floor(etaLeftMs / 3600_000)
+const etaM = Math.floor((etaLeftMs % 3600_000) / 60_000)
+const etaUtc = new Date(BUILD_END_MS).toISOString().slice(11, 16)
+const etaCst = new Date(BUILD_END_MS - 5 * 3600_000).toISOString().slice(11, 16)
 const nowIso = new Date().toISOString()
 const stamp = nowIso.slice(0, 10) + ' · ' + nowIso.slice(11, 16) + ' UTC'
 
@@ -117,9 +127,9 @@ const html = `<title>Admiral Mission Board</title>
   section.panel > h2 span.sub { color: var(--muted); letter-spacing: .04em; text-transform: none; font-family: var(--body); font-weight: 400; font-size: 12px; margin-left: 10px; }
   .rail-wrap { margin: 14px 0 6px; }
   .rail { position: relative; height: 34px; background: var(--panel-2); border: 1px solid var(--wire); }
-  .rail .fill { position: absolute; inset: 0 auto 0 0; width: ${fillPct}%; background: linear-gradient(90deg, #6E5A22, var(--brass)); }
+  .rail .fill { position: absolute; inset: 0 auto 0 0; background: linear-gradient(90deg, #6E5A22, var(--brass)); transition: width .6s; }
   .rail .tick { position: absolute; top: -6px; bottom: -6px; width: 2px; background: var(--ink); opacity: .85; }
-  .rail .tick.target { left: ${targetPct}%; background: var(--good); }
+  .rail .tick.target { display: none; }
   .rail .tick.trigger { left: 100%; background: var(--crit); }
   .rail-labels { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 10px; flex-wrap: wrap; gap: 4px 16px; }
   .rail-labels b { color: var(--ink); font-weight: 600; }
@@ -168,27 +178,27 @@ const html = `<title>Admiral Mission Board</title>
   <div class="statstrip">
     <div class="stat"><div class="k">Agents running</div><div class="v">${running.length} <small>of ${profiles.length}</small></div></div>
     <div class="stat"><div class="k">Treasury (Morg)</div><div class="v">${(wallet / 1e6).toFixed(2)}M <small>cr</small></div></div>
-    <div class="stat"><div class="k">Commission gap</div><div class="v">${gap > 0 ? Math.round(gap / 1000) + 'k' : 'CLOSED'} <small>cr</small></div></div>
+    <div class="stat"><div class="k">Devastator build</div><div class="v">${buildDone ? 'DONE' : buildPct.toFixed(0) + '%'} <small>${buildDone ? 'collect at yard' : 'eta ' + etaH + 'h ' + etaM + 'm'}</small></div></div>
     <div class="stat"><div class="k">Local-model agents</div><div class="v">${localCount} <small>of ${running.length}</small></div></div>
     <div class="stat"><div class="k">Systems surveyed</div><div class="v">${intel?.coverage?.systems_surveyed ?? '—'} <small>/ ${intel?.coverage?.galaxy_charted ?? '—'}</small></div></div>
     <div class="stat"><div class="k">Stations priced</div><div class="v">${intel?.coverage?.stations_priced ?? '—'}</div></div>
   </div>
 
   <section class="panel">
-    <h2>Crimson Devastator Commission<span class="sub">Morg'Thar, fleet treasurer · BoM vault sealed at War Citadel (17/17 lines)</span></h2>
+    <h2>Crimson Devastator — BUILDING<span class="sub">commission 7f4c3f0c · placed 2026-08-28 16:43Z · ${fmt(COMMISSION_PAID)} cr paid, materials provided</span></h2>
     <div class="hero-figures">
-      <div class="big">${fmt(wallet)} <small>cr wallet <span id="wallet-age"></span></small></div>
-      ${gap > 0 ? `<div class="gap-chip">gap ${fmt(gap)} cr to quote</div>` : `<div class="gap-chip" style="color:var(--good);border-color:var(--good)">QUOTE COVERED — awaiting 1.65M trigger</div>`}
+      <div class="big" id="build-eta">${buildDone ? 'READY AT THE YARD' : `${etaH}h ${etaM}m`} <small>${buildDone ? 'Crimson War Citadel' : 'until hull completion'}</small></div>
+      <div class="gap-chip" style="color:var(--good);border-color:var(--good)">${buildDone ? 'COLLECT + INSURE + FIT' : `ETA ${etaUtc} UTC · ${etaCst} CST`}</div>
     </div>
     <div class="rail-wrap">
-      <div class="rail"><div class="fill"></div><div class="tick target"></div><div class="tick trigger"></div></div>
+      <div class="rail"><div class="fill" id="build-fill" style="width:${buildPct.toFixed(1)}%"></div></div>
       <div class="rail-labels">
-        <span><b class="money">${fmt(wallet)}</b> wallet at snapshot</span>
-        <span><b class="money">1,747,571</b> quoted fee (materials provided)</span>
-        <span><b class="money">1,800,000</b> order trigger → Brian's go/no-go</span>
+        <span><b class="money" id="build-pct">${buildPct.toFixed(1)}%</b> of 3,900 build ticks (10s each)</span>
+        <span><b>on delivery:</b> dock → insurance quote → fit check → hunting doctrine</span>
+        <span><b class="money">${fmt(wallet)}</b> Morg's wallet <span id="wallet-age"></span></span>
       </div>
     </div>
-    <p class="note">The order is never placed autonomously. The Admiral UI is the second-by-second source; this board regenerates from live state on every fleet-watch tick.</p>
+    <p class="note">Stock loadout: 7/7 weapons (2×mass driver, 2×piercing railgun II, 2×railgun II, fury cannon — 490 dmg/volley), 3/3 armor, 3 utility slots EMPTY. Countdown is live; the board also regenerates every fleet-watch tick.</p>
   </section>
 
   <div class="cols">
@@ -200,7 +210,7 @@ const html = `<title>Admiral Mission Board</title>
           ${rosterRows}
         </tbody>
       </table></div>
-      <p class="note">Everyone above 25,000 cr sweeps the excess to Morg. Parked agents stay at zero until the Friday repossession probe.</p>
+      <p class="note">Treasury sweep RETIRED 2026-08-28 — agents keep their own earnings. Parked agents stay at zero until the repossession probe.</p>
     </section>
 
     <section class="panel">
@@ -244,7 +254,25 @@ const html = `<title>Admiral Mission Board</title>
     }
     render(); setInterval(render, 30000)
   })()
+  ;(function () {
+    var END = ${BUILD_END_MS}, START = ${BUILD_START_MS}
+    var eta = document.getElementById('build-eta'), fill = document.getElementById('build-fill'), pct = document.getElementById('build-pct')
+    if (!eta || !fill) return
+    function tick() {
+      var now = Date.now()
+      if (now >= END) {
+        eta.innerHTML = 'READY AT THE YARD <small>Crimson War Citadel</small>'
+        fill.style.width = '100%'; if (pct) pct.textContent = '100%'
+        return
+      }
+      var left = END - now, h = Math.floor(left / 3600000), m = Math.floor(left % 3600000 / 60000)
+      eta.innerHTML = h + 'h ' + m + 'm <small>until hull completion</small>'
+      var p2 = ((now - START) / (END - START) * 100)
+      fill.style.width = p2.toFixed(2) + '%'; if (pct) pct.textContent = p2.toFixed(1) + '%'
+    }
+    tick(); setInterval(tick, 30000)
+  })()
 </script>
 `
 await Bun.write(OUT, html)
-console.log(`board written: ${OUT} (wallet ${fmt(wallet)}, gap ${fmt(gap)}, ${running.length} running)`)
+console.log(`board written: ${OUT} (wallet ${fmt(wallet)}, build eta ${etaH}h${etaM}m, ${running.length} running)`)
