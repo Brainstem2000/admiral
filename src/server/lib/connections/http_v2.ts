@@ -212,6 +212,7 @@ export class HttpV2Connection implements GameConnection {
     this.notificationHandlers = []
     this.commandRouteMap.clear()
     this.v1FallbackLogged = false
+    this.localState = null
   }
 
   isConnected(): boolean {
@@ -431,10 +432,46 @@ export class HttpV2Connection implements GameConnection {
       // v2 returns { result: <rendered text>, structuredContent: <JSON> }
       // Keep both: result (text) goes to the LLM, structuredContent is used
       // for cacheGameState and player data display.
+      this.harvestLocalState(data as CommandResult)
       return data as CommandResult
     } catch {
       return { error: { code: 'http_error', message: `HTTP ${resp.status}` } }
     }
+  }
+
+  /**
+   * Live-ish local state assembled from every command response (lib_v2 parity
+   * for the dashboard). Without it, http_v2 wallet/location only refreshed on
+   * an explicit get_status — buys, sells, refuels and macro hops all carry
+   * fresh player data the cache used to drop, so the UI lagged for minutes
+   * during macro-heavy stretches.
+   */
+  private localState: Record<string, unknown> | null = null
+
+  getLocalState(): Record<string, unknown> | null {
+    // Serve nothing until a real player payload has been seen — a partial
+    // early state (location-only) would mask the agent's get_status fallback.
+    return this.localState && this.localState.player ? this.localState : null
+  }
+
+  private harvestLocalState(res: CommandResult): void {
+    const data = (res.structuredContent ?? res.result) as Record<string, unknown> | undefined
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return
+    const has = (k: string) => data[k] !== undefined && data[k] !== null && typeof data[k] === 'object'
+    if (!has('player') && !has('ship') && !has('location') && !has('cargo') && typeof data.credits !== 'number') return
+    const cur = this.localState ?? {}
+    if (has('player')) {
+      // Merge so enrichment keys stamped on the cached player survive partial payloads
+      cur.player = { ...(cur.player as Record<string, unknown> | undefined ?? {}), ...(data.player as Record<string, unknown>) }
+    }
+    if (typeof data.credits === 'number') {
+      cur.credits = data.credits
+      cur.player = { ...(cur.player as Record<string, unknown> | undefined ?? {}), credits: data.credits }
+    }
+    if (has('ship')) cur.ship = data.ship
+    if (has('location')) cur.location = data.location
+    if (has('cargo')) cur.cargo = data.cargo
+    this.localState = cur
   }
 }
 
