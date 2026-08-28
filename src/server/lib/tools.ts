@@ -243,6 +243,26 @@ const FAILURE_LOOP_WINDOW_MS = 5 * 60_000
 const FAILURE_LOOP_THRESHOLD = 3   // fire on the 3rd identical failure
 const FAILURE_LOOP_KEEP = 20       // per-profile history cap — this is a breaker, not a log
 
+// Escalation past note injection. A deterministic local model (v3, greedy
+// sampling) replays an unchanged context byte-for-byte, so the injected LOOP
+// BREAK / QUERY LOOP notes provably get ignored (Bob: get_missions 11x on
+// 2026-08-27, straight through the note). The only cure that has worked every
+// time is a context flush — what a manual disconnect+connect_llm does. These
+// thresholds trigger that flush automatically: ~3 more identical calls AFTER
+// the note means the note failed, stop nudging and reboot the conversation.
+const FAILURE_LOOP_FLUSH_THRESHOLD = 6
+const QUERY_LOOP_FLUSH_THRESHOLD = 7
+const contextFlushRequests = new Set<string>()
+// Prefix on the escalated tool result — loop.ts ends the turn on it instead of
+// letting the model burn its remaining rounds against a context about to be wiped.
+export const LOOP_FLUSH_SENTINEL = '🔁 LOOP ESCALATION: '
+/** True once per request: the agent loop consumes this and flushes its conversation context. */
+export function consumeContextFlushRequest(profileId: string): boolean {
+  if (!contextFlushRequests.has(profileId)) return false
+  contextFlushRequests.delete(profileId)
+  return true
+}
+
 // JSON with object keys sorted at every depth, so key order cannot split a fingerprint.
 // (JSON.stringify's replacer-array form is NOT usable here — it filters nested keys.)
 function stableStringify(v: unknown): string {
@@ -282,6 +302,7 @@ export function cleanupProfileToolState(profileId: string): void {
   actionCooldowns.delete(profileId)
   memoryDirtyFlags.delete(profileId)
   recentFailures.delete(profileId)
+  contextFlushRequests.delete(profileId)
   const prefix = `${profileId}:`
   for (const key of queryCache.keys()) {
     if (key.startsWith(prefix)) queryCache.delete(key)
@@ -1074,6 +1095,19 @@ export async function executeTool(
       // agent's context stops deterministically reproducing the same retry.
       {
         const repeats = recordFailureAndCountRepeats(ctx.profileId, command, commandArgs, String(errCode))
+        if (repeats >= FAILURE_LOOP_FLUSH_THRESHOLD) {
+          // The note fired at FAILURE_LOOP_THRESHOLD and was ignored — this
+          // context is deterministically stuck. Request an automatic flush.
+          contextFlushRequests.add(ctx.profileId)
+          recentFailures.delete(ctx.profileId)
+          const flushMsg =
+            `${LOOP_FLUSH_SENTINEL}this exact call has now failed identically ${repeats} times, ` +
+            `straight through the LOOP BREAK warning. Your turn is ending and your conversation ` +
+            `context will be reset — you will restart fresh from your directive.`
+          ctx.log('system', `[loop-break] ESCALATION: ${command} failed identically ${repeats}x through the injected note — automatic context flush requested`)
+          ctx.log('tool_result', flushMsg)
+          return flushMsg
+        }
         if (repeats >= FAILURE_LOOP_THRESHOLD) {
           errMsg +=
             `\n\n🔁🔁🔁 LOOP BREAK — READ THIS 🔁🔁🔁\n` +
@@ -1107,6 +1141,18 @@ export async function executeTool(
       const bareQ = command.replace(/^spacemolt_/, '')
       if (bareQ !== 'get_status' && isQueryCommand(command)) {
         const repeats = recordFailureAndCountRepeats(ctx.profileId, command, commandArgs, '__ok__')
+        if (repeats >= QUERY_LOOP_FLUSH_THRESHOLD) {
+          // Note injected at 4 and ignored — escalate to an automatic context flush.
+          contextFlushRequests.add(ctx.profileId)
+          recentFailures.delete(ctx.profileId)
+          const flushMsg =
+            `${LOOP_FLUSH_SENTINEL}you have now run this exact query ${repeats} times, straight ` +
+            `through the QUERY LOOP warning. Your turn is ending and your conversation context ` +
+            `will be reset — you will restart fresh from your directive.`
+          ctx.log('system', `[loop-break] ESCALATION: ${command} repeated ${repeats}x through the injected note — automatic context flush requested`)
+          ctx.log('tool_result', flushMsg)
+          return flushMsg
+        }
         if (repeats >= 4) {
           result +=
             `\n\n🔁 QUERY LOOP — you have run this exact query ${repeats} times in a few minutes ` +

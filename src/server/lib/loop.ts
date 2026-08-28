@@ -2,7 +2,7 @@ import { complete } from '@mariozechner/pi-ai'
 import type { Model, Context, AssistantMessage, ToolCall, Message } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import type { LogFn } from './tools'
-import { executeTool, ACTION_PENDING_SENTINEL, COOLDOWN_BLOCKED_SENTINEL } from './tools'
+import { executeTool, ACTION_PENDING_SENTINEL, COOLDOWN_BLOCKED_SENTINEL, LOOP_FLUSH_SENTINEL } from './tools'
 import { safeTruncate, scrubContextSurrogates } from './text-safe'
 import { recordLlmSpend } from './db'
 
@@ -192,6 +192,7 @@ export async function runAgentTurn(
     let showedReason = false
     let actionPending = false
     let cooldownBlocked = false
+    let loopFlush = false
     for (const toolCall of toolCalls) {
       if (options?.signal?.aborted) return 'completed'
 
@@ -200,7 +201,7 @@ export async function runAgentTurn(
       // into the gate or stack a second action. But every toolCall MUST still get a matching
       // toolResult, or the next turn's complete() request is malformed (tool_use without
       // tool_result → API 400). So skipped calls get a synthetic result instead of executing.
-      if (cooldownBlocked || actionPending) {
+      if (cooldownBlocked || actionPending || loopFlush) {
         context.messages.push({
           role: 'toolResult',
           toolCallId: toolCall.id,
@@ -223,6 +224,7 @@ export async function runAgentTurn(
 
       if (result.startsWith(ACTION_PENDING_SENTINEL)) actionPending = true
       if (result.startsWith(COOLDOWN_BLOCKED_SENTINEL)) cooldownBlocked = true
+      if (result.startsWith(LOOP_FLUSH_SENTINEL)) loopFlush = true
       if (result.startsWith('Error: [connection_failed]')) connectionFailures++
       const isError = result.startsWith('Error')
       const toolResultMessage: Message = {
@@ -243,6 +245,13 @@ export async function runAgentTurn(
     if (connectionFailures > 0 && (options?.isConnectionDown?.() || connectionFailures >= 3)) {
       log('system', 'Game connection failure — ending turn')
       return 'connection_lost'
+    }
+
+    // Early exit: loop escalation fired — the conversation context is about to be
+    // wiped by the agent loop, so more rounds against it are pure waste.
+    if (loopFlush) {
+      log('system', 'Loop escalation — ending turn for automatic context flush')
+      return 'completed'
     }
 
     // Early exit: if an action is pending, end the turn immediately instead of burning more rounds

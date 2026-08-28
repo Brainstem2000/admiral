@@ -11,7 +11,7 @@ import { LibV2Connection } from './connections/lib_v2'
 import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
-import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand } from './tools'
+import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest } from './tools'
 import { runAgentTurn, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
@@ -457,6 +457,24 @@ export class Agent {
               compaction,
             )
         turnCounter++
+
+        // Automatic context flush — the loop-breaker's last rung. A deterministic
+        // model replaying an unchanged context ignores injected notes (v3: 11
+        // identical get_missions straight through the QUERY LOOP note); the only
+        // cure that has always worked is the manual disconnect+connect_llm flush.
+        // This does the same thing in place: wipe the conversation and reboot the
+        // turn from the current directive, keeping the game connection up.
+        if (consumeContextFlushRequest(this.profileId)) {
+          const fp = getProfile(this.profileId)
+          context.messages.length = 0
+          context.messages.push({
+            role: 'user' as const,
+            content: `Begin your mission: ${fp?.directive || 'Play the game. Mine ore, sell it, and grow stronger.'}`,
+            timestamp: Date.now(),
+          })
+          compaction.summary = ''
+          this.log('system', '[loop-break] ESCALATION: identical-call loop survived the injected note — conversation context flushed automatically (fresh boot on current directive)')
+        }
 
         // Connection-loss escalation. `connection_lost` alone isn't enough to
         // exit: http-mode blips return connection_failed while isConnected()
