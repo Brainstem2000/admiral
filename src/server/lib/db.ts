@@ -636,6 +636,36 @@ function migrate(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_battles_profile ON combat_battles(profile_id, ended_at);
   `)
 
+  // The Playbook — curated positive canon of PROVEN plays, classed by decay rate.
+  // Born 2026-08-28 from Brian's observation that agent judgment deteriorates:
+  // context accumulates state, not lessons. Entries are promoted only with a
+  // ledger-verified outcome and an explicit kill_condition ("if you cannot state
+  // what would kill the play, you do not understand it"). Classes:
+  //   LAW      game mechanics — true until the server version changes
+  //   TERRAIN  geography/infrastructure — weeks; refreshed passively by traffic
+  //   PATTERN  behavioral trends — days; needs 2 confirmations in, 2 failures out
+  // Market SNAPSHOTS never enter — they live in the briefing's live-data section.
+  // Contradiction beats confirmation: one fresh disproof flags an entry
+  // regardless of age (the phantom-titanium rule). Agents never write this table.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS playbook (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      class TEXT NOT NULL CHECK (class IN ('LAW','TERRAIN','PATTERN')),
+      role_scope TEXT NOT NULL DEFAULT 'all',
+      title TEXT NOT NULL UNIQUE,
+      body TEXT NOT NULL,
+      evidence TEXT NOT NULL,
+      kill_condition TEXT NOT NULL,
+      server_version TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      promoted_at TEXT DEFAULT (datetime('now')),
+      last_verified TEXT DEFAULT (datetime('now')),
+      verify_count INTEGER NOT NULL DEFAULT 1,
+      fail_count INTEGER NOT NULL DEFAULT 0,
+      demote_reason TEXT
+    );
+  `)
+
   // Fleet-wide storage ledger: what each agent holds at each station.
   //
   // The directives make every agent keep a prose STORAGE LEDGER in memory, but
@@ -1430,6 +1460,10 @@ export function pruneOldData(opts?: {
   // Hand freed pages back to the OS so the file actually shrinks after a prune. No-op unless the
   // DB uses auto_vacuum = INCREMENTAL (set at init; existing DBs adopt it after the one-time VACUUM).
   try { db.exec('PRAGMA incremental_vacuum') } catch { /* ignore */ }
+
+  // Playbook decay: PATTERNs and TERRAIN entries that outlived their class TTL
+  // without a fresh verification flip to 'stale' (LAWs persist until a patch).
+  stalePlaybookSweep()
 
   return { logs, snapshots, intel: m + s + kz + si + wr, ledger, events, history }
 }
@@ -2375,6 +2409,65 @@ export function listDeathEvents(profileId: string, limit = 200): Array<Record<st
     WHERE profile_id = ? AND event_type = 'combat.ship_destroyed'
     ORDER BY created_at DESC LIMIT ?`)
     .all(profileId, limit) as Array<Record<string, unknown>>
+}
+
+export interface PlaybookEntry {
+  id: number; class: string; role_scope: string; title: string; body: string
+  evidence: string; kill_condition: string; server_version: string | null
+  status: string; promoted_at: string; last_verified: string
+  verify_count: number; fail_count: number; demote_reason: string | null
+}
+
+export function promotePlaybookEntry(e: {
+  class: 'LAW' | 'TERRAIN' | 'PATTERN'; role_scope?: string; title: string
+  body: string; evidence: string; kill_condition: string; server_version?: string
+}): void {
+  db.query(`INSERT INTO playbook (class, role_scope, title, body, evidence, kill_condition, server_version)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(title) DO UPDATE SET
+      body = excluded.body, evidence = excluded.evidence,
+      kill_condition = excluded.kill_condition,
+      last_verified = datetime('now'), verify_count = verify_count + 1,
+      status = 'active', demote_reason = NULL`)
+    .run(e.class, e.role_scope ?? 'all', e.title, e.body, e.evidence, e.kill_condition, e.server_version ?? null)
+}
+
+/** Active entries for one role (plus 'all'), freshest first within class order. */
+export function listPlaybook(roleScope?: string, includeInactive = false): PlaybookEntry[] {
+  const statusFilter = includeInactive ? '' : `AND status = 'active'`
+  const roleFilter = roleScope ? `AND (role_scope = 'all' OR role_scope = ?)` : ''
+  const sql = `SELECT * FROM playbook WHERE 1=1 ${statusFilter} ${roleFilter}
+    ORDER BY CASE class WHEN 'LAW' THEN 0 WHEN 'TERRAIN' THEN 1 ELSE 2 END, last_verified DESC`
+  return (roleScope ? db.query(sql).all(roleScope) : db.query(sql).all()) as PlaybookEntry[]
+}
+
+export function verifyPlaybookEntry(id: number): void {
+  db.query(`UPDATE playbook SET last_verified = datetime('now'), verify_count = verify_count + 1,
+    fail_count = 0, status = 'active', demote_reason = NULL WHERE id = ?`).run(id)
+}
+
+/**
+ * A failed or contradicted attempt. PATTERNs die on the second failure; LAW and
+ * TERRAIN flag to 'stale' immediately — one fresh disproof outweighs any pile
+ * of old confirmations.
+ */
+export function failPlaybookEntry(id: number, reason: string): void {
+  const row = db.query(`SELECT class, fail_count FROM playbook WHERE id = ?`).get(id) as { class: string; fail_count: number } | undefined
+  if (!row) return
+  const fails = row.fail_count + 1
+  const dead = row.class === 'PATTERN' ? fails >= 2 : true
+  db.query(`UPDATE playbook SET fail_count = ?, status = ?, demote_reason = ? WHERE id = ?`)
+    .run(fails, dead ? (row.class === 'PATTERN' ? 'dead' : 'stale') : 'active', reason, id)
+}
+
+/** Age out unrefreshed entries by class TTL (called from pruneOldData). */
+export function stalePlaybookSweep(): number {
+  const r = db.query(`UPDATE playbook SET status = 'stale', demote_reason = 'TTL expired without re-verification'
+    WHERE status = 'active' AND (
+      (class = 'PATTERN' AND last_verified < datetime('now', '-7 days')) OR
+      (class = 'TERRAIN' AND last_verified < datetime('now', '-21 days'))
+    )`).run()
+  return r.changes
 }
 
 export function setSellQuota(profileId: string, itemId: string, remaining: number): void {

@@ -7,7 +7,7 @@
  * Kill switch: preference "situational_briefing" = "off" disables injection.
  */
 import type { GameConnection, CommandResult } from './connections/interface'
-import { listObligations, getProfile } from './db'
+import { listObligations, getProfile, listPlaybook } from './db'
 import { galaxyMarketLines, directiveMarketLines } from './galaxy-market'
 
 const REFRESH_INTERVAL = 60_000 // 60 seconds
@@ -271,6 +271,24 @@ export function buildSituationalBriefing(profileId: string): string {
     // nothing, so cargo-keyed lines alone leave them on stale directive numbers.
     const directive = getProfile(profileId)?.directive ?? ''
     for (const line of directiveMarketLines(directive)) lines.push(line)
+  }
+
+  // THE PLAYBOOK — the fleet's curated canon of proven plays (see playbook table
+  // doctrine in db.ts). Read-only for agents; entries carry their class and age
+  // so an agent can weigh a 20-day-old TERRAIN line against a fresh PATTERN.
+  {
+    const name = getProfile(profileId)?.name ?? ''
+    const role = /miner/i.test(name) ? 'miner' : /trader|smuggler/i.test(name) ? 'trader'
+      : /hauler/i.test(name) ? 'hauler' : /warrior/i.test(name) ? 'combat'
+      : /prospector|explorer/i.test(name) ? 'explorer' : 'all'
+    const entries = listPlaybook(role).slice(0, 12)
+    if (entries.length > 0) {
+      lines.push('== FLEET PLAYBOOK (proven plays — LAW holds until a game patch; TERRAIN/PATTERN decay, check the age) ==')
+      for (const e of entries) {
+        const ageDays = Math.floor((Date.now() - Date.parse(e.last_verified.replace(' ', 'T') + 'Z')) / 86_400_000)
+        lines.push(`[${e.class}${ageDays > 0 ? ` ${ageDays}d` : ''}] ${e.title}: ${e.body} (dead when: ${e.kill_condition})`)
+      }
+    }
   }
 
   // Active missions
