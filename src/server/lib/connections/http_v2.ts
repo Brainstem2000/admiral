@@ -405,39 +405,37 @@ export class HttpV2Connection implements GameConnection {
           if (retryResp.status === 401) {
             return { error: { code: 'session_invalid', message: 'Unauthorized (v1 fallback)' } }
           }
-          try {
-            const data = await retryResp.json()
-            if (data.session) this.v1Session = data.session
-            if (data.structuredContent !== undefined && data.structuredContent !== null) {
-              data.result = data.structuredContent
-            }
-            this.harvestLocalState(data as CommandResult)
-            return data as CommandResult
-          } catch {
-            return { error: { code: 'http_error', message: `HTTP ${retryResp.status}` } }
+          const data = await parseBody(retryResp)
+          if ('unparsed' in data) {
+            return { error: { code: 'http_error', message: `HTTP ${retryResp.status} — unparsed error frame: ${data.unparsed}` } }
           }
+          if (data.session) this.v1Session = data.session as ApiSession
+          if (data.structuredContent !== undefined && data.structuredContent !== null) {
+            data.result = data.structuredContent
+          }
+          this.harvestLocalState(data as CommandResult)
+          return data as CommandResult
         }
       }
       return { error: { code: 'session_invalid', message: 'Unauthorized' } }
     }
 
-    try {
-      const data = await resp.json()
-      if (data.session) {
-        if (useV1Fallback) {
-          this.v1Session = data.session
-        } else {
-          this.session = data.session
-        }
-      }
-      // v2 returns { result: <rendered text>, structuredContent: <JSON> }
-      // Keep both: result (text) goes to the LLM, structuredContent is used
-      // for cacheGameState and player data display.
-      this.harvestLocalState(data as CommandResult)
-      return data as CommandResult
-    } catch {
-      return { error: { code: 'http_error', message: `HTTP ${resp.status}` } }
+    const data = await parseBody(resp)
+    if ('unparsed' in data) {
+      return { error: { code: 'http_error', message: `HTTP ${resp.status} — unparsed error frame: ${data.unparsed}` } }
     }
+    if (data.session) {
+      if (useV1Fallback) {
+        this.v1Session = data.session as ApiSession
+      } else {
+        this.session = data.session as ApiSession
+      }
+    }
+    // v2 returns { result: <rendered text>, structuredContent: <JSON> }
+    // Keep both: result (text) goes to the LLM, structuredContent is used
+    // for cacheGameState and player data display.
+    this.harvestLocalState(data as CommandResult)
+    return data as CommandResult
   }
 
   /**
@@ -484,4 +482,24 @@ export class HttpV2Connection implements GameConnection {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * Read the body as text first so a non-JSON error response (proxy HTML, plain
+ * text, truncated JSON) surfaces its raw content instead of collapsing to a
+ * bare "HTTP <status>" that masks the server's real complaint.
+ */
+async function parseBody(resp: Response): Promise<Record<string, unknown> | { unparsed: string }> {
+  let text: string
+  try {
+    text = await resp.text()
+  } catch (err) {
+    return { unparsed: `<body unreadable: ${err instanceof Error ? err.message : String(err)}>` }
+  }
+  try {
+    const data = JSON.parse(text)
+    if (data && typeof data === 'object' && !Array.isArray(data)) return data as Record<string, unknown>
+  } catch { /* fall through */ }
+  const raw = text.trim()
+  return { unparsed: raw.length > 600 ? `${raw.slice(0, 600)}…` : raw || '<empty body>' }
 }

@@ -1,5 +1,5 @@
 import { Account, ACTIONS, ClerkSource, GENERATED_SPEC_VERSION, SpacemoltError } from '@spacemolt/lib'
-import type { AuthCredentials } from '@spacemolt/lib'
+import type { AuthCredentials, WebSocketLike } from '@spacemolt/lib'
 import type { GameConnection, LoginResult, RegisterResult, CommandResult, NotificationHandler } from './interface'
 import { USER_AGENT } from './interface'
 
@@ -25,6 +25,14 @@ import { USER_AGENT } from './interface'
 const INTERNAL_FRAME_TYPES = new Set([
   'welcome', 'logged_in', 'registered', 'action_result', 'action_queued', 'error', 'pong',
 ])
+
+/** Cap on remembered raw error frames — error frames are rare, so this only
+ *  guards against a pathological stream of uncorrelated ones. */
+const MAX_RAW_ERROR_FRAMES = 32
+
+function truncateRaw(text: string, max = 600): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
 
 interface Route { tool: string; action: string; defaultArgs?: Record<string, unknown> }
 
@@ -121,6 +129,8 @@ export class LibV2Connection implements GameConnection {
   private restCreds: { username: string; password: string } | null = null
   private restSession: { id: string; expires_at?: string } | null = null
   private restSessionPromise: Promise<void> | null = null
+  /** Raw error frames teed off the wire, keyed by request_id — see recoverMaskedError(). */
+  private rawErrorFrames = new Map<string, string>()
 
   constructor(serverUrl: string) {
     this.httpBaseUrl = serverUrl.replace(/\/$/, '')
@@ -131,6 +141,10 @@ export class LibV2Connection implements GameConnection {
     this.account = new Account({
       url: this.wsUrl,
       reconnect: true,
+      // Snooping transport: the lib's frame validator DISCARDS the payload of any
+      // error frame that deviates from its pinned spec, leaving only "Malformed
+      // action_error frame" — see recoverMaskedError() for the recovery path.
+      webSocketFactory: (url) => this.snoopWebSocket(url),
       // Re-auth on reconnect with whatever credential login() established.
       credentials: () => {
         if (!this.authCreds) throw new Error('no credentials for re-auth')
@@ -276,10 +290,114 @@ export class LibV2Connection implements GameConnection {
       return { result: q.result, structuredContent: q.structuredContent }
     } catch (err) {
       if (err instanceof SpacemoltError) {
+        if (err.code === 'invalid_response') {
+          const recovered = this.recoverMaskedError(err.message)
+          if (recovered) return recovered
+        }
         return { error: { code: err.code, message: err.message } }
       }
       return { error: { code: 'connection_failed', message: err instanceof Error ? err.message : String(err) } }
     }
+  }
+
+  /**
+   * Minimal WebSocketLike over the runtime's native WebSocket that tees inbound
+   * error frames into rawErrorFrames before the lib parses (and potentially
+   * discards) them. Behavior is otherwise identical to the lib's own default
+   * adapter; frames arrive as newline-delimited JSON lines.
+   */
+  private snoopWebSocket(url: string): WebSocketLike {
+    const ws = new WebSocket(url)
+    const record = (data: unknown) => {
+      const text = typeof data === 'string' ? data : String(data)
+      if (!text.includes('error')) return // cheap pre-filter; error frames are rare
+      for (const line of text.split('\n')) {
+        if (!line || !line.includes('error')) continue
+        try {
+          const parsed = JSON.parse(line) as { type?: unknown; request_id?: unknown }
+          if ((parsed.type === 'action_error' || parsed.type === 'error') && typeof parsed.request_id === 'string') {
+            this.rawErrorFrames.set(parsed.request_id, line)
+            while (this.rawErrorFrames.size > MAX_RAW_ERROR_FRAMES) {
+              const oldest = this.rawErrorFrames.keys().next().value
+              if (oldest === undefined) break
+              this.rawErrorFrames.delete(oldest)
+            }
+          }
+        } catch { /* unparseable line — the socket layer logs and drops it */ }
+      }
+    }
+    return {
+      send: (data: string) => ws.send(data),
+      close: (code?: number, reason?: string) => ws.close(code, reason),
+      addEventListener: ((type: string, listener: (event?: unknown) => void) => {
+        switch (type) {
+          case 'open':
+            ws.addEventListener('open', () => listener())
+            break
+          case 'message':
+            ws.addEventListener('message', (event: MessageEvent) => {
+              try { record(event.data) } catch { /* snooping must never break the transport */ }
+              listener({ data: event.data })
+            })
+            break
+          case 'close':
+            ws.addEventListener('close', (event: CloseEvent) => listener({ code: event.code, reason: event.reason }))
+            break
+          case 'error':
+            ws.addEventListener('error', (event: Event) => listener(event))
+            break
+        }
+      }) as WebSocketLike['addEventListener'],
+    }
+  }
+
+  /**
+   * The lib's isActionErrorFrame/isErrorFrame validators reject any error frame
+   * whose payload deviates from the pinned spec (e.g. commission_ship's
+   * missing-materials refusal, whose `details` is not a plain object), throwing
+   * away the game's real code/message in favor of
+   * `invalid_response: "Malformed action_error frame for request rN"`. That
+   * masked a plain missing-materials refusal as a "systemic server bug"
+   * (CassMargin, 2026-08-29) and burned turns retrying at multiple yards.
+   * Rebuild the real error from the raw frame teed off the wire; if even that
+   * fails, surface the raw text — no error is ever fully masked.
+   */
+  private recoverMaskedError(libMessage: string): CommandResult | null {
+    const m = /^Malformed \S+ frame for request (\S+)$/.exec(libMessage)
+    if (!m) return null
+    const requestId = m[1]
+    const raw = this.rawErrorFrames.get(requestId)
+    if (!raw) {
+      // Frame never seen (pre-snoop connect, or dropped at the socket layer).
+      // Still reframe it so the agent doesn't read a client parse gap as a
+      // server outage and retry the mutation blindly.
+      return {
+        error: {
+          code: 'invalid_response',
+          message: `${libMessage} — the server DID answer (likely refusing the action); the client could not parse its error frame. Treat as a refusal, not an outage; do not retry blindly.`,
+        },
+      }
+    }
+    this.rawErrorFrames.delete(requestId)
+    try {
+      const frame = JSON.parse(raw) as { payload?: unknown }
+      const p = frame.payload
+      if (p && typeof p === 'object' && !Array.isArray(p)) {
+        const payload = p as Record<string, unknown>
+        const code = typeof payload.code === 'string' ? payload.code : 'action_error'
+        let message = [payload.message, payload.error, payload.reason]
+          .find((v): v is string => typeof v === 'string') ?? ''
+        if (payload.details !== undefined && payload.details !== null) {
+          const details = JSON.stringify(payload.details)
+          if (details && details !== '{}' && details !== '[]') {
+            message = message ? `${message} — details: ${truncateRaw(details)}` : `details: ${truncateRaw(details)}`
+          }
+        }
+        if (message) return { error: { code, message } }
+      }
+    } catch { /* fall through to the raw-text fallback */ }
+    console.warn(`[lib_v2] unparsed error frame for request ${requestId}: ${truncateRaw(raw)}`)
+    return { error: { code: 'action_error', message: `unparsed error frame: ${truncateRaw(raw)}` } }
   }
 
   /**
@@ -405,6 +523,7 @@ export class LibV2Connection implements GameConnection {
     this.connected = false
     this.restSession = null
     this.restCreds = null
+    this.rawErrorFrames.clear()
   }
 
   isConnected(): boolean {
