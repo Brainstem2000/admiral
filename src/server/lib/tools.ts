@@ -372,6 +372,8 @@ export interface ToolContext {
   log: LogFn
   todo: string
   memory: string
+  /** Optional probe for pending operator interrupts — see LoopOptions.interruptPending. */
+  interruptPending?: () => string | null
 }
 
 /**
@@ -1871,6 +1873,12 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
     for (const hop of hopIds) {
       if (!conn.isConnected()) return `goto_system PARTIAL: disconnected after ${hops}/${hopIds.length} hops. Verify position with get_status.`
       if (Date.now() > deadline) return `goto_system PARTIAL: deadline (8min) after ${hops}/${hopIds.length} hops — re-run goto_system(target_system="${target}") to continue.`
+      const interrupt = ctx.interruptPending?.()
+      if (interrupt) {
+        return `goto_system INTERRUPTED after ${hops}/${hopIds.length} hops (${interrupt}). ` +
+          `You are mid-route to ${target} — read the new guidance FIRST, then either ` +
+          `re-run goto_system(target_system="${target}") to continue or follow the new orders.`
+      }
       const act = await macroAction(conn, 'jump', { target_system: hop }, 12)
       if (!act.ok) {
         return `goto_system PARTIAL: jump to ${hop} failed [${act.errorCode}] ${act.errorMessage ?? ''} after ${hops}/${hopIds.length} hops. Verify position with get_status.`

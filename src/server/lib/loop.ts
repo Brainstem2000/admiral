@@ -35,6 +35,12 @@ export interface LoopOptions {
   maxToolRounds?: number
   maxTokens?: number  // Override LLM maxTokens (default: 4096)
   llmTimeoutMs?: number
+  /** Probes for pending operator interrupts (nudge, turn restart, safe-dock).
+   *  Long-running macro tools poll this between steps so a 24-hop goto_system
+   *  can be redirected mid-route instead of finishing deaf (2026-08-29: one
+   *  such macro made an agent uncommandable for ~25 minutes mid-convoy).
+   *  Returns a short reason string, or null when nothing is pending. */
+  interruptPending?: () => string | null
   contextBudgetRatio?: number
   onActivity?: (activity: string) => void
   compactionModel?: Model<any>  // Separate (cheaper) model for compaction summarization
@@ -187,7 +193,7 @@ export async function runAgentTurn(
 
     if (reasoning) log('llm_thought', reasoning)
 
-    const toolCtx = { connection, profileId, profileName, log, todo: todo.value, memory: memory.value }
+    const toolCtx = { connection, profileId, profileName, log, todo: todo.value, memory: memory.value, interruptPending: options?.interruptPending }
 
     let showedReason = false
     let actionPending = false

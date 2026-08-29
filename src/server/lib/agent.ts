@@ -453,6 +453,11 @@ export class Agent {
                 onActivity: (a) => this.setActivity(`${phasePrefix}${a}`),
                 compactionModel: hasDualModel ? executorResolved?.model : undefined,
                 isConnectionDown: () => this.everConnected && !(this.connection?.isConnected() ?? false),
+                interruptPending: () =>
+                  this.pendingNudges.length > 0 ? 'Admiral nudge pending'
+                  : this.restartRequested ? 'turn restart requested'
+                  : this.safeDockTurnsRemaining > 0 ? 'safe-dock shutdown order'
+                  : null,
               },
               compaction,
             )
