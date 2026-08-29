@@ -239,6 +239,8 @@ function actionCooldownRemaining(profileId: string): number | null {
 // itself perturbs the context enough that the next completion is no longer a replay.
 // Maps profileId → recent failure fingerprints (command + canonical args + error code).
 const recentFailures = new Map<string, Array<{ key: string; timestamp: number }>>()
+// Fuel-floor checkpoint state: last blocked jump per profile (see fuel floor guard).
+const fuelFloorBlocks = new Map<string, { dest: string; at: number }>()
 const FAILURE_LOOP_WINDOW_MS = 5 * 60_000
 const FAILURE_LOOP_THRESHOLD = 3   // fire on the 3rd identical failure
 const FAILURE_LOOP_KEEP = 20       // per-profile history cap — this is a breaker, not a log
@@ -303,6 +305,7 @@ export function cleanupProfileToolState(profileId: string): void {
   memoryDirtyFlags.delete(profileId)
   recentFailures.delete(profileId)
   contextFlushRequests.delete(profileId)
+  fuelFloorBlocks.delete(profileId)
   const prefix = `${profileId}:`
   for (const key of queryCache.keys()) {
     if (key.startsWith(prefix)) queryCache.delete(key)
@@ -553,7 +556,11 @@ export function checkDoctrineGuards(
   // after jumping into a dry-tank pocket on fumes. Prose doctrine ("count fuel
   // BEFORE jumping") failed twice in one day; this makes it mechanical: no jump
   // when the tank is under the floor unless cargo cells (20/50/100 restore by
-  // tier) can bring it back above.
+  // tier) can bring it back above. Escape valve: a ship ALREADY below the floor
+  // in a stationless system must still be able to jump toward fuel, so repeating
+  // the identical jump within 10 minutes proceeds — the block is a checkpoint
+  // against absent-minded dry jumps, never a trap (the same ship, same day,
+  // would have been trapped mid-corridor at 35/350 by an unconditional block).
   {
     const bareJ = command.replace(/^spacemolt_/, '').replace(/^nav_/, '').replace(/^ship_/, '')
     if (bareJ === 'jump' && getPreference('fuel_floor_gate') !== 'off') {
@@ -569,13 +576,21 @@ export function checkDoctrineGuards(
             + getCargoQuantity(profileId, 'premium_fuel_cell') * 50
             + getCargoQuantity(profileId, 'military_fuel_cell') * 100
           if (fuel + restore < floor) {
-            return (
-              `BLOCKED by fuel floor: tank ${fuel}/${max} is under the ${floor}-unit floor and your ` +
-              `cargo cells can only restore ${restore}. A jump on a dry tank strands the ship wherever ` +
-              `it lands. Refuel from this station's tank first (2-20cr/unit); if this tank is empty, ` +
-              `buy fuel cells up to the 8-cell reserve and run \`refuel\` before jumping — and jump ` +
-              `only toward a station whose tank you have verified is not empty (get_poi shows reserves).`
-            )
+            const dest = String(commandArgs?.system_id ?? commandArgs?.destination ?? commandArgs?.system ?? '?')
+            const prior = fuelFloorBlocks.get(profileId)
+            if (prior && prior.dest === dest && Date.now() - prior.at < 10 * 60 * 1000) {
+              fuelFloorBlocks.delete(profileId)
+            } else {
+              fuelFloorBlocks.set(profileId, { dest, at: Date.now() })
+              return (
+                `CHECKPOINT by fuel floor: tank ${fuel}/${max} is under the ${floor}-unit floor and your ` +
+                `cargo cells can only restore ${restore}. A jump on a dry tank strands the ship wherever ` +
+                `it lands. If you can fix fuel HERE, do that instead: station tank refuel (2-20cr/unit), ` +
+                `or buy cells up to the 8-cell reserve and run \`refuel\`. If there is NO fuel here and ` +
+                `this jump moves you toward a station whose tank you have verified works (get_poi shows ` +
+                `reserves), repeat the exact same jump now to proceed — the checkpoint clears once per leg.`
+              )
+            }
           }
         }
       }
