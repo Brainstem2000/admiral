@@ -1835,6 +1835,40 @@ async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContex
   return `mine_until_full DONE: ${mines} mine actions, +${minedUnits} cargo units, cargo now ${end.cargoUsed ?? '?'}/${end.cargoCapacity ?? '?'}. Stopped: ${stopReason}.`
 }
 
+/**
+ * Shortest path over the learned system_links graph (fleet-banned systems
+ * excluded), or null when either endpoint is unknown or no learned route
+ * exists. The graph is partial — a null is "not learned", never "impossible".
+ */
+function knownShortestPath(from: string, to: string): string[] | null {
+  const FORBIDDEN = new Set(['goldcrest', 'bluerift'])
+  const adj = new Map<string, Set<string>>()
+  for (const l of getKnownLinks()) {
+    if (FORBIDDEN.has(l.a) || FORBIDDEN.has(l.b)) continue
+    if (!adj.has(l.a)) adj.set(l.a, new Set())
+    if (!adj.has(l.b)) adj.set(l.b, new Set())
+    adj.get(l.a)!.add(l.b)
+    adj.get(l.b)!.add(l.a)
+  }
+  if (!adj.has(from) || !adj.has(to)) return null
+  const prev = new Map<string, string>()
+  const q = [from]; const seen = new Set([from])
+  while (q.length) {
+    const n = q.shift()!
+    for (const x of adj.get(n) ?? []) {
+      if (seen.has(x)) continue
+      seen.add(x); prev.set(x, n)
+      if (x === to) {
+        const path = [to]; let c = to
+        while (c !== from) { c = prev.get(c)!; path.unshift(c) }
+        return path
+      }
+      q.push(x)
+    }
+  }
+  return null
+}
+
 async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
   const narrate = makeMacroNarrator(ctx, 'goto_system', reason)
   const conn = ctx.connection
@@ -1861,6 +1895,24 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
       .filter((id) => id && id !== start.systemId)
     if (hopIds.length === 0) return `MACRO ABORT: route to ${target} had no parseable hops — jump manually.`
     if (hopIds.length > 25) return `MACRO ABORT: route is ${hopIds.length} hops (cap 25) — too far for one macro; refuel/plan waypoints.`
+    // Route sanity vs the learned map. find_route returned three catastrophic
+    // routes on 2026-08-29 alone — 25 hops market_prime→haven (adjacent), 20+
+    // hops through the lawless Dheneb pocket for an adjacent-system trip — and
+    // the fleet's own link graph knew better each time. When the game's route
+    // is wildly longer than a path the fleet has actually flown, refuse it and
+    // hand the agent the known path instead. A partial graph can only shorten,
+    // never lengthen, so this cannot false-positive on honest routes.
+    if (start.systemId) {
+      const known = knownShortestPath(start.systemId, target)
+      if (known && known.length > 1 && hopIds.length > Math.max(3, 2 * (known.length - 1))) {
+        return (
+          `MACRO ABORT: find_route wants ${hopIds.length} hops to ${target}, but the fleet's ` +
+          `learned map knows a ${known.length - 1}-hop path: ${known.join(' → ')}. ` +
+          `The game route is not trustworthy here — jump the known path LEG BY LEG ` +
+          `(verify each leg's security first), or re-run goto_system after moving one hop.`
+        )
+      }
+    }
     const estFuel = Number(rc.estimated_fuel ?? hopIds.length)
     const fuelAvail = Number(rc.fuel_available ?? NaN)
     if (!Number.isNaN(fuelAvail) && estFuel > fuelAvail) {
