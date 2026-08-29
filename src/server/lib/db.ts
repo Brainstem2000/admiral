@@ -571,15 +571,26 @@ function migrate(db: Database): void {
   // What the live commission_quote says the ship needs, item by item. The BoM guard
   // reads this rather than a hardcoded list, so it tracks the real order instead of
   // drifting: quantities change as lines are delivered and the quote is re-pulled.
+  // profile_id records WHOSE quote created the row — the craft guard reserves the
+  // material against that profile only (2026-08-29: CassMargin's caravan quote was
+  // blocking Morg'Thar from crafting with his own steel). NULL = legacy row written
+  // before attribution existed; those stay fleet-wide rather than silently unguarded.
   db.exec(`
     CREATE TABLE IF NOT EXISTS commission_requirements (
       ship_class TEXT NOT NULL,
       item_id TEXT NOT NULL,
       quantity INTEGER NOT NULL,
+      profile_id TEXT,
       updated_at TEXT DEFAULT (datetime('now')),
       PRIMARY KEY (ship_class, item_id)
     );
   `)
+  {
+    const creqCols = db.query('PRAGMA table_info(commission_requirements)').all() as { name: string }[]
+    if (!creqCols.some((c) => c.name === 'profile_id')) {
+      db.exec('ALTER TABLE commission_requirements ADD COLUMN profile_id TEXT')
+    }
+  }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS sell_quotas (
@@ -1481,35 +1492,44 @@ export function getSellQuota(profileId: string, itemId: string): number | null {
 /**
  * Replace the recorded requirement for one ship class from a fresh commission_quote.
  * Whole-set replace, not merge: a line that vanishes from the quote is no longer required,
- * and a stale row would keep protecting material the ship does not need.
+ * and a stale row would keep protecting material the ship does not need. profileId is the
+ * agent whose quote this is — the craft guard reserves the lines against them alone.
  */
-export function setCommissionRequirements(shipClass: string, items: Array<{ item_id: string; quantity: number }>): void {
+export function setCommissionRequirements(shipClass: string, items: Array<{ item_id: string; quantity: number }>, profileId: string | null = null): void {
   const tx = db.transaction((rows: Array<{ item_id: string; quantity: number }>) => {
     db.query('DELETE FROM commission_requirements WHERE ship_class = ?').run(shipClass)
     const ins = db.query(
-      'INSERT INTO commission_requirements (ship_class, item_id, quantity) VALUES (?, ?, ?)',
+      'INSERT INTO commission_requirements (ship_class, item_id, quantity, profile_id) VALUES (?, ?, ?, ?)',
     )
     for (const r of rows) {
       if (!r?.item_id || !Number.isFinite(r.quantity)) continue
-      ins.run(shipClass, String(r.item_id).toLowerCase(), Math.max(0, Math.floor(r.quantity)))
+      ins.run(shipClass, String(r.item_id).toLowerCase(), Math.max(0, Math.floor(r.quantity)), profileId)
     }
   })
   tx(items)
 }
 
-/** How many of this item the commission needs, across every recorded ship class. */
-export function getCommissionRequirement(itemId: string): number {
-  const row = db.query(
-    'SELECT MAX(quantity) AS q FROM commission_requirements WHERE item_id = ?',
-  ).get(String(itemId).toLowerCase()) as { q: number | null } | null
+/**
+ * How many of this item the commission needs, across every recorded ship class.
+ * With profileId, only rows this profile's quote created count (plus legacy NULL-owner
+ * rows, which stay fleet-wide) — another agent's commission never reserves your stock.
+ */
+export function getCommissionRequirement(itemId: string, profileId?: string): number {
+  const row = profileId
+    ? db.query(
+        'SELECT MAX(quantity) AS q FROM commission_requirements WHERE item_id = ? AND (profile_id IS NULL OR profile_id = ?)',
+      ).get(String(itemId).toLowerCase(), profileId) as { q: number | null } | null
+    : db.query(
+        'SELECT MAX(quantity) AS q FROM commission_requirements WHERE item_id = ?',
+      ).get(String(itemId).toLowerCase()) as { q: number | null } | null
   return row?.q ?? 0
 }
 
-export function listCommissionRequirements(shipClass?: string): Array<{ ship_class: string; item_id: string; quantity: number; updated_at: string }> {
+export function listCommissionRequirements(shipClass?: string): Array<{ ship_class: string; item_id: string; quantity: number; profile_id: string | null; updated_at: string }> {
   const sql = shipClass
     ? 'SELECT * FROM commission_requirements WHERE ship_class = ? ORDER BY item_id'
     : 'SELECT * FROM commission_requirements ORDER BY ship_class, item_id'
-  return (shipClass ? db.query(sql).all(shipClass) : db.query(sql).all()) as Array<{ ship_class: string; item_id: string; quantity: number; updated_at: string }>
+  return (shipClass ? db.query(sql).all(shipClass) : db.query(sql).all()) as Array<{ ship_class: string; item_id: string; quantity: number; profile_id: string | null; updated_at: string }>
 }
 
 /** What this agent holds of one item at one station — the number the craft guard protects. */

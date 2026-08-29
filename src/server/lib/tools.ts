@@ -629,7 +629,9 @@ export function checkDoctrineGuards(
   // The reserve comes from the recorded commission_quote, not a constant, so it follows the real
   // order as lines are delivered. Items in SELL_CARGO_ALWAYS_EXCLUDE with no recorded requirement
   // are left alone here — that list guards trade, and blocking every craft on it would stop the
-  // fleet building anything at all.
+  // fleet building anything at all. The reserve is per-profile: only the agent whose quote
+  // recorded the requirement is held to it (legacy rows with no owner still bind everyone).
+  // 2026-08-29: CassMargin's caravan quote was blocking Morg'Thar's ammo crafts at war_citadel.
   {
     const bare = command.replace(/^spacemolt_/, '').replace(/^craft_/, '')
     if (bare === 'craft' || bare.endsWith('_craft')) {
@@ -645,7 +647,7 @@ export function checkDoctrineGuards(
         for (const input of recipe?.inputs ?? []) {
           const itemId = String(input?.item_id ?? '').toLowerCase()
           if (!itemId) continue
-          const required = getCommissionRequirement(itemId)
+          const required = getCommissionRequirement(itemId, profileId)
           if (required <= 0) continue // not a commission line — crafting with it is fine
 
           const consuming = Number(input?.quantity ?? 0) * runs
@@ -669,8 +671,8 @@ export function checkDoctrineGuards(
             : `you hold ${held} at this station (${total} fleet-wide)`
           return (
             `BLOCKED by Admiral doctrine: crafting ${recipeId} x${runs} would consume ${consuming} ${itemId}, ` +
-            `but the Crimson Devastator commission requires ${required} and ${scope}. ` +
-            `That line is closed and must stay closed; nobody in the galaxy sells neutronium_ingot, so a broken ` +
+            `but your active ship commission requires ${required} and ${scope}. ` +
+            `That line is reserved for your commission; some inputs are sold by nobody, so a broken ` +
             `line may be unrecoverable.
 
 💡 Stock outside this station: ${where}. ` +
@@ -1247,8 +1249,9 @@ export async function executeTool(
               shipClass,
               mats.filter((m) => m?.item_id && Number.isFinite(m.quantity))
                 .map((m) => ({ item_id: String(m.item_id), quantity: Number(m.quantity) })),
+              ctx.profileId,
             )
-            ctx.log('system', `[commission] recorded ${mats.length} required lines for ${shipClass} — the craft guard now protects them.`)
+            ctx.log('system', `[commission] recorded ${mats.length} required lines for ${shipClass} — the craft guard now protects them (for this agent only).`)
           }
         } catch { /* capture must never break execution */ }
       }
