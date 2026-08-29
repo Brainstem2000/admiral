@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -732,6 +732,16 @@ export function captureFromCommandResult(command: string, resultData: unknown, p
       // Sell-order fills credit the wallet with no notification — this diff is
       // the only path that books them (Cass's 50.7k of crystal fills, 2026-08-28).
       bookOrderFillsFromView(profileId, d)
+    }
+    if (bare === 'cancel_order' || bare === 'market_cancel_order') {
+      // Close the tracked order NOW, before the trading.order_cancelled event
+      // lands via action-log ingestion — otherwise the next view_orders read
+      // could book the cancelled remainder as a phantom fill.
+      const det = (d?.details ?? d) as Record<string, unknown> | undefined
+      const orderId = String(det?.order_id ?? '')
+      const ret = det?.returned_items as Record<string, unknown> | undefined
+      const qty = ret && !Array.isArray(ret) ? Number(ret.quantity ?? NaN) : NaN
+      if (orderId) closeOrderOnCancel(profileId, orderId, Number.isFinite(qty) ? qty : null)
     }
     if (bare === 'policies' && Array.isArray(d?.policies)) {
       replaceInsurancePolicies(profileId, d!.policies as never[])

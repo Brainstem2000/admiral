@@ -161,6 +161,37 @@ VERSIONED_MIGRATIONS.push({
   },
 })
 
+VERSIONED_MIGRATIONS.push({
+  version: 6,
+  name: 'own-order-fills-closure-tracking',
+  up: (d) => {
+    const has = (t: string, c: string) =>
+      (d.query(`PRAGMA table_info(${t})`).all() as { name: string }[]).some(x => x.name === c)
+    // A COMPLETELY filled order disappears from view_orders, so the diff-based
+    // booker never saw its final delta (Cass's ~86k of focused_crystal fills,
+    // 2026-08-28, recovered only by a manual reconciliation row). Track each
+    // order's total quantity and home station so the booker can read "gone from
+    // a complete listing at its station" as "fully filled".
+    if (!has('own_order_fills', 'total_quantity')) d.exec('ALTER TABLE own_order_fills ADD COLUMN total_quantity INTEGER')
+    if (!has('own_order_fills', 'station')) d.exec('ALTER TABLE own_order_fills ADD COLUMN station TEXT')
+    if (!has('own_order_fills', 'closed')) d.exec('ALTER TABLE own_order_fills ADD COLUMN closed INTEGER NOT NULL DEFAULT 0')
+    // Backfill totals from order-creation events where the action log has them.
+    // Station cannot be backfilled — those rows stay exempt from absence-closure
+    // until the order is sighted again (the sighting records its station).
+    d.exec(`UPDATE own_order_fills SET total_quantity = (
+      SELECT CAST(json_extract(e.data, '$.quantity') AS INTEGER) FROM action_events e
+      WHERE e.event_type IN ('trading.sell_order_created', 'trading.buy_order_created')
+        AND json_extract(e.data, '$.order_id') = own_order_fills.order_id LIMIT 1)
+      WHERE total_quantity IS NULL`)
+    // Rows whose orders were since cancelled must never book a phantom fill.
+    // No ledger writes here: pre-fix gaps were reconciled by hand (source
+    // 'admiral~reconciliation') and a migration cannot tell which remain unpaid.
+    d.exec(`UPDATE own_order_fills SET closed = 1 WHERE closed = 0 AND EXISTS (
+      SELECT 1 FROM action_events e WHERE e.event_type = 'trading.order_cancelled'
+        AND json_extract(e.data, '$.order_id') = own_order_fills.order_id)`)
+  },
+})
+
 function runVersionedMigrations(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -572,6 +603,9 @@ function migrate(db: Database): void {
       order_type TEXT NOT NULL,
       price_each REAL NOT NULL,
       booked_filled INTEGER NOT NULL DEFAULT 0,
+      total_quantity INTEGER,
+      station TEXT,
+      closed INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT DEFAULT (datetime('now'))
     );
   `)
@@ -2094,6 +2128,16 @@ export function getBestKnownBids(itemIds: string[]): Record<string, { price: num
  * silently (no notification), so this diff against filled_quantity is the only
  * way the ledger sees order income. Buy-order fills spend escrow already booked
  * at order_create, so only sell fills produce income rows.
+ *
+ * A COMPLETELY filled order disappears from view_orders, so its final delta
+ * (booked_filled -> total) never shows up in a listing — Cass's ~86k of
+ * focused_crystal fills went unbooked that way (2026-08-28). Each tracked order
+ * therefore records its total quantity and the station whose listing it appeared
+ * in; when a trustworthy listing at that station no longer contains a tracked
+ * open order, the remainder is booked and the row closed. Cancelled orders also
+ * vanish, but their escrow came back rather than selling — the action log's
+ * trading.order_cancelled events (and the cancel_order capture in tools.ts)
+ * gate the closure so a cancel never books a phantom fill.
  */
 export function bookOrderFillsFromView(profileId: string, resultData: unknown): void {
   try {
@@ -2101,21 +2145,31 @@ export function bookOrderFillsFromView(profileId: string, resultData: unknown): 
     const orders = d?.orders
     if (!Array.isArray(orders)) return
     const db = getDb()
+    const station = String(d?.base ?? '')
+    const seen = new Set<string>()
     for (const raw of orders) {
       const o = raw as Record<string, unknown>
       const orderId = String(o.order_id ?? '')
       const filled = Number(o.filled_quantity ?? 0) || 0
       const price = Number(o.price_each ?? 0) || 0
+      const total = Number(o.quantity ?? 0) || 0
       const itemId = String(o.item_id ?? '')
       const type = String(o.order_type ?? '')
       if (!orderId || !itemId || price <= 0) continue
+      seen.add(orderId)
       const row = db.query(`SELECT booked_filled FROM own_order_fills WHERE order_id = ?`).get(orderId) as { booked_filled: number } | undefined
       const booked = row?.booked_filled ?? 0
       if (!row) {
-        db.query(`INSERT INTO own_order_fills (order_id, profile_id, item_id, order_type, price_each, booked_filled) VALUES (?,?,?,?,?,?)`)
-          .run(orderId, profileId, itemId, type, price, filled)
-      } else if (filled > booked) {
-        db.query(`UPDATE own_order_fills SET booked_filled = ?, updated_at = datetime('now') WHERE order_id = ?`).run(filled, orderId)
+        db.query(`INSERT INTO own_order_fills (order_id, profile_id, item_id, order_type, price_each, booked_filled, total_quantity, station) VALUES (?,?,?,?,?,?,?,?)`)
+          .run(orderId, profileId, itemId, type, price, filled, total || null, station || null)
+      } else {
+        // Refresh price/total each sighting (modify_order changes price) and
+        // backfill station/total for rows tracked before those columns existed.
+        db.query(
+          `UPDATE own_order_fills SET booked_filled = MAX(booked_filled, ?), price_each = ?,
+             total_quantity = COALESCE(?, total_quantity), station = COALESCE(?, station),
+             closed = 0, updated_at = datetime('now') WHERE order_id = ?`
+        ).run(filled, price, total || null, station || null, orderId)
       }
       const delta = filled - booked
       if (delta > 0 && type === 'sell') {
@@ -2125,6 +2179,81 @@ export function bookOrderFillsFromView(profileId: string, resultData: unknown): 
         ).run(profileId, itemId, delta, price, Math.round(delta * price), orderId)
       }
     }
+
+    // Absence pass. Only a listing we can trust to be COMPLETE may close rows:
+    // view_orders lists the docked station's orders (while its hint counts
+    // galaxy-wide), so absence only means anything for orders recorded at THIS
+    // station — and only on an unfiltered, single-page, personal-scope read.
+    if (!station) return
+    if (d?.has_more === true) return
+    if (Number(d?.page ?? 1) > 1 || Number(d?.total_pages ?? 1) > 1) return
+    if (d?.search_term) return
+    if (d?.scope != null && d.scope !== 'personal') return
+    const open = db.query(
+      `SELECT order_id, item_id, order_type, price_each, booked_filled, total_quantity FROM own_order_fills
+       WHERE profile_id = ? AND closed = 0 AND station = ? AND total_quantity IS NOT NULL`
+    ).all(profileId, station) as TrackedOrderRow[]
+    for (const t of open) {
+      if (seen.has(t.order_id)) continue
+      const cancel = db.query(
+        `SELECT data FROM action_events WHERE profile_id = ? AND event_type = 'trading.order_cancelled' AND data LIKE ?`
+      ).get(profileId, `%${t.order_id}%`) as { data: string } | undefined
+      if (cancel) {
+        // The cancel event's quantity is what came back out of escrow — anything
+        // short of the total had already sold silently before the cancel.
+        let returned: number | null = null
+        try { returned = Number((JSON.parse(cancel.data) as { quantity?: number }).quantity ?? NaN) } catch { /* keep null */ }
+        closeTrackedOrder(db, profileId, t, Number.isFinite(returned as number) ? returned : null, 'view_orders~cancel')
+      } else {
+        closeTrackedOrder(db, profileId, t, 0, 'view_orders~closed')
+      }
+    }
+  } catch { /* booking must never break command execution */ }
+}
+
+interface TrackedOrderRow {
+  order_id: string
+  item_id: string
+  order_type: string
+  price_each: number
+  booked_filled: number
+  total_quantity: number | null
+}
+
+/**
+ * Close a tracked order, booking whatever fill its disappearance implies.
+ * returnedQty is what escrow gave back (0 for a full fill, the cancel event's
+ * quantity for a cancel, null when unknown — which books nothing, never a guess).
+ */
+function closeTrackedOrder(db: Database, profileId: string, t: TrackedOrderRow, returnedQty: number | null, source: string): void {
+  const filled = t.total_quantity == null || returnedQty == null
+    ? t.booked_filled
+    : Math.max(t.booked_filled, t.total_quantity - Math.max(0, returnedQty))
+  const delta = filled - t.booked_filled
+  if (delta > 0 && t.order_type === 'sell') {
+    db.query(
+      `INSERT INTO financial_ledger (profile_id, kind, item_id, quantity, unit_price, amount_signed, counterparty, order_id, source_command)
+       VALUES (?, 'order_fill', ?, ?, ?, ?, 'market order', ?, ?)`
+    ).run(profileId, t.item_id, delta, t.price_each, Math.round(delta * t.price_each), t.order_id, source)
+  }
+  db.query(`UPDATE own_order_fills SET booked_filled = ?, closed = 1, updated_at = datetime('now') WHERE order_id = ?`)
+    .run(filled, t.order_id)
+}
+
+/**
+ * Close a tracked order the moment its cancel_order result comes back, so the
+ * next view_orders read can't mistake the absence for a full fill while the
+ * trading.order_cancelled event is still waiting on action-log ingestion.
+ */
+export function closeOrderOnCancel(profileId: string, orderId: string, returnedQty: number | null): void {
+  try {
+    const db = getDb()
+    const t = db.query(
+      `SELECT order_id, item_id, order_type, price_each, booked_filled, total_quantity FROM own_order_fills
+       WHERE order_id = ? AND profile_id = ? AND closed = 0`
+    ).get(orderId, profileId) as TrackedOrderRow | undefined
+    if (!t) return
+    closeTrackedOrder(db, profileId, t, returnedQty, 'cancel_order~fill')
   } catch { /* booking must never break command execution */ }
 }
 
