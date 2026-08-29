@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -543,6 +543,40 @@ export function checkDoctrineGuards(
             `Cells cost 60+cr per fuel unit; station tanks cost 2-20cr. Refuel from the station ` +
             `tank while docked, and plan long routes station-to-station.`
           )
+        }
+      }
+    }
+  }
+
+  // Fuel floor guard. A jump from a nearly-dry tank strands the ship wherever
+  // it lands — the Devastator drifted 8+ hours at Dheneb Cryobelt on 2026-08-29
+  // after jumping into a dry-tank pocket on fumes. Prose doctrine ("count fuel
+  // BEFORE jumping") failed twice in one day; this makes it mechanical: no jump
+  // when the tank is under the floor unless cargo cells (20/50/100 restore by
+  // tier) can bring it back above.
+  {
+    const bareJ = command.replace(/^spacemolt_/, '').replace(/^nav_/, '').replace(/^ship_/, '')
+    if (bareJ === 'jump' && getPreference('fuel_floor_gate') !== 'off') {
+      const st = getProfileLastState(profileId)
+      const m = /^(\d+)\s*\/\s*(\d+)/.exec(String(st?.fuel ?? ''))
+      if (m) {
+        const fuel = Number(m[1])
+        const max = Number(m[2])
+        const floorPct = Number(getPreference('fuel_floor_pct') ?? 20) || 20
+        const floor = Math.max(10, Math.round(max * (floorPct / 100)))
+        if (max > 0 && fuel < floor) {
+          const restore = getCargoQuantity(profileId, 'fuel_cell') * 20
+            + getCargoQuantity(profileId, 'premium_fuel_cell') * 50
+            + getCargoQuantity(profileId, 'military_fuel_cell') * 100
+          if (fuel + restore < floor) {
+            return (
+              `BLOCKED by fuel floor: tank ${fuel}/${max} is under the ${floor}-unit floor and your ` +
+              `cargo cells can only restore ${restore}. A jump on a dry tank strands the ship wherever ` +
+              `it lands. Refuel from this station's tank first (2-20cr/unit); if this tank is empty, ` +
+              `buy fuel cells up to the 8-cell reserve and run \`refuel\` before jumping — and jump ` +
+              `only toward a station whose tank you have verified is not empty (get_poi shows reserves).`
+            )
+          }
         }
       }
     }

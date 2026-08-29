@@ -1911,6 +1911,11 @@ export function getProfileLastStates(): Map<string, Record<string, unknown>> {
   return new Map(rows.map((r) => [String(r.profile_id), r]))
 }
 
+export function getProfileLastState(profileId: string): Record<string, unknown> | null {
+  return (db.query('SELECT * FROM profile_last_state WHERE profile_id = ?')
+    .get(profileId) as Record<string, unknown>) ?? null
+}
+
 /** Fleet hard bans — systems no route may cross, whatever the evidence says today. */
 export const FORBIDDEN_SYSTEMS = new Set(['goldcrest', 'bluerift'])
 
