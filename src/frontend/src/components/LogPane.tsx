@@ -42,6 +42,7 @@ export function LogPane({ profileId, connected }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
   const [sseKey, setSseKey] = useState(0)
+  const [reconnecting, setReconnecting] = useState(false)
 
   useEffect(() => {
     setSseKey(k => k + 1)
@@ -55,7 +56,8 @@ export function LogPane({ profileId, connected }: Props) {
     if (saved) _setEnabledFilters(saved)
   }, [profileId])
 
-  // HTTP fetch for reliable initial data (SSE _init can be unreliable)
+  // HTTP fetch for reliable initial data (SSE _init can be unreliable).
+  // Re-runs on sseKey so every stream re-create also backfills the outage gap.
   useEffect(() => {
     const pid = profileId
     fetch(`/api/profiles/${pid}/logs`)
@@ -72,7 +74,7 @@ export function LogPane({ profileId, connected }: Props) {
         })
       })
       .catch(() => {})
-  }, [profileId])
+  }, [profileId, sseKey])
 
   useEffect(() => {
     if (eventSourceRef.current) {
@@ -122,6 +124,21 @@ export function LogPane({ profileId, connected }: Props) {
         // ignore
       }
     })
+
+    es.onopen = () => setReconnecting(false)
+
+    // Self-heal (same as CharacterPage/FleetMap): EventSource gives up PERMANENTLY
+    // on some failures — most visibly a server restart, after which this pane sat
+    // silently stale until a manual hard refresh (twice on 2026-08-29). Any error
+    // now surfaces a reconnecting pill and schedules a full re-create; the server's
+    // _init snapshot plus the HTTP refetch below fill whatever the gap missed.
+    es.onerror = () => {
+      if (eventSourceRef.current !== es) return
+      es.close()
+      eventSourceRef.current = null
+      setReconnecting(true)
+      setTimeout(() => setSseKey(k => k + 1), 3000)
+    }
 
     return () => {
       es.close()
@@ -225,6 +242,11 @@ export function LogPane({ profileId, connected }: Props) {
 
   return (
     <div className="flex flex-col h-full relative">
+      {reconnecting && (
+        <div className="absolute top-1 right-2 z-20 flex items-center gap-1.5 rounded-full bg-amber-500/15 border border-amber-500/40 px-2.5 py-0.5 text-[11px] text-amber-400">
+          <Loader2 className="w-3 h-3 animate-spin" /> reconnecting…
+        </div>
+      )}
       {/* Filter checkboxes */}
       <div className="flex items-center flex-wrap gap-0.5 bg-card border-b border-border px-2 py-1.5">
         <FilterCheckbox

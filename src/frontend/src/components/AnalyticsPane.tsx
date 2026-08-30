@@ -106,8 +106,10 @@ function TimelineTab({ profiles, statuses }: { profiles: Profile[]; statuses: Re
     return m
   }, [profiles])
 
+  const [sseKey, setSseKey] = useState(0)
   useEffect(() => {
     const es = new EventSource('/api/analytics/timeline?stream=true')
+    let closed = false
 
     es.onmessage = (event) => {
       try {
@@ -121,8 +123,17 @@ function TimelineTab({ profiles, statuses }: { profiles: Profile[]; statuses: Re
       } catch { /* heartbeat */ }
     }
 
-    return () => es.close()
-  }, [])
+    // Self-heal on server restart (same pattern as LogPane/CharacterPage):
+    // a fatally-closed EventSource never recovers on its own.
+    es.onerror = () => {
+      if (closed) return
+      closed = true
+      es.close()
+      setTimeout(() => setSseKey(k => k + 1), 3000)
+    }
+
+    return () => { closed = true; es.close() }
+  }, [sseKey])
 
   const filtered = useMemo(() => {
     // "All selected" = every current profile is in the set (robust to stale ids
@@ -332,9 +343,17 @@ function CommsTab({ profiles, statuses }: { profiles: Profile[]; statuses: Recor
     return m
   }, [profiles])
 
-  // SSE stream filtered to notification type
+  // SSE stream filtered to notification type (self-heals on server restart)
+  const [chatSseKey, setChatSseKey] = useState(0)
   useEffect(() => {
     const es = new EventSource('/api/analytics/timeline?stream=true&types=notification')
+    let closed = false
+    es.onerror = () => {
+      if (closed) return
+      closed = true
+      es.close()
+      setTimeout(() => setChatSseKey(k => k + 1), 3000)
+    }
     es.onmessage = (event) => {
       try {
         const entry = JSON.parse(event.data) as LogEntry
@@ -354,8 +373,8 @@ function CommsTab({ profiles, statuses }: { profiles: Profile[]; statuses: Recor
         }
       } catch { /* heartbeat */ }
     }
-    return () => es.close()
-  }, [])
+    return () => { closed = true; es.close() }
+  }, [chatSseKey])
 
   const [activeChannels, setActiveChannels] = useState<Set<string> | null>(null) // null = all
 
