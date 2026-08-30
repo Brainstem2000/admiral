@@ -1548,6 +1548,19 @@ export function getStorageTotalForProfile(profileId: string, itemId: string): nu
   return row?.q ?? 0
 }
 
+/** This agent's fleet-tracked storage, grouped by station, largest lines first —
+ *  the briefing's own-assets summary. Rows are what capture hooks last saw, so
+ *  callers should label them as possibly lagging. */
+export function getStorageSummaryForProfile(profileId: string, maxLines = 14): Array<{
+  station_id: string; item_id: string; quantity: number; updated_at: string
+}> {
+  return db.query(
+    `SELECT station_id, item_id, quantity, updated_at FROM storage_inventory
+     WHERE profile_id = ? AND quantity > 0
+     ORDER BY quantity DESC LIMIT ?`,
+  ).all(profileId, maxLines) as Array<{ station_id: string; item_id: string; quantity: number; updated_at: string }>
+}
+
 /**
  * The station this agent most recently recorded storage at — our best available proxy for
  * "where they are standing" inside a guard that is not given location context.

@@ -7,7 +7,7 @@
  * Kill switch: preference "situational_briefing" = "off" disables injection.
  */
 import type { GameConnection, CommandResult } from './connections/interface'
-import { listObligations, getProfile, listPlaybook } from './db'
+import { listObligations, getProfile, listPlaybook, getStorageSummaryForProfile } from './db'
 import { galaxyMarketLines, directiveMarketLines } from './galaxy-market'
 
 const REFRESH_INTERVAL = 60_000 // 60 seconds
@@ -259,6 +259,34 @@ export function buildSituationalBriefing(profileId: string): string {
     lines.push(`Cargo: ${items.join(', ')}`)
   } else if (cache.cargo) {
     lines.push('Cargo: empty')
+  }
+
+  // Own storage across ALL stations (fleet intelligence the agent otherwise
+  // cannot see without a per-station query tour). Born 2026-08-30: Juno sat
+  // "critically low" at 8.8k while 821 darksteel_ore of hers at War Citadel —
+  // recorded in storage_inventory all along — went unmentioned by every prompt
+  // path. Grouped by station, largest first, capped; quantities are what the
+  // capture hooks last saw, so the header says they may lag.
+  {
+    const rows = getStorageSummaryForProfile(profileId)
+    if (rows.length > 0) {
+      // Quantize so a busy works' drip of deposits doesn't change the line
+      // every refresh — byte-identical briefings keep the prompt cache warm
+      // (same trick as galaxy-market's threshold throttling). "~800" is as
+      // actionable as "x821" for the decision this line exists to unlock.
+      const quant = (n: number) =>
+        n >= 1000 ? `~${Math.floor(n / 100) * 100}` :
+        n >= 100 ? `~${Math.floor(n / 25) * 25}` :
+        n >= 20 ? `~${Math.floor(n / 5) * 5}` : String(n)
+      const byStation = new Map<string, string[]>()
+      for (const r of rows) {
+        const list = byStation.get(r.station_id) ?? []
+        list.push(`${r.item_id} x${quant(r.quantity)}`)
+        byStation.set(r.station_id, list)
+      }
+      const parts = [...byStation.entries()].map(([st, items]) => `${st}: ${items.join(', ')}`)
+      lines.push(`YOUR STORAGE (fleet-tracked, may lag — verify with view_storage when acting): ${parts.join(' | ')}`)
+    }
   }
 
   // Galaxy-wide market intel (public feed relay — agents cannot fetch HTTP).
