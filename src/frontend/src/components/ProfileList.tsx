@@ -212,11 +212,18 @@ export function ProfileList({ profiles, activeId, statuses, playerDataMap, onSel
                         size={12}
                         className="text-muted-foreground/30 group-hover:text-muted-foreground/60 cursor-grab shrink-0 -ml-1"
                       />
-                      <div className={`status-dot ${
-                        status.running ? 'status-dot-green' :
-                        status.connected ? 'status-dot-orange' :
-                        'status-dot-grey'
-                      }`} />
+                      <div
+                        className={`status-dot ${
+                          status.running ? 'status-dot-green' :
+                          status.connected ? 'status-dot-orange' :
+                          'status-dot-grey'
+                        }`}
+                        title={
+                          status.running ? 'agent running' :
+                          status.connected ? 'game link only — LLM off' :
+                          'offline'
+                        }
+                      />
                       <span className="text-sm font-medium text-foreground truncate">{p.name}</span>
                     </div>
                     <div className="flex items-center gap-2 mt-0.5 ml-7">
@@ -228,6 +235,14 @@ export function ProfileList({ profiles, activeId, statuses, playerDataMap, onSel
                       <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px]">
                         {MODE_LABELS[p.connection_mode] || p.connection_mode}
                       </span>
+                      {status.connected && !status.running && (
+                        <span
+                          className="text-[9px] uppercase tracking-[1px] text-[hsl(var(--smui-orange))] border border-[hsl(var(--smui-orange))]/40 px-1 rounded-sm whitespace-nowrap"
+                          title="game link only — LLM off (operator-held)"
+                        >
+                          game only
+                        </span>
+                      )}
                       {p.username && (
                         <span className="text-[10px] text-muted-foreground/60 truncate">
                           {p.username}
