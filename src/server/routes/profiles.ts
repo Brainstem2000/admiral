@@ -214,6 +214,138 @@ profiles.post('/:id/command', async (c) => {
 })
 
 /**
+ * GET /api/profiles/:id/ship-analysis — the Ship pane's data feed.
+ *
+ * One free get_ship query through the agent's connection, joined against the
+ * local catalog: fitted modules with full stats, CPU/power budgets with
+ * per-module draw, slot occupancy, and — the point — UPGRADE candidates per
+ * slot: catalog modules that beat the fitted one and still fit the budget
+ * after the swap, annotated with fleet-storage holdings and the freshest
+ * fleet-intel ask so "upgradeable" is a fact, not a guess. Zero game ticks.
+ */
+profiles.get('/:id/ship-analysis', async (c) => {
+  const id = c.req.param('id')
+  const agent = agentManager.getAgent(id)
+  if (!agent || !agent.isConnected) return c.json({ error: 'Agent not connected' }, 400)
+  try {
+    const { listModules, getItem, getShip } = await import('../lib/catalog')
+    const { getDb } = await import('../lib/db')
+    const raw = await agent.executeCommand('get_ship', {}, { silent: true }) as Record<string, unknown>
+    const sc = (raw.structuredContent ?? raw.result ?? {}) as Record<string, unknown>
+    const ship = (sc.ship ?? {}) as Record<string, unknown>
+    const fitted = Array.isArray(sc.modules) ? sc.modules as Array<Record<string, unknown>> : []
+
+    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+    const cpuFree = num(ship.cpu_capacity) - num(ship.cpu_used)
+    const powerFree = num(ship.power_capacity) - num(ship.power_used)
+
+    const db = getDb()
+    const fleetHeld = (itemId: string) => {
+      const r = db.query('SELECT SUM(quantity) q FROM storage_inventory WHERE item_id = ?').get(itemId) as { q: number | null } | undefined
+      return Number(r?.q ?? 0)
+    }
+    const bestAsk = (itemId: string) => {
+      const r = db.query(
+        `SELECT station_id, best_sell, best_sell_qty, updated_at FROM fleet_intel_market
+         WHERE item_id = ? AND best_sell IS NOT NULL AND best_sell > 0
+         ORDER BY updated_at DESC LIMIT 1`,
+      ).get(itemId) as { station_id: string; best_sell: number; best_sell_qty: number | null; updated_at: string } | undefined
+      return r ?? null
+    }
+
+    // Primary comparison stat per slot family. Weapons compare damage; other
+    // slots have heterogeneous stats, so base_value orders them (tier proxy).
+    const primaryStat = (m: Record<string, unknown>) =>
+      String(m.slot) === 'weapon' ? num(m.damage) : num(m.base_value)
+
+    const catalogMods = listModules()
+    const annotate = (candidate: Record<string, unknown>) => {
+      const cid = String(candidate.id)
+      const ask = bestAsk(cid)
+      return {
+        id: cid,
+        name: candidate.name,
+        cpu_usage: num(candidate.cpu_usage),
+        power_usage: num(candidate.power_usage),
+        damage: candidate.damage ?? null,
+        damage_type: candidate.damage_type ?? null,
+        reach: candidate.reach ?? null,
+        base_value: num(candidate.base_value),
+        required_skills: candidate.required_skills ?? null,
+        fleet_held: fleetHeld(cid),
+        market: ask ? { station: ask.station_id, ask: ask.best_sell, depth: ask.best_sell_qty, seen: ask.updated_at } : null,
+      }
+    }
+
+    const modulesOut = fitted.map((m) => {
+      const slot = String(m.slot ?? '')
+      const draw = { cpu: num(m.cpu_usage), power: num(m.power_usage) }
+      // After unfitting this module, the budget the replacement must fit.
+      const cpuRoom = cpuFree + draw.cpu
+      const powerRoom = powerFree + draw.power
+      const mine = primaryStat(m)
+      const better = catalogMods
+        .filter((cm) => String(cm.slot) === slot
+          && primaryStat(cm as unknown as Record<string, unknown>) > mine
+          && num(cm.cpu_usage) <= cpuRoom && num(cm.power_usage) <= powerRoom)
+        .sort((a, b) => primaryStat(b as unknown as Record<string, unknown>) - primaryStat(a as unknown as Record<string, unknown>))
+        .slice(0, 3)
+        .map((cm) => annotate(cm as unknown as Record<string, unknown>))
+      return { ...m, upgrades: better }
+    })
+
+    // Open slots: capacity minus fitted per family, with best fits for the
+    // remaining (unswapped) budget.
+    const slotCaps: Record<string, number> = {
+      weapon: num(ship.weapon_slots), defense: num(ship.defense_slots), utility: num(ship.utility_slots),
+    }
+    const fittedCounts: Record<string, number> = {}
+    for (const m of fitted) {
+      const s = String(m.slot ?? '')
+      fittedCounts[s] = (fittedCounts[s] ?? 0) + 1
+    }
+    const openSlots = Object.entries(slotCaps).map(([slot, cap]) => {
+      const open = Math.max(0, cap - (fittedCounts[slot] ?? 0))
+      if (!open) return { slot, open, suggestions: [] }
+      const fits = catalogMods
+        .filter((cm) => String(cm.slot) === slot && num(cm.cpu_usage) <= cpuFree && num(cm.power_usage) <= powerFree)
+        .sort((a, b) => primaryStat(b as unknown as Record<string, unknown>) - primaryStat(a as unknown as Record<string, unknown>))
+        .slice(0, 3)
+        .map((cm) => annotate(cm as unknown as Record<string, unknown>))
+      return { slot, open, suggestions: fits }
+    })
+
+    // Cargo manifest enriched with catalog size/value.
+    let cargo = Array.isArray(ship.cargo) ? ship.cargo as Array<Record<string, unknown>> : []
+    if (!cargo.length && num(ship.cargo_used) > 0) {
+      const cargoRaw = await agent.executeCommand('get_cargo', {}, { silent: true }).catch(() => null) as Record<string, unknown> | null
+      const cr = (cargoRaw?.structuredContent ?? cargoRaw?.result ?? {}) as Record<string, unknown>
+      cargo = Array.isArray(cr.cargo) ? cr.cargo as Array<Record<string, unknown>> : []
+    }
+    const cargoOut = cargo.map((it) => {
+      const item = getItem(String(it.item_id))
+      return { ...it, size: item?.size ?? null, base_value: item?.base_value ?? null }
+    })
+
+    const hullInfo = getShip(String(ship.class_id ?? '')) ?? null
+    return c.json({
+      ship,
+      hull_catalog: hullInfo ? {
+        tier: hullInfo.tier, class: hullInfo.class, faction: hullInfo.faction,
+        inherent_capabilities: (hullInfo as Record<string, unknown>).inherent_capabilities ?? null,
+      } : null,
+      budgets: { cpu_free: cpuFree, power_free: powerFree },
+      modules: modulesOut,
+      open_slots: openSlots,
+      cargo: cargoOut,
+      fetched_at: new Date().toISOString(),
+    })
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+  }
+})
+
+/**
  * GET /api/profiles/:id/prompt — render this agent's prompt without running a turn.
  *
  * Read-only. Lets you verify prompt assembly (and the volatile/stable split) without

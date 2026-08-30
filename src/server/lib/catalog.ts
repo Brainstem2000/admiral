@@ -71,6 +71,7 @@ function buildIndexes(c: Catalog): void {
   shipsById = new Map(c.ships.map((s) => [s.id, s]))
   facilitiesById = new Map(c.facilities.map((f) => [f.id, f]))
   skillsById = new Map(c.skills.map((s) => [s.id, s]))
+  moduleCache = null // rebuilt lazily from the fresh items list
 }
 
 async function fetchCatalog(): Promise<void> {
@@ -125,6 +126,30 @@ export function catalogVersion(): string | null {
 
 export function getItem(id: string): CatalogItem | undefined { return itemsById.get(id) }
 export function getFacility(id: string): CatalogFacility | undefined { return facilitiesById.get(id) }
+
+/** Fittable-module catalog entry: any item declaring a mount slot. The raw
+ *  catalog types these loosely (module stats ride as extra keys on items). */
+export type CatalogModule = CatalogItem & {
+  slot: string; type?: string; cpu_usage?: number; power_usage?: number
+  damage?: number; damage_type?: string; ammo_type?: string; reach?: number
+  cooldown?: number; magazine_size?: number
+  required_skills?: Record<string, number>
+  [key: string]: unknown
+}
+
+/** All items that can be fitted to a ship slot, indexed lazily. */
+let moduleCache: CatalogModule[] | null = null
+export function listModules(): CatalogModule[] {
+  if (!catalog) return []
+  if (!moduleCache) {
+    moduleCache = (catalog.items as Array<Record<string, unknown>>)
+      .filter((i) => typeof i.slot === 'string' && i.slot)
+      .map((i) => i as unknown as CatalogModule)
+  }
+  return moduleCache
+}
+
+export function getShip(id: string): CatalogShip | undefined { return shipsById.get(id) }
 
 // --- lookup (fuzzy across all kinds, or one kind) ---
 
