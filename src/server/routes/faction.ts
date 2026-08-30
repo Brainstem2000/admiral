@@ -59,13 +59,20 @@ faction.get('/', async (c) => {
       const err = raw.error as Record<string, unknown> | undefined
       if (res && typeof res === 'object' && Array.isArray(res.items)) {
         const sid = String(res.base_id ?? fallbackStation)
+        const hint = String(res.hint ?? '')
+        // The current-station query returns a success-shaped envelope with an
+        // empty item list even when NO lockbox exists there — the "no storage
+        // facility" hint is the real verdict. Without this check the UI showed
+        // "lockbox online · empty" for a station holding thousands of
+        // ledgered-but-invisible items (reported 2026-08-30).
+        const noFacility = /does not have a storage facility/i.test(hint)
         stations.set(sid, {
           station_id: sid,
-          status: 'unlocked',
-          items: res.items as StorageStation['items'],
+          status: noFacility ? 'locked' : 'unlocked',
+          items: noFacility ? [] : res.items as StorageStation['items'],
           credits: typeof res.credits === 'number' ? res.credits : null,
+          ...(noFacility ? { message: 'No lockbox built here yet — contents ledgered but inaccessible.' } : {}),
         })
-        const hint = String(res.hint ?? '')
         if (hint) aggregateNote = hint
       } else if (err) {
         const msg = String(err.message ?? '')
