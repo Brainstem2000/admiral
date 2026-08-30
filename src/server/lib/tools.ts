@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, FORBIDDEN_SYSTEMS } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -1895,6 +1895,18 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
       .filter((id) => id && id !== start.systemId)
     if (hopIds.length === 0) return `MACRO ABORT: route to ${target} had no parseable hops — jump manually.`
     if (hopIds.length > 25) return `MACRO ABORT: route is ${hopIds.length} hops (cap 25) — too far for one macro; refuel/plan waypoints.`
+    // Hard fleet bans are absolute: the game's own router happily plotted a ship
+    // THROUGH Goldcrest on 2026-08-30, and the macro flew it. Screen every hop.
+    {
+      const banned = hopIds.find((h) => FORBIDDEN_SYSTEMS.has(h))
+      if (banned) {
+        return (
+          `MACRO ABORT: the game's route crosses ${banned} — a fleet-FORBIDDEN system, no ` +
+          `exceptions. Plot around it: fleet_route avoids banned systems; jump its path leg ` +
+          `by leg, or pick a different destination.`
+        )
+      }
+    }
     // Route sanity vs the learned map. find_route returned three catastrophic
     // routes on 2026-08-29 alone — 25 hops market_prime→haven (adjacent), 20+
     // hops through the lawless Dheneb pocket for an adjacent-system trip — and
