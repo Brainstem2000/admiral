@@ -546,7 +546,14 @@ export class LibV2Connection implements GameConnection {
     const out: Record<string, unknown> = { ...snap, has_pending_action: this.account.hasPendingAction }
     // Query-derived credits are fresher than the cache when the last credit
     // change was INCOMING (gift/order fill) — see queryCredits doc comment.
-    if (this.queryCredits !== null) out.credits = this.queryCredits
+    // Stamp BOTH the top-level field and player.credits: the dashboard reads
+    // player.credits first, so overriding only the top level left one payload
+    // carrying two different wallets (the UI flickered between them).
+    if (this.queryCredits !== null) {
+      out.credits = this.queryCredits
+      const p = out.player as Record<string, unknown> | undefined
+      if (p && typeof p === 'object') out.player = { ...p, credits: this.queryCredits }
+    }
     return out
   }
 

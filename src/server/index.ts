@@ -210,6 +210,44 @@ async function refreshOfflineWallets() {
 setTimeout(refreshOfflineWallets, 60 * 1000) // first pass shortly after boot
 setInterval(refreshOfflineWallets, 20 * 60 * 1000)
 
+// Connected-agent snapshot writer: the offline sweep above skips connected
+// profiles, so their profile_last_state froze at whatever the last sweep saw
+// before they connected (observed 36h stale). Every 2 minutes, copy each
+// connected agent's in-memory gameState — no game round-trip — into the
+// durable sheet, so the fleet map, offline fallbacks, and post-disconnect
+// cards inherit a current wallet instead of a fossil.
+async function snapshotConnectedState() {
+  const { listProfiles: lp, upsertProfileLastState } = await import('./lib/db')
+  const { agentManager } = await import('./lib/agent-manager')
+  for (const p of lp()) {
+    try {
+      const agent = agentManager.getAgent(p.id)
+      if (!agent?.isConnected) continue
+      const gs = agent.gameState as Record<string, unknown> | null
+      if (!gs) continue
+      // get_status shape nests under player/location/ship; slim states put
+      // system/poi/credits at the top level. Accept either.
+      const player = gs.player as Record<string, unknown> | undefined
+      const loc = gs.location as Record<string, unknown> | undefined
+      const ship = gs.ship as Record<string, unknown> | undefined
+      const credits = Number(player?.credits ?? gs.credits)
+      const system = String(loc?.system_name ?? loc?.system_id ?? gs.system ?? '')
+      const poi = String(loc?.poi_name ?? loc?.docked_at ?? loc?.poi_id ?? gs.poi ?? '')
+      if (!Number.isFinite(credits) || !system) continue
+      upsertProfileLastState(p.id, {
+        system, poi,
+        ship_class: String(ship?.class_id ?? ship?.ship_class ?? ''),
+        ship_name: String(ship?.class_name ?? ship?.name ?? ''),
+        hull: String(ship?.hull ?? ''),
+        fuel: String(ship?.fuel ?? ''),
+        cargo: '',
+        credits,
+      })
+    } catch { /* one profile failing must not stop the sweep */ }
+  }
+}
+setInterval(snapshotConnectedState, 2 * 60 * 1000)
+
 const port = parseInt(process.env.PORT || '3031')
 // Bind to loopback by default so the API (which serves plaintext secrets) is not
 // exposed to the LAN. Set ADMIRAL_HOST=0.0.0.0 to intentionally expose it.

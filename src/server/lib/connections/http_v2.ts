@@ -195,10 +195,31 @@ export class HttpV2Connection implements GameConnection {
         for (const handler of this.notificationHandlers) {
           handler(n)
         }
+        this.maybeRefreshCredits(n)
       }
     }
 
     return resp
+  }
+
+  /** Incoming credits (gifts, order fills, mission payouts) arrive as
+   *  notifications, which harvestLocalState never sees — the cached wallet
+   *  held its pre-gift value until the agent's next explicit status query
+   *  (observed: Morg pinned at 1cr in the UI while 30,000 in gifts landed).
+   *  On a credit-bearing notification, schedule one silent get_status (free
+   *  query) so the harvest path refreshes the wallet. Debounced: a batch of
+   *  fills triggers a single refresh. */
+  private creditRefreshTimer: ReturnType<typeof setTimeout> | null = null
+  private maybeRefreshCredits(n: unknown): void {
+    let s: string
+    try { s = JSON.stringify(n) ?? '' } catch { return }
+    if (!/gift|order_fill|filled|mission_(complete|reward)|bounty|escrow|credits/i.test(s)) return
+    if (this.creditRefreshTimer || !this.connected) return
+    this.creditRefreshTimer = setTimeout(() => {
+      this.creditRefreshTimer = null
+      if (!this.connected) return
+      this.execute('get_status').catch(() => { /* refresh is best-effort */ })
+    }, 1500)
   }
 
   onNotification(handler: NotificationHandler): void {
@@ -209,6 +230,7 @@ export class HttpV2Connection implements GameConnection {
     this.session = null
     this.v1Session = null
     this.connected = false
+    if (this.creditRefreshTimer) { clearTimeout(this.creditRefreshTimer); this.creditRefreshTimer = null }
     this.notificationHandlers = []
     this.commandRouteMap.clear()
     this.v1FallbackLogged = false
