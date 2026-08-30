@@ -1915,8 +1915,20 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
     }
     const estFuel = Number(rc.estimated_fuel ?? hopIds.length)
     const fuelAvail = Number(rc.fuel_available ?? NaN)
-    if (!Number.isNaN(fuelAvail) && estFuel > fuelAvail) {
-      return `MACRO ABORT: route needs ~${estFuel} fuel but only ${fuelAvail} available. Refuel first (fuel exemption applies).`
+    // Launch margin: routes must be affordable WITH a 25% reserve on top, not
+    // just barely. Every stranding this fleet has suffered began with a launch
+    // that "exactly" covered the route — then one detour, one dry tank, one
+    // recalc ate the margin (Devastator, 8 hours adrift, 2026-08-29). Arriving
+    // on fumes in a system whose tank you have not verified is a stranding
+    // with extra steps.
+    const needWithReserve = Math.ceil(estFuel * 1.25)
+    if (!Number.isNaN(fuelAvail) && needWithReserve > fuelAvail) {
+      return (
+        `MACRO ABORT: route needs ~${estFuel} fuel and the fleet launch rule requires ` +
+        `${needWithReserve} (cost + 25% reserve); you have ${fuelAvail}. REFUEL FIRST — ` +
+        `dock and fill the tank (2-20cr/unit) before any multi-hop route. No exceptions: ` +
+        `margin is what survives detours.`
+      )
     }
 
     // Undock if needed, then jump each hop
@@ -1966,6 +1978,17 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
       dockNote = d.ok
         ? ` Docked at ${dockPoi}.`
         : ` You are AT ${dockPoi} (travel complete — no further travel needed); dock skipped [${d.errorCode}]${d.errorCode === 'no_base' ? ' — this POI has no station, e.g. a belt: just start working it' : ''}.`
+      // Auto-refuel on every macro dock. Fuel discipline as prose failed all
+      // day (two strandings, one aborted hunt); as a dock side effect it cannot
+      // be forgotten. Station fuel is 2-20cr/unit — topping up is always right,
+      // and a dry tank gets surfaced to the agent instead of discovered later.
+      if (d.ok) {
+        await macroSleep(macroStepDelayMs(conn))
+        const rf = await macroAction(conn, 'refuel', undefined, 3)
+        if (rf.ok) dockNote += ' Tank auto-topped from the station pump.'
+        else if (rf.errorCode === 'station_fuel_empty') dockNote += ' NOTE: this station\'s fuel tank is EMPTY — plan your departure fuel from cargo cells or another stop.'
+        else if (rf.errorCode) dockNote += ` (auto-refuel skipped [${rf.errorCode}])`
+      }
     } else {
       dockNote = ` Arrived but travel to ${dockPoi} failed [${t.errorCode}] ${t.errorMessage ?? ''}.`
     }
