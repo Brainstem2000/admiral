@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp, Globe, BarChart3, Coins, Vault, Users, User, BookOpen, Radar } from 'lucide-react'
+import { Settings, Sun, Moon, Github, AlertTriangle, CircleHelp, Globe, BarChart3, Coins, Vault, Users, User, BookOpen, Radar, Flag } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 import type { Profile, Provider } from '@/types'
 import { ProfileList } from './ProfileList'
@@ -11,6 +11,7 @@ import { AnalyticsPane } from './AnalyticsPane'
 import { IntelDashboard } from './IntelDashboard'
 import { CharacterPage } from './character/CharacterPage'
 import { CodexPanel } from './CodexPanel'
+import { FactionPane } from './FactionPane'
 
 interface Props {
   profiles: Profile[]
@@ -40,7 +41,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
   const [playerDataMap, setPlayerDataMap] = useState<Record<string, Record<string, unknown>>>({})
   const [showWizard, setShowWizard] = useState(false)
   const [showTour, setShowTour] = useState(false)
-  const [view, setView] = useState<'profiles' | 'character' | 'map' | 'intel' | 'analytics' | 'codex'>(() => {
+  const [view, setView] = useState<'profiles' | 'character' | 'map' | 'intel' | 'analytics' | 'codex' | 'faction'>(() => {
     // ?ctab= deep links land on the dossier instead of the Fleet editor.
     try { return new URLSearchParams(window.location.search).has('ctab') ? 'character' : 'profiles' } catch { return 'profiles' }
   })
@@ -232,6 +233,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             <NavButton active={view === 'character'} onClick={() => activeProfile && setView('character')} icon={<User size={12} />} label="Character" title={activeProfile ? 'Show character dossier' : 'Select an agent first'} disabled={!activeProfile} />
             <NavButton active={view === 'map'} onClick={() => setView('map')} icon={<Globe size={12} />} label="Map" title="Show fleet map" />
             <NavButton active={view === 'intel'} onClick={() => setView('intel')} icon={<Radar size={12} />} label="Intel" title="Central intelligence dashboard" />
+            <NavButton active={view === 'faction'} onClick={() => setView('faction')} icon={<Flag size={12} />} label="Faction" title="Faction overview: treasury, members, lockbox storage" />
             <NavButton active={view === 'analytics'} onClick={() => setView('analytics')} icon={<BarChart3 size={12} />} label="Analytics" title="Show analytics" />
             <NavButton active={view === 'codex'} onClick={() => setView('codex')} icon={<BookOpen size={12} />} label="Codex" title="Browse official game data (items, recipes, ships, facilities, skills)" />
           </div>
@@ -288,6 +290,8 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
             />
           ) : view === 'intel' ? (
             <IntelDashboard />
+          ) : view === 'faction' ? (
+            <FactionPane />
           ) : view === 'analytics' ? (
             <AnalyticsPane
               profiles={profiles}

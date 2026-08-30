@@ -17,6 +17,7 @@ import playbook from './routes/playbook'
 import analytics from './routes/analytics'
 import schedules from './routes/schedules'
 import codexRoutes from './routes/codex'
+import factionRoutes from './routes/faction'
 import { startScheduler } from './lib/scheduler'
 import { pruneOldData, backfillSystemsFromStations } from './lib/db'
 import { startCatalogService } from './lib/catalog'
@@ -70,6 +71,7 @@ app.route('/api/inventory', inventory)
 app.route('/api/analytics', analytics)
 app.route('/api/schedules', schedules)
 app.route('/api/codex', codexRoutes)
+app.route('/api/faction', factionRoutes)
 
 // Health check
 app.get('/api/health', (c) => c.json({ ok: true }))
