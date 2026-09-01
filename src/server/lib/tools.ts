@@ -950,6 +950,24 @@ export async function executeTool(
     commandArgs = Object.keys(args).length > 0 ? args : undefined
   }
 
+  // Strip model control tokens that leaked into the command name. gpt-oss
+  // models speak the harmony format, whose channel markers (`<|channel|>`,
+  // `<|start|>`, `<|message|>`, ...) are supposed to be consumed by the
+  // server's parser. Local OpenAI-compatible servers occasionally emit one
+  // inside a tool call instead, producing names like
+  // `facility<|channel|>commentary` that can only ever come back as
+  // `unknown_command` (observed on custom/gpt-oss-120b-MXFP4-Q8: 1 of 47 calls).
+  // The intent is unambiguous — everything from the first marker on is
+  // transcript, not command — so recover the turn rather than spend it on a
+  // guaranteed error.
+  if (command.includes('<|')) {
+    const cleaned = command.slice(0, command.indexOf('<|')).trim()
+    if (cleaned) {
+      ctx.log('system', `Stripped model control tokens from command name: "${command}" -> "${cleaned}"`)
+      command = cleaned
+    }
+  }
+
   // Auto-correct common parameter mistakes to reduce wasted API calls
   if (commandArgs) {
     const bare = command.replace(/^spacemolt_/, '')
