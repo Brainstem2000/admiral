@@ -435,7 +435,7 @@ export class HttpV2Connection implements GameConnection {
           if (data.structuredContent !== undefined && data.structuredContent !== null) {
             data.result = data.structuredContent
           }
-          this.harvestLocalState(data as CommandResult)
+          this.harvestLocalState(data as CommandResult, command)
           return data as CommandResult
         }
       }
@@ -456,7 +456,7 @@ export class HttpV2Connection implements GameConnection {
     // v2 returns { result: <rendered text>, structuredContent: <JSON> }
     // Keep both: result (text) goes to the LLM, structuredContent is used
     // for cacheGameState and player data display.
-    this.harvestLocalState(data as CommandResult)
+    this.harvestLocalState(data as CommandResult, command)
     return data as CommandResult
   }
 
@@ -475,7 +475,16 @@ export class HttpV2Connection implements GameConnection {
     return this.localState && this.localState.player ? this.localState : null
   }
 
-  private harvestLocalState(res: CommandResult): void {
+  /** Commands that move the ship. Their responses do NOT reliably carry a
+   *  `location` object, so a passively-harvested cache keeps reporting the
+   *  system the agent LEFT. Observed 2026-09-01: Morg'Thar's injected prompt
+   *  said `iron_reach / the_motherlode` while he was actually at Glenhaven —
+   *  and the prompt tells him "do NOT call get_status ... already injected",
+   *  so he had no way to notice. Drop the stale location on movement and let
+   *  the loop's periodic get_status refill it. */
+  private static readonly MOVEMENT_COMMANDS = /(?:^|_)(?:travel|jump|dock|undock|goto_system|warp|move|land|depart)$/
+
+  private harvestLocalState(res: CommandResult, command?: string): void {
     const data = (res.structuredContent ?? res.result) as Record<string, unknown> | undefined
     if (!data || typeof data !== 'object' || Array.isArray(data)) return
     const has = (k: string) => data[k] !== undefined && data[k] !== null && typeof data[k] === 'object'
@@ -497,6 +506,10 @@ export class HttpV2Connection implements GameConnection {
     }
     if (has('ship')) cur.ship = data.ship
     if (has('location')) cur.location = data.location
+    else if (command) {
+      const bare = command.replace(/^spacemolt_/, '')
+      if (HttpV2Connection.MOVEMENT_COMMANDS.test(bare)) delete cur.location
+    }
     if (has('cargo')) cur.cargo = data.cargo
     this.localState = cur
   }
