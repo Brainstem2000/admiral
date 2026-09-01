@@ -2914,3 +2914,88 @@ export function getIntelDashboard(): Record<string, unknown> {
   const board = [...merged.values()].sort((a, b) => b.last_24h - a.last_24h || b.total - a.total).slice(0, 15)
   return { coverage, fresh, feed, leaderboard: board, generated_at: new Date().toISOString() }
 }
+
+// --- Navigation intel for the situational briefing ---
+
+export interface NavIntelSystem {
+  system_id: string
+  empire: string | null
+  has_station: number
+  station_services: string | null
+  police_level: number | null
+  poi_count: number | null
+  danger: string | null
+  pirate_pois: string | null
+  wrecks: number
+}
+
+/**
+ * What the FLEET already knows about the system an agent is in and everything
+ * one jump from it.
+ *
+ * Admiral has collected 500+ systems, 1000+ links, killzones, wrecks and danger
+ * grades for months — and none of it reached an agent prompt, so agents flew
+ * blind. Morg'Thar (2026-09-01) burned 24 of 44 tool calls on navigation across
+ * half an hour, bouncing horizon -> distant_light -> horizon -> first_step
+ * looking for somewhere to dock. BOTH horizon and distant_light have stations
+ * with missions, refuel and repair. He had already been to them and left,
+ * because nothing told him what was there. Fuel went 296 -> 132 for no gain.
+ *
+ * Scoped to current system + direct neighbours ON PURPOSE: that is the decision
+ * an agent actually faces ("where do I go next"), and it bounds the injection at
+ * a handful of rows. Dumping the whole map would blow the prompt — the fleet
+ * order incident (200k+ token prompts) is the precedent.
+ */
+export function getNavIntel(systemId: string, maxNeighbours = 8): {
+  current: NavIntelSystem | null
+  neighbours: NavIntelSystem[]
+} {
+  const d = getDb()
+  if (!systemId) return { current: null, neighbours: [] }
+
+  const today = new Date().toISOString().slice(0, 10)
+  const enrich = (row: Record<string, unknown> | null): NavIntelSystem | null => {
+    if (!row) return null
+    const sid = String(row.system_id)
+    const danger = d.query(
+      `SELECT grade FROM system_danger_daily WHERE system_id = ? ORDER BY day DESC LIMIT 1`,
+    ).get(sid) as { grade?: string } | null
+    const kz = d.query(
+      `SELECT poi_name FROM fleet_intel_killzones WHERE system_id = ? AND pirate_seen > 0 LIMIT 3`,
+    ).all(sid) as Array<{ poi_name: string }>
+    const wr = d.query(
+      `SELECT COUNT(*) c FROM fleet_intel_wrecks WHERE system_id = ?
+       AND (expires_at IS NULL OR expires_at > ?)`,
+    ).get(sid, today) as { c: number }
+    return {
+      system_id: sid,
+      empire: (row.empire as string) ?? null,
+      has_station: Number(row.has_station ?? 0),
+      station_services: (row.station_services as string) ?? null,
+      police_level: row.police_level === null || row.police_level === undefined ? null : Number(row.police_level),
+      poi_count: row.poi_count === null || row.poi_count === undefined ? null : Number(row.poi_count),
+      danger: danger?.grade ?? null,
+      pirate_pois: kz.length ? kz.map(k => k.poi_name).filter(Boolean).join(', ') : null,
+      wrecks: wr?.c ?? 0,
+    }
+  }
+
+  const cols = `system_id, empire, has_station, station_services, police_level, poi_count`
+  const cur = d.query(`SELECT ${cols} FROM fleet_intel_systems WHERE system_id = ?`).get(systemId) as Record<string, unknown> | null
+
+  const linked = d.query(
+    `SELECT DISTINCT CASE WHEN a = ? THEN b ELSE a END AS s
+     FROM system_links WHERE a = ? OR b = ? LIMIT ?`,
+  ).all(systemId, systemId, systemId, maxNeighbours) as Array<{ s: string }>
+
+  const neighbours: NavIntelSystem[] = []
+  for (const { s } of linked) {
+    const row = d.query(`SELECT ${cols} FROM fleet_intel_systems WHERE system_id = ?`).get(s) as Record<string, unknown> | null
+    const e = enrich(row ?? { system_id: s })
+    if (e) neighbours.push(e)
+  }
+  // Somewhere you can dock beats somewhere you cannot, then safer first.
+  neighbours.sort((a, b) => (b.has_station - a.has_station) || ((b.police_level ?? 0) - (a.police_level ?? 0)))
+
+  return { current: enrich(cur), neighbours }
+}

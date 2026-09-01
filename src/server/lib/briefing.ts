@@ -7,7 +7,7 @@
  * Kill switch: preference "situational_briefing" = "off" disables injection.
  */
 import type { GameConnection, CommandResult } from './connections/interface'
-import { listObligations, getProfile, listPlaybook, getStorageSummaryForProfile } from './db'
+import { listObligations, getProfile, listPlaybook, getStorageSummaryForProfile, getNavIntel } from './db'
 import { galaxyMarketLines, directiveMarketLines } from './galaxy-market'
 
 const REFRESH_INTERVAL = 60_000 // 60 seconds
@@ -364,6 +364,41 @@ export function buildSituationalBriefing(profileId: string): string {
       : /prospector|explorer/i.test(name) ? 'explorer' : 'all'
     const entries = listPlaybook(role).slice(0, 12)
     if (entries.length > 0) {
+      // == FLEET INTEL ==
+      // Everything the fleet has learned about where the agent is standing and
+      // where it can go next. Admiral has held 500+ systems, 1000+ links,
+      // killzones, wrecks and danger grades for months without ANY of it
+      // reaching a prompt, so agents rediscovered the map by flying into it.
+      // Scoped to current + neighbours so it stays a handful of lines.
+      {
+        const { system: sysNow } = readLocation(gs)
+        const sysId = String(sysNow || '').toLowerCase().replace(/\s+/g, '_')
+        if (sysId) {
+          const nav = getNavIntel(sysId)
+          const fmt = (n: { system_id: string; empire: string | null; has_station: number; station_services: string | null; police_level: number | null; danger: string | null; pirate_pois: string | null; wrecks: number }) => {
+            const svc = String(n.station_services || '')
+            const bits: string[] = []
+            if (n.has_station) {
+              const useful = ['missions', 'refuel', 'repair', 'market', 'shipyard'].filter(k => svc.includes(k))
+              bits.push(useful.length ? `STATION(${useful.join('/')})` : 'STATION')
+            } else bits.push('no station')
+            if (n.danger) bits.push(n.danger)
+            if (n.police_level !== null) bits.push(`police ${n.police_level}`)
+            if (n.pirate_pois) bits.push(`PIRATES: ${n.pirate_pois}`)
+            if (n.wrecks > 0) bits.push(`${n.wrecks} wreck(s)`)
+            return `  ${n.system_id}${n.empire ? ` [${n.empire}]` : ''} — ${bits.join(' · ')}`
+          }
+          const navLines: string[] = []
+          if (nav.current) navLines.push(fmt(nav.current))
+          for (const n of nav.neighbours) navLines.push(fmt(n))
+          if (navLines.length > 0) {
+            lines.push('== FLEET INTEL: HERE AND ONE JUMP OUT (what the fleet already knows — do NOT re-scout this) ==')
+            lines.push(...navLines)
+            lines.push('  (STATION = you can dock there. Fly to one of these rather than guessing.)')
+          }
+        }
+      }
+
       lines.push('== FLEET PLAYBOOK (proven plays — LAW holds until a game patch; TERRAIN/PATTERN decay, check the age) ==')
       for (const e of entries) {
         const ageDays = Math.floor((Date.now() - Date.parse(e.last_verified.replace(' ', 'T') + 'Z')) / 86_400_000)
