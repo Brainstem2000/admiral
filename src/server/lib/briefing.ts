@@ -55,28 +55,44 @@ export async function refreshBriefingData(profileId: string, conn: GameConnectio
   const localState = conn.getLocalState?.() ?? null
 
   let statusRaw: unknown, cargoRaw: unknown, nearbyRaw: unknown, systemRaw: unknown, missionsRaw: unknown
+
+  let shipRaw: unknown = null
   if (localState) {
     statusRaw = localState
     cargoRaw = localState.cargo ?? null
     // lib state's missions section is {active: [...]} — unwrap to the array the parser expects
     const ms = localState.missions as Record<string, unknown> | unknown[] | null | undefined
     missionsRaw = Array.isArray(ms) ? ms : (ms && typeof ms === 'object' && Array.isArray((ms as Record<string, unknown>).active)) ? (ms as Record<string, unknown>).active : null
-    ;[nearbyRaw, systemRaw] = await Promise.all([
+    ;[nearbyRaw, systemRaw, shipRaw] = await Promise.all([
       safeQuery(conn, 'get_nearby'),
       safeQuery(conn, 'get_system'),
+      // get_status carries no `modules` array, so the weapon loadout has to
+      // come from get_ship. Free query, no game tick.
+      safeQuery(conn, 'get_ship'),
     ])
   } else {
     // Run queries in parallel — these are all free query commands
-    ;[statusRaw, cargoRaw, nearbyRaw, systemRaw, missionsRaw] = await Promise.all([
+    ;[statusRaw, cargoRaw, nearbyRaw, systemRaw, missionsRaw, shipRaw] = await Promise.all([
       safeQuery(conn, 'get_status'),
       safeQuery(conn, 'get_cargo'),
       safeQuery(conn, 'get_nearby'),
       safeQuery(conn, 'get_system'),
       safeQuery(conn, 'get_active_missions'),
+      safeQuery(conn, 'get_ship'),
     ])
   }
 
   if (statusRaw && typeof statusRaw === 'object') cache.status = statusRaw as Record<string, unknown>
+  // Graft the module list from get_ship onto the cached ship object — the
+  // renderer reads ship.modules, and get_status never provides it.
+  if (shipRaw && typeof shipRaw === 'object' && cache.status) {
+    const sr = shipRaw as Record<string, unknown>
+    const mods = sr.modules ?? (sr.ship as Record<string, unknown> | undefined)?.modules
+    if (Array.isArray(mods)) {
+      const shipObj = (cache.status.ship as Record<string, unknown> | undefined) ?? {}
+      cache.status.ship = { ...shipObj, modules: mods }
+    }
+  }
   if (Array.isArray(cargoRaw)) cache.cargo = cargoRaw
   else if (cargoRaw && typeof cargoRaw === 'object' && 'cargo' in (cargoRaw as Record<string, unknown>)) {
     cache.cargo = (cargoRaw as Record<string, unknown>).cargo as unknown[]
@@ -246,6 +262,43 @@ export function buildSituationalBriefing(profileId: string): string {
     const cargoUsed = ship.cargo_used ?? '?'
     const cargoMax = ship.cargo_capacity ?? ship.max_cargo ?? '?'
     lines.push(`Ship: ${shipClass} | Cargo: ${cargoUsed}/${cargoMax}`)
+
+    // Weapon loadout with per-gun ammo. Without this the agent re-derives its
+    // own armament from get_ship every turn and gets it wrong: Morg'Thar
+    // (2026-09-01) burned ~11 tool rounds guessing which of seven near-identical
+    // weapon ids to reload, tried `id` and `weapon_instance_id` alternately, and
+    // was stocking standard_rounds_box (feeds ONE gun, already full at 999/1000)
+    // while six of his seven weapons fire ferrous_slug_case. A ship cannot fight
+    // on ammo it does not carry, so the loadout belongs in the briefing next to
+    // the cargo it has to match — at zero token cost, like the rest of it.
+    const modules = ship.modules
+    if (Array.isArray(modules)) {
+      const weapons = (modules as Array<Record<string, unknown>>).filter(
+        m => m.slot === 'weapon' || m.type === 'weapon' || m.ammo_type !== undefined || m.loaded_ammo_id !== undefined,
+      )
+      if (weapons.length > 0) {
+        // Group identical guns so seven weapons read as three lines, not seven.
+        const byKind = new Map<string, { n: number; ammo: string; lo: number; hi: number; ids: string[] }>()
+        for (const w of weapons) {
+          const kind = String(w.type ?? w.name ?? w.module_id ?? 'weapon')
+          const ammo = String(w.loaded_ammo_id ?? w.loaded_ammo_name ?? w.ammo_type ?? 'none')
+          const cur = Number(w.current_ammo ?? w.ammo ?? 0) || 0
+          const id = String(w.id ?? w.instance_id ?? '')
+          const key = `${kind}|${ammo}`
+          const e = byKind.get(key) ?? { n: 0, ammo, lo: Infinity, hi: 0, ids: [] }
+          e.n++; e.lo = Math.min(e.lo, cur); e.hi = Math.max(e.hi, cur)
+          if (id) e.ids.push(id)
+          byKind.set(key, e)
+        }
+        lines.push('Weapons (reload uses these ids):')
+        for (const [key, e] of byKind) {
+          const kind = key.split('|')[0]
+          const count = e.n > 1 ? ` x${e.n}` : ''
+          const ammoRange = e.lo === e.hi ? `${e.lo}` : `${e.lo}-${e.hi}`
+          lines.push(`  ${kind}${count} -> ${e.ammo} (loaded ${ammoRange}) ids: ${e.ids.join(', ')}`)
+        }
+      }
+    }
   }
 
   // Cargo contents
