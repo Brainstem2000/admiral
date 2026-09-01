@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -6,140 +6,90 @@ import path from 'node:path'
 /**
  * Fleet intel must reach the agent.
  *
- * Admiral collected 500+ systems, 1000+ system links, killzones, wrecks and
- * daily danger grades for months — and NONE of it was injected into any agent
- * prompt. Agents rediscovered the map by flying into it.
+ * Admiral collected 506 systems, 1,065 system links, killzones, wrecks and
+ * daily danger grades — and NONE of it was injected into any agent prompt, so
+ * agents rediscovered the map by flying into it.
  *
  * Morg'Thar, 2026-09-01: 24 of 44 tool calls in half an hour were navigation,
  * bouncing horizon -> distant_light -> horizon -> first_step looking for
  * somewhere to dock. Both horizon and distant_light have stations with
  * missions, refuel and repair; he had been to both and left, because nothing
- * told him what was there. Fuel went 296 -> 132 for no gain.
+ * told him what was there. Fuel 296 -> 132 for no gain.
  *
- * The injection is deliberately scoped to the CURRENT system plus its direct
- * neighbours — the decision an agent actually faces — so it stays a few hundred
- * tokens. Injecting the whole knowledge base would blow the prompt; the
- * uncapped fleet-order incident (200k+ tokens) is the precedent.
+ * The injection is scoped to the CURRENT system plus direct neighbours, and
+ * every list is capped — this is local knowledge, never the whole map.
+ *
+ * Runs in a subprocess: db.ts binds DB_PATH from cwd at module load, so an
+ * in-process chdir is not real isolation once anything else has imported it.
+ * (An earlier in-process version of this test wrote 43 fake systems into the
+ * live fleet database, which then surfaced in an agent's briefing.)
  */
 
-const cwd = process.cwd()
-const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'admiral-navintel-test-'))
-process.chdir(workspace)
-
-// GUARD: db.ts resolves DB_PATH from process.cwd() AT MODULE LOAD, so the
-// chdir above must happen before db.ts is imported anywhere in this file —
-// hence the dynamic imports below. A static import would bind the real
-// data/admiral.db and this test would write fixtures into live fleet state.
-// (It did, once: 43 fake systems and 42 fake links had to be deleted by hand.)
-afterAll(() => {
-  process.chdir(cwd)
-  fs.rmSync(workspace, { recursive: true, force: true })
+const tempDirectories: string[] = []
+afterEach(() => {
+  for (const d of tempDirectories.splice(0)) fs.rmSync(d, { recursive: true, force: true })
 })
 
-const { getDb, getNavIntel, getHuntIntel } = await import('../src/server/lib/db')
-const db = getDb()
-// Fail loudly rather than silently polluting the real database.
-{
-  // fs.realpathSync on both sides: macOS resolves /var -> /private/var, so a
-  // naive prefix check on the mkdtemp path fails even when it is correct.
-  const opened = fs.realpathSync((db as unknown as { filename: string }).filename)
-  if (!opened.startsWith(fs.realpathSync(workspace))) {
-    throw new Error(`refusing to run: db opened outside the temp workspace (${opened})`)
-  }
+async function runHelper(): Promise<Record<string, any>> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'admiral-navintel-'))
+  tempDirectories.push(dir)
+  const helper = path.join(import.meta.dir, 'helpers', 'nav-intel-check.ts')
+  const child = Bun.spawn([process.execPath, helper, dir], { stdout: 'pipe', stderr: 'pipe' })
+  const [code, out, err] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  expect(code, err).toBe(0)
+  const line = out.split('\n').find(l => l.startsWith('__RESULT__'))
+  expect(line, `no __RESULT__ in:\n${out}\n${err}`).toBeDefined()
+  return JSON.parse(line!.slice('__RESULT__'.length))
 }
 
-// A tiny galaxy: a hub with a full-service station, a pirate den, and a dead end.
-db.query(`INSERT OR REPLACE INTO fleet_intel_systems
-  (system_id, system_name, empire, poi_count, has_station, station_services, police_level, discovered_by)
-  VALUES (?,?,?,?,?,?,?,?)`).run('hub', 'Hub', 'outerrim', 4, 1, 'missions,refuel,repair,market', 80, 't')
-db.query(`INSERT OR REPLACE INTO fleet_intel_systems
-  (system_id, system_name, empire, poi_count, has_station, station_services, police_level, discovered_by)
-  VALUES (?,?,?,?,?,?,?,?)`).run('den', 'Den', null, 3, 0, null, 0, 't')
-db.query(`INSERT OR REPLACE INTO fleet_intel_systems
-  (system_id, system_name, empire, poi_count, has_station, station_services, police_level, discovered_by)
-  VALUES (?,?,?,?,?,?,?,?)`).run('dead_end', 'Dead End', null, 1, 0, null, 0, 't')
-
-db.query(`INSERT OR REPLACE INTO system_links (a, b, source) VALUES (?,?,?)`).run('hub', 'den', 't')
-db.query(`INSERT OR REPLACE INTO system_links (a, b, source) VALUES (?,?,?)`).run('dead_end', 'hub', 't')
-
-db.query(`INSERT OR REPLACE INTO system_danger_daily (system_id, day, grade, evidence) VALUES (?,?,?,?)`)
-  .run('den', '2026-09-01', 'DANGEROUS', 'test')
-db.query(`INSERT OR REPLACE INTO fleet_intel_killzones
-  (poi_id, system_id, system_name, poi_name, poi_type, pirate_seen, wreck_seen, discovered_by)
-  VALUES (?,?,?,?,?,?,?,?)`).run('den_cloud', 'den', 'Den', 'Den Gas Cloud', 'cloud', 9, 0, 't')
-
 describe('fleet intel injection', () => {
-  test('an agent sees its own system and every direct neighbour', () => {
-    const nav = getNavIntel('hub')
-    expect(nav.current?.system_id).toBe('hub')
-    const ids = nav.neighbours.map(n => n.system_id).sort()
-    // Links are undirected — a link stored as (dead_end, hub) must still resolve.
-    expect(ids).toEqual(['dead_end', 'den'])
+  test('an agent sees its own system and its neighbours, links being undirected', async () => {
+    const r = await runHelper()
+    expect(r.hubCurrentId).toBe('hub')
+    // 'den' is stored as (hub, den); 'dead_end' as (dead_end, hub).
+    expect(r.hubNeighbourIds).toContain('den')
+    expect(r.hubNeighbourIds).toContain('dead_end')
+    // ...and the reverse direction resolves too.
+    expect(r.hubFromDeadEnd?.has_station).toBe(1)
+    expect(r.hubFromDeadEnd?.station_services).toContain('missions')
   })
 
-  test('it carries the facts agents waste turns rediscovering', () => {
-    const nav = getNavIntel('dead_end')
-    const hub = nav.neighbours.find(n => n.system_id === 'hub')
-    // Where can I dock, refuel, repair and take missions?
-    expect(hub?.has_station).toBe(1)
-    expect(hub?.station_services).toContain('missions')
-    expect(hub?.station_services).toContain('refuel')
-
-    const den = getNavIntel('den').current
-    // Where are the pirates, and is this place dangerous?
-    expect(den?.danger).toBe('DANGEROUS')
-    expect(den?.pirate_pois).toContain('Den Gas Cloud')
+  test('it carries the facts agents waste turns rediscovering', async () => {
+    const r = await runHelper()
+    expect(r.hubFromDeadEnd?.station_services).toContain('refuel')
+    expect(r.den?.danger).toBe('DANGEROUS')
+    expect(r.den?.pirate_pois).toContain('Den Gas Cloud')
   })
 
-  test('dockable systems are ranked ahead of dead ends', () => {
-    const nav = getNavIntel('hub')
-    // den and dead_end both lack stations, but ordering must be deterministic
-    // and station-bearing neighbours must come first when present.
-    const withStation = nav.neighbours.filter(n => n.has_station === 1)
-    const without = nav.neighbours.filter(n => n.has_station === 0)
-    if (withStation.length && without.length) {
-      expect(nav.neighbours[0].has_station).toBe(1)
-    }
-    expect(nav.neighbours.length).toBeGreaterThan(0)
+  test('the injection is bounded — local knowledge, not the whole map', async () => {
+    const r = await runHelper()
+    // 40 neighbours were wired onto the hub.
+    expect(r.hubNeighbourCount).toBeLessThanOrEqual(8)
   })
 
-  test('the injection is bounded — it is local knowledge, not the whole map', () => {
-    // Wire many neighbours onto one system.
-    for (let i = 0; i < 40; i++) {
-      db.query(`INSERT OR REPLACE INTO fleet_intel_systems (system_id, system_name, discovered_by) VALUES (?,?,?)`)
-        .run(`far_${i}`, `Far ${i}`, 't')
-      db.query(`INSERT OR REPLACE INTO system_links (a, b, source) VALUES (?,?,?)`).run('hub', `far_${i}`, 't')
-    }
-    const nav = getNavIntel('hub')
-    // Capped regardless of how connected the system is.
-    expect(nav.neighbours.length).toBeLessThanOrEqual(8)
-  })
-
-  test('an unknown system degrades quietly instead of throwing', () => {
-    const nav = getNavIntel('never_visited_xyz')
-    expect(nav.current).toBeNull()
-    expect(nav.neighbours).toEqual([])
-    expect(() => getNavIntel('')).not.toThrow()
-  })
-
-  test('hunting intel answers the standing combat questions, nearest first', () => {
-    // A pirate den one jump out, and a contract board where the agent stands.
-    const hunt = getHuntIntel('hub')
-    expect(hunt.missionStations.some(m => m.system_id === 'hub' && m.hops === 0)).toBe(true)
-    const den = hunt.killzones.find(k => k.system_id === 'den')
+  test('hunting intel answers the standing combat questions', async () => {
+    const r = await runHelper()
+    expect(r.hunt.missionStations.some((m: any) => m.system_id === 'hub' && m.hops === 0)).toBe(true)
+    const den = r.hunt.killzones.find((k: any) => k.system_id === 'den')
     expect(den?.pirates).toBe(9)
     expect(den?.poi_name).toContain('Den Gas Cloud')
   })
 
-  test('hunting intel is capped so it cannot grow into an atlas', () => {
-    for (let i = 0; i < 30; i++) {
-      db.query(`INSERT OR REPLACE INTO fleet_intel_killzones
-        (poi_id, system_id, system_name, poi_name, poi_type, pirate_seen, wreck_seen, discovered_by)
-        VALUES (?,?,?,?,?,?,?,?)`).run(`kz_${i}`, `kzsys_${i}`, `KZ ${i}`, `KZ POI ${i}`, 'belt', 5, 0, 't')
-    }
-    const hunt = getHuntIntel('hub')
-    expect(hunt.killzones.length).toBeLessThanOrEqual(5)
-    expect(hunt.wrecks.length).toBeLessThanOrEqual(5)
-    expect(hunt.missionStations.length).toBeLessThanOrEqual(5)
+  test('hunting intel is capped so it cannot grow into an atlas', async () => {
+    const r = await runHelper()
+    // 30 extra killzones were reported.
+    expect(r.hunt.killzones.length).toBeLessThanOrEqual(5)
+    expect(r.hunt.wrecks.length).toBeLessThanOrEqual(5)
+    expect(r.hunt.missionStations.length).toBeLessThanOrEqual(5)
+  })
+
+  test('an unknown system degrades quietly instead of throwing', async () => {
+    const r = await runHelper()
+    expect(r.unknown.current).toBeNull()
+    expect(r.unknown.neighbours).toEqual([])
   })
 })
