@@ -95,6 +95,21 @@ src/shared/types.ts shared TS interfaces
   local memory bandwidth and get `LOCAL_LLM_TIMEOUT_MS` (300s) instead. Sanity-check
   any timeout against `maxTokens / measured tok-per-s`: if the budget cannot fit the
   token allowance, the model is guaranteed to be killed mid-generation.
+- **State the agent needs must be INJECTED, never left to re-derivation.** The
+  execution prompt tells the agent not to re-query injected fields, so anything
+  missing or stale is something it will guess at — confidently, every turn. Three
+  instances in one day on Morg'Thar (2026-09-01): a stale `location` in the
+  http_v2 cache put his prompt in `iron_reach` while he was at Glenhaven; an
+  absent weapon loadout had him burn ~11 tool rounds guessing which of seven
+  near-identical weapon ids to reload; and a wrong ammo fact in his directive had
+  him hauling 89 boxes for the one gun that was already full while six guns ran
+  dry. When an agent repeatedly re-queries the same thing, the missing briefing
+  field is the bug — not the agent.
+- **Enumerate the whole list before writing a fact into a directive.** The
+  "your ammo is standard_rounds_box" line came from reading ONE
+  `loaded_ammo_name` off a truncated `get_ship`. The ship had seven weapons and
+  two ammo types. A directive fact is injected into every prompt and outranks
+  what the game is telling the agent, so a wrong one is worse than none.
 - **All local agents must share ONE model.** oMLX (the local MLX server) keeps a
   single model resident and swaps on demand, so two different local models across
   the fleet thrash: measured 2026-09-01, alternating gpt-oss-120b (59GB) and
