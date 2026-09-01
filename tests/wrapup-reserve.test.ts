@@ -128,4 +128,71 @@ describe('wrap-up reserve', () => {
     // reserve round is not spent once the state write has happened.
     expect(round).toBe(5)
   }, 30_000)
+
+  test('the reserve restricts the toolset to state writes, and restores it after', async () => {
+    const logs: Array<[string, string]> = []
+    let round = 0
+    const toolsSeenPerRound: string[][] = []
+    const c = ctx()
+    c.tools = [
+      { name: 'game', description: '', parameters: {} },
+      { name: 'update_todo', description: '', parameters: {} },
+      { name: 'update_memory', description: '', parameters: {} },
+      { name: 'codex', description: '', parameters: {} },
+    ]
+    const originalTools = c.tools
+
+    const { runAgentTurn } = await loadLoop(async (_m: any, context: any) => {
+      round++
+      toolsSeenPerRound.push(context.tools.map((t: any) => t.name))
+      return assistant([queryCall(`c${round}`)])
+    })
+
+    await runAgentTurn(
+      model(), c, stubConnection(), 'p-wrapup-4', 'Test',
+      ((t: string, s: string) => { logs.push([t, s]) }) as any,
+      { value: '' } as any, { value: '' } as any,
+      { maxToolRounds: 4 },
+    )
+
+    // Normal rounds see everything.
+    expect(toolsSeenPerRound[0]).toContain('game')
+    // Once the reserve engages, querying is not an option the model HAS —
+    // this is the part that does not depend on it choosing to comply.
+    const reserveRound = toolsSeenPerRound[toolsSeenPerRound.length - 1]
+    expect(reserveRound).not.toContain('game')
+    expect(reserveRound).not.toContain('codex')
+    expect(reserveRound.sort()).toEqual(['update_memory', 'update_todo'])
+
+    // The context outlives the turn — the full toolset must come back.
+    expect(c.tools).toBe(originalTools)
+    expect(c.tools.map((t: any) => t.name)).toContain('game')
+  }, 30_000)
+
+  test('the toolset is restored even when the turn exits early', async () => {
+    let round = 0
+    const c = ctx()
+    c.tools = [
+      { name: 'game', description: '', parameters: {} },
+      { name: 'update_todo', description: '', parameters: {} },
+      { name: 'update_memory', description: '', parameters: {} },
+    ]
+
+    const { runAgentTurn } = await loadLoop(async () => {
+      round++
+      return assistant([queryCall(`c${round}`)])
+    })
+
+    // Connection reports dead partway through, forcing an early return from
+    // inside the reserve window.
+    let calls = 0
+    await runAgentTurn(
+      model(), c, stubConnection(), 'p-wrapup-5', 'Test',
+      (() => {}) as any,
+      { value: '' } as any, { value: '' } as any,
+      { maxToolRounds: 4, isConnectionDown: () => ++calls > 4 },
+    )
+
+    expect(c.tools.map((t: any) => t.name)).toContain('game')
+  }, 30_000)
 })

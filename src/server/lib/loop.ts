@@ -14,6 +14,8 @@ const DEFAULT_MAX_TOOL_ROUNDS = 12
  *  guillotined at the cap without writing anything. Not general-purpose
  *  budget — see the wrap-up reserve in runAgentTurn. */
 const WRAPUP_RESERVE_ROUNDS = 2
+/** The only tools available during the wrap-up reserve. */
+const STATE_WRITE_TOOLS = new Set(['update_todo', 'update_memory'])
 // The upstream occasionally answers with a non-JSON body ("JSON Parse error: Unable to
 // parse JSON string") or an empty one. It is transient and self-heals, but 3 retries at a
 // 5s base all land inside ~35s, so a blip lasting a minute burned the whole turn — Morg'Thar
@@ -87,7 +89,11 @@ export async function runAgentTurn(
   // reserve below.
   let wroteState = false
   let wrapUpInjected = false
+  // Original toolset, stashed while the wrap-up reserve narrows it. The
+  // context object outlives the turn, so this must always be put back.
+  let restoreTools: typeof context.tools | null = null
 
+  try {
   while (rounds < maxRounds + WRAPUP_RESERVE_ROUNDS) {
     // The reserve is not general-purpose budget: once past maxRounds the turn
     // is over except for recording what happened. If the agent has already
@@ -303,26 +309,36 @@ export async function runAgentTurn(
     // 4 turns, 3 of them hitting the cap, ZERO state writes — his todo, his
     // memory and the live game disagreed on his location three ways.
     //
-    // So the last rounds are reserved for persistence rather than left to
-    // chance: warn on the final normal round, and if the agent still has not
-    // written anything, allow it a bounded reserve to do so. The note follows
-    // the loop-breakers' idiom — perturbing the context is what actually
-    // changes the next completion.
+    // Two parts, and the second is why this is not merely a prompt tweak:
+    //   1. the loop is allowed a bounded reserve past the cap, so the chance
+    //      to persist EXISTS at all (at `maxRounds` the loop simply exited);
+    //   2. during the reserve the toolset is REPLACED with the state-writing
+    //      tools only, so persisting is the sole legal move. A note alone was
+    //      measurably not enough — one turn took the reserve, read the note
+    //      and still ended without writing.
     if (!wroteState && !wrapUpInjected && rounds >= maxRounds - 1) {
       wrapUpInjected = true
+      restoreTools = context.tools
+      context.tools = context.tools.filter(t => STATE_WRITE_TOOLS.has(t.name))
       context.messages.push({
         role: 'user',
         content:
-          `⏳ TURN ENDING — you have ${maxRounds + WRAPUP_RESERVE_ROUNDS - rounds} tool call(s) left and have not ` +
-          `recorded anything this turn. Whatever you just learned or completed is about to be LOST, and next ` +
-          `turn will start from your current TODO and memory — which are now out of date.\n\n` +
-          `Call update_todo (and update_memory if a durable fact changed) NOW. Write down what you verified, ` +
-          `what you finished, and the single next action — so the next turn resumes instead of re-deriving. ` +
-          `Do not run another query.`,
+          `⏳ TURN ENDING — you have not recorded anything this turn, so your remaining tool calls ` +
+          `are restricted to update_todo and update_memory. Everything you just learned is about to ` +
+          `be LOST: the next turn starts from the TODO and memory shown in your prompt, which are ` +
+          `now out of date.\n\n` +
+          `Write down what you verified, what you finished, and the single next action — so the next ` +
+          `turn resumes instead of re-deriving all of this.`,
         timestamp: Date.now(),
       })
-      log('system', `Wrap-up reserve: ${rounds}/${maxRounds} rounds used with no state write — prompting the agent to persist before the turn ends`)
+      log('system', `Wrap-up reserve: ${rounds}/${maxRounds} rounds used with no state write — restricting tools to update_todo/update_memory`)
     }
+  }
+  } finally {
+    // Unconditional: the turn has nine exit paths and `context` is reused by
+    // the next turn. Leaking the narrowed toolset would leave an agent able to
+    // do nothing but rewrite its TODO, forever.
+    if (restoreTools) context.tools = restoreTools
   }
 
   if (wroteState) {
