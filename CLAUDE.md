@@ -81,6 +81,15 @@ src/shared/types.ts shared TS interfaces
   response, the turn loop sees zero tool calls on round 0, scores the turn `idle`,
   and three of those trip the idle backoff, which parks the agent until a human
   nudges it. Covered by `tests/llm-abort-handling.test.ts`.
+- **A turn must never end without the agent recording state.** The prompt tells it
+  to persist *after* acting, so a turn guillotined at the tool-round cap loses
+  everything and the next turn re-derives it from a stale TODO — which is what
+  exhausts the budget, so it self-sustains. `runAgentTurn` reserves
+  `WRAPUP_RESERVE_ROUNDS` past the cap **and replaces the toolset with
+  `update_todo`/`update_memory` only** for those rounds. The tool restriction is
+  the load-bearing part: an earlier version merely *asked* the model to persist
+  and was measurably ignored. Restoration is in a `finally` — the turn has nine
+  exit paths and `context` is reused. Covered by `tests/wrapup-reserve.test.ts`.
 - **Timeouts are per-provider, not global.** `DEFAULT_LLM_TIMEOUT_MS` (90s) is a
   hosted-API figure. Local providers (`custom`/`ollama`/`lmstudio`) are bounded by
   local memory bandwidth and get `LOCAL_LLM_TIMEOUT_MS` (300s) instead. Sanity-check
