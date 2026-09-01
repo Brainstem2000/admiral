@@ -2178,6 +2178,36 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
 // guard). History of what it held and why: git log this block.
 const SELL_CARGO_ALWAYS_EXCLUDE = new Set<string>([])
 
+/** Ammunition the ship's own fitted weapons consume, read off get_ship.
+ *
+ *  sell_cargo(exclude=[]) means "sell everything sellable", and ammo is
+ *  sellable — so on 2026-09-01 Morg'Thar sold the reload supply he had bought
+ *  20 minutes earlier specifically to fight with: 30 standard_rounds_box
+ *  bought at 12cr, dumped at ~7.7cr for a 130cr LOSS, immediately before
+ *  leaving to hunt. The BoM lock did not catch it (that list is empty since
+ *  the commission closed) and the jettison gate does not cover selling.
+ *
+ *  Derived from the ship rather than hardcoded, so it is correct for any agent,
+ *  hull or ammo type without maintenance. */
+async function fittedAmmoIds(conn: GameConnection): Promise<Set<string>> {
+  const ids = new Set<string>()
+  try {
+    const resp = await conn.execute('get_ship')
+    const data = (resp.structuredContent ?? resp.result) as Record<string, unknown> | undefined
+    const modules = (data as any)?.modules ?? (data as any)?.ship?.modules
+    if (Array.isArray(modules)) {
+      for (const m of modules as Array<Record<string, unknown>>) {
+        for (const k of ['loaded_ammo_id', 'ammo_id', 'ammo_type_id', 'compatible_ammo']) {
+          const v = m[k]
+          if (typeof v === 'string' && v) ids.add(v.toLowerCase())
+          else if (Array.isArray(v)) for (const a of v) if (typeof a === 'string') ids.add(a.toLowerCase())
+        }
+      }
+    }
+  } catch { /* no ship read — fall through; the caller still applies its own excludes */ }
+  return ids
+}
+
 async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
   const narrate = makeMacroNarrator(ctx, 'sell_cargo', reason)
   const conn = ctx.connection
@@ -2185,6 +2215,12 @@ async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, r
     (Array.isArray(args.exclude) ? args.exclude : []).map((x) => String(x).toLowerCase()),
   )
   for (const locked of SELL_CARGO_ALWAYS_EXCLUDE) exclude.add(locked)
+  // Never bulk-sell the ammunition this ship's own guns fire. An agent heading
+  // out to hunt needs its reload supply more than it needs the ~8cr a box
+  // fetches. A deliberate, itemised `sell` is still allowed — this guards the
+  // "sell everything" path only.
+  const ammoIds = await fittedAmmoIds(conn)
+  for (const a of ammoIds) exclude.add(a)
   const deadline = Date.now() + 3 * 60_000
   const start = await macroReadState(conn)
   if (!start.docked) return 'MACRO ABORT: not docked — dock at a station first.'
@@ -2265,6 +2301,7 @@ async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, r
     `sell_cargo DONE${gained !== null ? `: +${gained.toLocaleString()} cr` : ''}. Wallet ${end.credits?.toLocaleString() ?? '?'} cr.`,
     sold.length ? `Sold: ${sold.join(', ')}` : 'Sold: nothing',
     skipped.length ? `Skipped (excluded): ${skipped.join(', ')}` : '',
+    ammoIds.size ? `Ammo protected (your guns fire it — sell it deliberately with \`sell\` if you really mean to): ${[...ammoIds].join(', ')}` : '',
     failed.length ? `Not sold: ${failed.join(', ')}` : '',
   ].filter(Boolean).join('\n')
 }
