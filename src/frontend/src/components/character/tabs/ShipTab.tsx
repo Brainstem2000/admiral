@@ -7,6 +7,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { Rocket, RefreshCw, Heart, Shield, Fuel, Cpu, Zap, Package, Crosshair, ShieldCheck, Wrench, TrendingUp, Sparkles } from 'lucide-react'
 import type { Profile } from '@/types'
 import { DossierCard } from '../DossierCard'
+import { DISPLAY, StatCell } from '../dossier-shared'
 
 interface UpgradeCandidate {
   id: string; name?: string
@@ -40,8 +41,6 @@ const analysisCache = new Map<string, Analysis>()
 
 function num(v: unknown): number { return typeof v === 'number' && Number.isFinite(v) ? v : 0 }
 
-const DISPLAY: React.CSSProperties = { fontFamily: '"Chakra Petch", "Arial Narrow", sans-serif' }
-
 const SLOT_META: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
   weapon: { label: 'Weapon Bays', icon: <Crosshair size={11} />, color: 'var(--smui-red)' },
   defense: { label: 'Defense Bays', icon: <ShieldCheck size={11} />, color: 'var(--primary)' },
@@ -67,15 +66,6 @@ function Bar({ icon, label, color, cur, max, suffix, flagHigh }: {
       <div className="h-2 w-full bg-border/40 overflow-hidden">
         <div className="h-full transition-all duration-300" style={{ width: `${pct}%`, background: `hsl(${barColor})` }} />
       </div>
-    </div>
-  )
-}
-
-function StatCell({ label, value, accent, hint }: { label: string; value: string; accent?: string; hint?: string }) {
-  return (
-    <div className="min-w-0" title={hint}>
-      <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-0.5" style={DISPLAY}>{label}</div>
-      <div className="text-sm font-semibold tabular-nums truncate" style={accent ? { color: `hsl(${accent})` } : undefined}>{value}</div>
     </div>
   )
 }

@@ -58,7 +58,12 @@ const saved = sqlite.query(
   'SELECT provider, model, planner_provider, planner_model, codex_executor_enabled FROM profiles WHERE id = ?'
 ).get(profile.id)
 
-console.log(JSON.stringify({
+// Prefix the payload with a sentinel. Importing the db layer runs pending
+// migrations, which log `[DB] migration vN applied: ...` to stdout — those
+// lines land ahead of this JSON and broke a bare `JSON.parse(stdout)` in the
+// caller. Marking the payload keeps the contract explicit rather than relying
+// on it happening to be the last line.
+console.log('__RESULT__' + JSON.stringify({
   history,
   saved,
   plannerThread: getCodexSession(profile.id, 'planner')?.thread_id,

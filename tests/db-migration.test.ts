@@ -27,7 +27,11 @@ describe('Codex persistence migration', () => {
     ])
 
     expect(exitCode, stderr).toBe(0)
-    const result = JSON.parse(stdout.trim())
+    // The helper marks its payload: migrations log to stdout on first import,
+    // so the JSON is not necessarily the only thing there.
+    const payload = stdout.split('\n').find(l => l.startsWith('__RESULT__'))
+    expect(payload, `no __RESULT__ line in stdout:\n${stdout}`).toBeDefined()
+    const result = JSON.parse(payload!.slice('__RESULT__'.length))
     expect(result.saved).toEqual({
       provider: 'claude-max',
       model: 'claude-sonnet-4-5',

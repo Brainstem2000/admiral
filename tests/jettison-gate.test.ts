@@ -83,9 +83,14 @@ describe('doctrine guards are shared across both command paths', () => {
     expect(checkDoctrineGuards('get_cargo', undefined, 'p1')).toBeNull()
   })
 
-  test('checkDoctrineGuards still blocks wildlife missions', async () => {
+  test('checkDoctrineGuards does NOT block wildlife missions (ban lifted 2026-08-06)', async () => {
     const { checkDoctrineGuards } = await import('../src/server/lib/tools')
-    const out = checkDoctrineGuards('accept_mission', { mission_id: 'cull_grazer_01' }, 'p1')
-    expect(out).toContain('wildlife/creature-hunt missions are banned')
+    // The wildlife/creature-hunt ban was deliberately removed: herds gather in
+    // RICH fields and thin out in mined-over ones, so the original "targets do
+    // not spawn" premise was wrong, and creature drops refine into exactly the
+    // lines the Devastator is short of (adamant_tooth -> mass drivers). The
+    // failure mode was method, not the feature, so the guidance moved to the
+    // HUNTING DOCTRINE directive block. This asserts the block stays gone.
+    expect(checkDoctrineGuards('accept_mission', { mission_id: 'cull_grazer_01' }, 'p1')).toBeNull()
   })
 })
