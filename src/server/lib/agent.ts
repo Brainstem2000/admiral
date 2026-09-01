@@ -1094,6 +1094,13 @@ You are in EXECUTION MODE — act quickly and decisively. A strategic planner pe
 - Your situation (location, wallet, cargo, missions) is shown ${stateAt} — do NOT call get_status, get_cargo, get_system, get_nearby, get_active_missions, or get_location (already injected, refreshed every 60s).
 - Fleet orders are shown ${stateAt} if any — use read_fleet_orders ONLY to accept/complete/reject, not to check inbox.
 - Execute the next unchecked action, then update the TODO to mark it done (update_todo)
+- RECORD AS YOU GO, not at the end. The moment you resolve something — a price checked, a step
+  finished, a plan ruled out — write it with update_todo (and update_memory for durable facts).
+  Your turn can end at any time; anything you have not written down is lost, and the next turn
+  restarts from the TODO and memory shown above. If they still describe a situation you have
+  already moved past, you will re-derive all of it instead of making progress.
+- Never write "re-verify this at each step" into your own TODO. Write what you VERIFIED and the
+  single next action, so the next turn can act on it directly.
 - If the TODO is empty or fully complete, take sensible default actions aligned with your directive
 - Don't overthink — the planner will handle strategy next cycle
 ` : ''}`

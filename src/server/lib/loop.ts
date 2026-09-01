@@ -10,6 +10,10 @@ import { recordLlmSpend } from './db'
 // and (pre-fix) re-firing into the cooldown gate. With the cooldown-block early-exit below, 12 is
 // ample for any real turn (place an action → exit) and stops the per-turn over-deliberation.
 const DEFAULT_MAX_TOOL_ROUNDS = 12
+/** Extra rounds granted ONLY to persist state when a turn would otherwise be
+ *  guillotined at the cap without writing anything. Not general-purpose
+ *  budget — see the wrap-up reserve in runAgentTurn. */
+const WRAPUP_RESERVE_ROUNDS = 2
 // The upstream occasionally answers with a non-JSON body ("JSON Parse error: Unable to
 // parse JSON string") or an empty one. It is transient and self-heals, but 3 retries at a
 // 5s base all land inside ~35s, so a blip lasting a minute burned the whole turn — Morg'Thar
@@ -78,8 +82,17 @@ export async function runAgentTurn(
   const summaryModel = options?.compactionModel || model
   let rounds = 0
   let connectionFailures = 0
+  // Did the agent persist anything this turn? Progress that is never written
+  // to todo/memory is progress the next turn cannot see — see the wrap-up
+  // reserve below.
+  let wroteState = false
+  let wrapUpInjected = false
 
-  while (rounds < maxRounds) {
+  while (rounds < maxRounds + WRAPUP_RESERVE_ROUNDS) {
+    // The reserve is not general-purpose budget: once past maxRounds the turn
+    // is over except for recording what happened. If the agent has already
+    // persisted (or spent the reserve without doing so), stop here.
+    if (rounds >= maxRounds && (wroteState || !wrapUpInjected)) break
     if (options?.signal?.aborted) return 'completed'
 
     // Dead-connection guard: don't spend an LLM call on a connection that is
@@ -234,6 +247,7 @@ export async function runAgentTurn(
       if (result.startsWith(ACTION_PENDING_SENTINEL)) actionPending = true
       if (result.startsWith(COOLDOWN_BLOCKED_SENTINEL)) cooldownBlocked = true
       if (result.startsWith(LOOP_FLUSH_SENTINEL)) loopFlush = true
+      if (toolCall.name === 'update_todo' || toolCall.name === 'update_memory') wroteState = true
       if (result.startsWith('Error: [connection_failed]')) connectionFailures++
       const isError = result.startsWith('Error')
       const toolResultMessage: Message = {
@@ -279,9 +293,43 @@ export async function runAgentTurn(
     }
 
     rounds++
+
+    // Wrap-up reserve. The prompt tells the agent to record progress AFTER
+    // acting ("execute the next action, then update the TODO"), so a turn
+    // guillotined at the round cap loses everything it learned — and the next
+    // turn, reading the same stale todo/memory, re-derives it from scratch.
+    // That is self-sustaining: re-derivation is what exhausts the budget in
+    // the first place. Observed on Morg'Thar 2026-09-01: 47 tool calls across
+    // 4 turns, 3 of them hitting the cap, ZERO state writes — his todo, his
+    // memory and the live game disagreed on his location three ways.
+    //
+    // So the last rounds are reserved for persistence rather than left to
+    // chance: warn on the final normal round, and if the agent still has not
+    // written anything, allow it a bounded reserve to do so. The note follows
+    // the loop-breakers' idiom — perturbing the context is what actually
+    // changes the next completion.
+    if (!wroteState && !wrapUpInjected && rounds >= maxRounds - 1) {
+      wrapUpInjected = true
+      context.messages.push({
+        role: 'user',
+        content:
+          `⏳ TURN ENDING — you have ${maxRounds + WRAPUP_RESERVE_ROUNDS - rounds} tool call(s) left and have not ` +
+          `recorded anything this turn. Whatever you just learned or completed is about to be LOST, and next ` +
+          `turn will start from your current TODO and memory — which are now out of date.\n\n` +
+          `Call update_todo (and update_memory if a durable fact changed) NOW. Write down what you verified, ` +
+          `what you finished, and the single next action — so the next turn resumes instead of re-deriving. ` +
+          `Do not run another query.`,
+        timestamp: Date.now(),
+      })
+      log('system', `Wrap-up reserve: ${rounds}/${maxRounds} rounds used with no state write — prompting the agent to persist before the turn ends`)
+    }
   }
 
-  log('system', `Reached max tool rounds (${maxRounds}), ending turn`)
+  if (wroteState) {
+    log('system', `Reached max tool rounds (${maxRounds}), ending turn`)
+  } else {
+    log('system', `Reached max tool rounds (${maxRounds}), ending turn — NO state write this turn; next turn resumes from unchanged TODO/memory`)
+  }
   return 'completed'
 }
 
