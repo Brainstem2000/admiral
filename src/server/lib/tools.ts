@@ -334,6 +334,7 @@ export function cleanupProfileToolState(profileId: string): void {
   recentFailures.delete(profileId)
   contextFlushRequests.delete(profileId)
   fuelFloorBlocks.delete(profileId)
+  lastDestinations.delete(profileId)
   const prefix = `${profileId}:`
   for (const key of queryCache.keys()) {
     if (key.startsWith(prefix)) queryCache.delete(key)
@@ -1166,6 +1167,9 @@ export async function executeTool(
   }
 
   const fmtArgs = commandArgs ? formatArgs(commandArgs) : ''
+  // Credit any real work against the current destination, so the commit gate
+  // can tell "arrived and re-routed immediately" from "worked it, now moving on".
+  noteDestinationWork(ctx.profileId, command)
   ctx.log('tool_call', `game(${command}${fmtArgs ? ', ' + fmtArgs : ''})`)
 
   // Cooldown check for action commands to prevent spam loops
@@ -1862,7 +1866,73 @@ function makeMacroNarrator(ctx: ToolContext, macro: string, reason?: string, min
   }
 }
 
+// Destination-commit gate. An agent that re-picks its destination every turn
+// travels constantly and accomplishes nothing at any of them. Morg'Thar on
+// 2026-09-01 set course for stillwater, then bharani, then the_crucible inside
+// six minutes without working a single one — and the last was a system his own
+// memory recorded as already explored and depleted. An earlier stretch bounced
+// krynn -> iron_reach -> krynn twice.
+//
+// Prose did not hold it: the directive said "PICK A DESTINATION AND COMMIT" in
+// capitals throughout, and the churn continued. So it is enforced here.
+//
+// A new destination is refused only when the agent has done NOTHING at the
+// current one — arriving and immediately re-routing. Any real work (scan,
+// market, mission, combat, mining, docking, looting) clears the gate, as does
+// simply waiting out the window. Toggle: preference `destination_gate` = 'off'.
+const lastDestinations = new Map<string, { system: string; at: number; workedSince: boolean }>()
+const DESTINATION_COMMIT_MS = 4 * 60_000
+
+/** Commands that count as actually working a system rather than passing through. */
+const WORK_COMMANDS = new Set([
+  'scan', 'get_nearby', 'get_wrecks', 'mine', 'mine_until_full', 'attack', 'loot',
+  'salvage_wreck', 'dock', 'view_market', 'analyze_market', 'buy', 'sell',
+  'accept_mission', 'complete_mission', 'get_missions', 'survey', 'salvage',
+])
+
+function noteDestinationWork(profileId: string, command: string): void {
+  const bare = command.replace(/^spacemolt_/, '')
+    .replace(/^(?:market|storage|social|intel|faction|faction_admin|salvage|catalog|ship|battle|transfer|facility|auth)_/, '')
+  if (!WORK_COMMANDS.has(bare)) return
+  const cur = lastDestinations.get(profileId)
+  if (cur) cur.workedSince = true
+}
+
+/** Returns a refusal string when the agent is re-routing without having worked
+ *  the system it just travelled to, or null to allow. */
+function checkDestinationCommit(profileId: string, target: string): string | null {
+  if (!target || getPreference('destination_gate') === 'off') return null
+  const now = Date.now()
+  const prev = lastDestinations.get(profileId)
+
+  if (prev && prev.system !== target && !prev.workedSince && now - prev.at < DESTINATION_COMMIT_MS) {
+    const secs = Math.round((now - prev.at) / 1000)
+    return (
+      `BLOCKED by Admiral doctrine: you set course for "${prev.system}" ${secs}s ago and are already ` +
+      `re-routing to "${target}" without having done anything there. Changing destination mid-plan is ` +
+      `the single biggest waste of your turns — you arrive nowhere.\n\n` +
+      `WORK THE SYSTEM YOU ARE IN FIRST: scan it, check its belts and POIs, read the mission board, ` +
+      `look at the market, engage something you can safely beat. Once you have actually done one of ` +
+      `those, you may pick a new destination. If "${prev.system}" is genuinely worthless, say so in ` +
+      `your TODO with the reason, then move on.`
+    )
+  }
+
+  if (!prev || prev.system !== target) {
+    lastDestinations.set(profileId, { system: target, at: now, workedSince: false })
+  }
+  return null
+}
+
 async function executeMacroTool(name: string, args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
+  if (name === 'goto_system') {
+    const target = String(args.target_system ?? args.system ?? '')
+    const refusal = checkDestinationCommit(ctx.profileId, target)
+    if (refusal) {
+      ctx.log('tool_result', refusal)
+      return refusal
+    }
+  }
   try {
     switch (name) {
       case 'mine_until_full': return await macroMineUntilFull(args, ctx, reason)
