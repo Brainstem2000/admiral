@@ -105,6 +105,36 @@ describe('briefing weapon loadout', () => {
     expect(b).not.toContain('crimson_berserker_plating')
   })
 
+  test('the live lib_v2 shape (module_id / type_id / generic type) still yields ids and gun names', async () => {
+    // This is the wire shape get_ship actually returns through lib_v2 — the
+    // instance id is `module_id`, the class is `type_id`, and `type` is the
+    // generic 'weapon'. The first version of this feature read `id`/`type`
+    // and shipped a briefing whose ids were blank and whose guns were all
+    // called "weapon" (Morg'Thar 2026-09-01, 74 help(reload) reads).
+    const liveShape = {
+      modules: [
+        { module_id: 'd480def5ca533c29f5dcc80a4bc0b0f6', type: 'weapon', type_id: 'fury_cannon', name: 'Fury Cannon', slot: 'weapon', ammo_type: 'autocannon', loaded_ammo_id: 'standard_rounds_box', current_ammo: 999, magazine_size: 1000 },
+        { module_id: '3b19ed4d6b53bf1e425fc569d966a9e8', type: 'weapon', type_id: 'mass_driver', name: 'Mass Driver', slot: 'weapon', ammo_type: 'railgun', loaded_ammo_id: 'ferrous_slug_case', current_ammo: 10, magazine_size: 10 },
+        { module_id: 'f2a8d2deffa723f9b11fe8347248081e', type: 'weapon', type_id: 'mass_driver', name: 'Mass Driver', slot: 'weapon', ammo_type: 'railgun', loaded_ammo_id: 'ferrous_slug_case', current_ammo: 7, magazine_size: 10 },
+        { module_id: '37c8fce7aa', type: 'defense', type_id: 'crimson_berserker_plating', name: 'Crimson Berserker Plating', slot: 'defense' },
+      ],
+    }
+    const pid = `p-brief-live-${Math.random()}`
+    clearBriefingCache(pid)
+    await refreshBriefingData(pid, stubConnection({ ship: liveShape }))
+    const b = buildSituationalBriefing(pid)
+
+    expect(b).toContain('fury_cannon')
+    expect(b).toMatch(/mass_driver x2 -> ferrous_slug_case \(loaded 7-10\/10\)/)
+    expect(b).toContain('d480def5ca533c29f5dcc80a4bc0b0f6')
+    expect(b).toContain('3b19ed4d6b53bf1e425fc569d966a9e8')
+    expect(b).toContain('f2a8d2deffa723f9b11fe8347248081e')
+    // A blank-id line is exactly the regression this guards against.
+    expect(b).not.toMatch(/ids:\s*$/m)
+    expect(b).not.toContain('crimson_berserker_plating')
+    expect(b).toContain('1/3 weapon(s) need reload')
+  })
+
   test('identical guns are grouped rather than listed seven times', async () => {
     const pid = `p-brief-group-${Math.random()}`
     clearBriefingCache(pid)
@@ -127,5 +157,22 @@ describe('briefing weapon loadout', () => {
     expect(b).not.toContain('Weapons')
     // ...but the rest of the briefing still renders.
     expect(b).toContain('crimson_devastator')
+  })
+
+  test('full magazines produce an explicit combat-ready verdict', async () => {
+    const fullShip = {
+      modules: [
+        { module_id: 'fury', type: 'weapon', type_id: 'fury_cannon', slot: 'weapon', loaded_ammo_id: 'standard_rounds_box', current_ammo: 999, magazine_size: 1000 },
+        { module_id: 'rail-a', type: 'weapon', type_id: 'mass_driver', slot: 'weapon', loaded_ammo_id: 'ferrous_slug_case', current_ammo: 10, magazine_size: 10 },
+        { module_id: 'rail-b', type: 'weapon', type_id: 'railgun_ii', slot: 'weapon', loaded_ammo_id: 'ferrous_slug_case', current_ammo: 7, magazine_size: 7 },
+      ],
+    }
+    const pid = `p-brief-ready-${Math.random()}`
+    clearBriefingCache(pid)
+    await refreshBriefingData(pid, stubConnection({ ship: fullShip }))
+    const b = buildSituationalBriefing(pid)
+
+    expect(b).toContain('WEAPON READINESS: COMBAT READY')
+    expect(b).toContain('Do not reload or shop for ammo before acting')
   })
 })

@@ -15,7 +15,10 @@ const DEFAULT_MAX_TOOL_ROUNDS = 12
  *  budget — see the wrap-up reserve in runAgentTurn. */
 const WRAPUP_RESERVE_ROUNDS = 2
 /** The only tools available during the wrap-up reserve. */
-const STATE_WRITE_TOOLS = new Set(['update_todo', 'update_memory'])
+// Operational continuity lives in the TODO. Memory is valuable background, but
+// a memory-only wrap-up can leave a disproven objective in place and restart the
+// exact same loop next turn. During the reserve, require the TODO first.
+const TODO_WRITE_TOOLS = new Set(['update_todo'])
 // The upstream occasionally answers with a non-JSON body ("JSON Parse error: Unable to
 // parse JSON string") or an empty one. It is transient and self-heals, but 3 retries at a
 // 5s base all land inside ~35s, so a blip lasting a minute burned the whole turn — Morg'Thar
@@ -87,7 +90,8 @@ export async function runAgentTurn(
   // Did the agent persist anything this turn? Progress that is never written
   // to todo/memory is progress the next turn cannot see — see the wrap-up
   // reserve below.
-  let wroteState = false
+  let wroteTodo = false
+  let wroteMemory = false
   let wrapUpInjected = false
   // Original toolset, stashed while the wrap-up reserve narrows it. The
   // context object outlives the turn, so this must always be put back.
@@ -98,7 +102,7 @@ export async function runAgentTurn(
     // The reserve is not general-purpose budget: once past maxRounds the turn
     // is over except for recording what happened. If the agent has already
     // persisted (or spent the reserve without doing so), stop here.
-    if (rounds >= maxRounds && (wroteState || !wrapUpInjected)) break
+    if (rounds >= maxRounds && (wroteTodo || !wrapUpInjected)) break
     if (options?.signal?.aborted) return 'completed'
 
     // Dead-connection guard: don't spend an LLM call on a connection that is
@@ -253,7 +257,8 @@ export async function runAgentTurn(
       if (result.startsWith(ACTION_PENDING_SENTINEL)) actionPending = true
       if (result.startsWith(COOLDOWN_BLOCKED_SENTINEL)) cooldownBlocked = true
       if (result.startsWith(LOOP_FLUSH_SENTINEL)) loopFlush = true
-      if (toolCall.name === 'update_todo' || toolCall.name === 'update_memory') wroteState = true
+      if (toolCall.name === 'update_todo') wroteTodo = true
+      if (toolCall.name === 'update_memory') wroteMemory = true
       if (result.startsWith('Error: [connection_failed]')) connectionFailures++
       const isError = result.startsWith('Error')
       const toolResultMessage: Message = {
@@ -316,22 +321,21 @@ export async function runAgentTurn(
     //      tools only, so persisting is the sole legal move. A note alone was
     //      measurably not enough — one turn took the reserve, read the note
     //      and still ended without writing.
-    if (!wroteState && !wrapUpInjected && rounds >= maxRounds - 1) {
+    if (!wroteTodo && !wrapUpInjected && rounds >= maxRounds - 1) {
       wrapUpInjected = true
       restoreTools = context.tools
-      context.tools = context.tools.filter(t => STATE_WRITE_TOOLS.has(t.name))
+      context.tools = context.tools.filter(t => TODO_WRITE_TOOLS.has(t.name))
       context.messages.push({
         role: 'user',
         content:
-          `⏳ TURN ENDING — you have not recorded anything this turn, so your remaining tool calls ` +
-          `are restricted to update_todo and update_memory. Everything you just learned is about to ` +
-          `be LOST: the next turn starts from the TODO and memory shown in your prompt, which are ` +
-          `now out of date.\n\n` +
-          `Write down what you verified, what you finished, and the single next action — so the next ` +
-          `turn resumes instead of re-deriving all of this.`,
+          `⏳ TURN ENDING — you have not updated your TODO, so your remaining tool calls are ` +
+          `restricted to update_todo. Memory alone is not enough: the next turn executes the TODO, ` +
+          `and a disproven or completed TODO restarts the same loop.\n\n` +
+          `Replace the TODO now with what you verified, what is finished or blocked, and the single ` +
+          `next action. Do not preserve a premise the game disproved.`,
         timestamp: Date.now(),
       })
-      log('system', `Wrap-up reserve: ${rounds}/${maxRounds} rounds used with no state write — restricting tools to update_todo/update_memory`)
+      log('system', `Wrap-up reserve: ${rounds}/${maxRounds} rounds used with no TODO write${wroteMemory ? ' (memory was updated)' : ''} — restricting tools to update_todo`)
     }
   }
   } finally {
@@ -341,10 +345,10 @@ export async function runAgentTurn(
     if (restoreTools) context.tools = restoreTools
   }
 
-  if (wroteState) {
+  if (wroteTodo) {
     log('system', `Reached max tool rounds (${maxRounds}), ending turn`)
   } else {
-    log('system', `Reached max tool rounds (${maxRounds}), ending turn — NO state write this turn; next turn resumes from unchanged TODO/memory`)
+    log('system', `Reached max tool rounds (${maxRounds}), ending turn — NO TODO write this turn; next turn resumes from an unchanged objective`)
   }
   return 'completed'
 }

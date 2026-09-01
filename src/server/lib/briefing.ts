@@ -278,15 +278,35 @@ export function buildSituationalBriefing(profileId: string): string {
       )
       if (weapons.length > 0) {
         // Group identical guns so seven weapons read as three lines, not seven.
-        const byKind = new Map<string, { n: number; ammo: string; lo: number; hi: number; ids: string[] }>()
+        const byKind = new Map<string, {
+          n: number; ammo: string; lo: number; hi: number
+          maxLo: number; maxHi: number; knownCaps: number; ready: number; ids: string[]
+        }>()
         for (const w of weapons) {
-          const kind = String(w.type ?? w.name ?? w.module_id ?? 'weapon')
+          // lib_v2's get_ship names the instance `module_id`, the class `type_id`,
+          // and sets `type` to the generic 'weapon' — the earlier `id`/`type`
+          // reads rendered every gun as "weapon" with a blank id, so the agent
+          // still could not reload (Morg'Thar 2026-09-01: 74 help(reload) reads).
+          const specific = typeof w.type === 'string' && w.type !== 'weapon' ? w.type : undefined
+          const kind = String(w.type_id ?? specific ?? w.name ?? 'weapon')
           const ammo = String(w.loaded_ammo_id ?? w.loaded_ammo_name ?? w.ammo_type ?? 'none')
           const cur = Number(w.current_ammo ?? w.ammo ?? 0) || 0
-          const id = String(w.id ?? w.instance_id ?? '')
+          const cap = Number(w.magazine_size ?? w.max_ammo ?? NaN)
+          const id = String(w.id ?? w.instance_id ?? w.module_id ?? '')
           const key = `${kind}|${ammo}`
-          const e = byKind.get(key) ?? { n: 0, ammo, lo: Infinity, hi: 0, ids: [] }
+          const e = byKind.get(key) ?? {
+            n: 0, ammo, lo: Infinity, hi: 0,
+            maxLo: Infinity, maxHi: 0, knownCaps: 0, ready: 0, ids: [],
+          }
           e.n++; e.lo = Math.min(e.lo, cur); e.hi = Math.max(e.hi, cur)
+          if (Number.isFinite(cap) && cap > 0) {
+            e.knownCaps++
+            e.maxLo = Math.min(e.maxLo, cap)
+            e.maxHi = Math.max(e.maxHi, cap)
+            // One missing round in a 1,000-round magazine is operationally full;
+            // it must not turn a combat-ready ship into an ammo-shopping mission.
+            if (cur >= cap - 1) e.ready++
+          }
           if (id) e.ids.push(id)
           byKind.set(key, e)
         }
@@ -295,7 +315,19 @@ export function buildSituationalBriefing(profileId: string): string {
           const kind = key.split('|')[0]
           const count = e.n > 1 ? ` x${e.n}` : ''
           const ammoRange = e.lo === e.hi ? `${e.lo}` : `${e.lo}-${e.hi}`
-          lines.push(`  ${kind}${count} -> ${e.ammo} (loaded ${ammoRange}) ids: ${e.ids.join(', ')}`)
+          const capRange = e.knownCaps === e.n
+            ? `/${e.maxLo === e.maxHi ? e.maxLo : `${e.maxLo}-${e.maxHi}`}`
+            : ''
+          lines.push(`  ${kind}${count} -> ${e.ammo} (loaded ${ammoRange}${capRange}) ids: ${e.ids.join(', ')}`)
+        }
+        const knownWeapons = [...byKind.values()].reduce((n, e) => n + e.knownCaps, 0)
+        const readyWeapons = [...byKind.values()].reduce((n, e) => n + e.ready, 0)
+        if (knownWeapons === weapons.length) {
+          if (readyWeapons === weapons.length) {
+            lines.push('WEAPON READINESS: COMBAT READY — every fitted weapon is full or effectively full. Do not reload or shop for ammo before acting; cargo ammo is spare stock.')
+          } else {
+            lines.push(`WEAPON READINESS: ${weapons.length - readyWeapons}/${weapons.length} weapon(s) need reload. Reload only those weapon ids; full weapons are already ready.`)
+          }
         }
       }
     }

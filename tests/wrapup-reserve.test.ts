@@ -77,7 +77,7 @@ describe('wrap-up reserve', () => {
     // The agent is told, explicitly, that its turn is ending unrecorded.
     expect(logs.some(([t, s]) => t === 'system' && s.includes('Wrap-up reserve'))).toBe(true)
     // ...and the turn is flagged as having persisted nothing.
-    expect(logs.some(([t, s]) => t === 'system' && s.includes('NO state write'))).toBe(true)
+    expect(logs.some(([t, s]) => t === 'system' && s.includes('NO TODO write'))).toBe(true)
     // The reserve is bounded — it does not become open-ended budget.
     expect(round).toBeLessThanOrEqual(4 + 2)
   }, 30_000)
@@ -104,7 +104,7 @@ describe('wrap-up reserve', () => {
 
     // No nagging, and no extra rounds beyond the normal cap.
     expect(logs.some(([t, s]) => t === 'system' && s.includes('Wrap-up reserve'))).toBe(false)
-    expect(logs.some(([t, s]) => t === 'system' && s.includes('NO state write'))).toBe(false)
+    expect(logs.some(([t, s]) => t === 'system' && s.includes('NO TODO write'))).toBe(false)
     expect(round).toBe(4)
   }, 30_000)
 
@@ -114,7 +114,7 @@ describe('wrap-up reserve', () => {
       round++
       // Burn the whole normal budget, then comply with the wrap-up prompt.
       if (round <= 4) return assistant([queryCall(`c${round}`)])
-      return assistant([{ type: 'toolCall', id: 'w', name: 'update_memory', arguments: { content: 'x' } }])
+      return assistant([{ type: 'toolCall', id: 'w', name: 'update_todo', arguments: { content: 'x' } }])
     })
 
     await runAgentTurn(
@@ -162,7 +162,7 @@ describe('wrap-up reserve', () => {
     const reserveRound = toolsSeenPerRound[toolsSeenPerRound.length - 1]
     expect(reserveRound).not.toContain('game')
     expect(reserveRound).not.toContain('codex')
-    expect(reserveRound.sort()).toEqual(['update_memory', 'update_todo'])
+    expect(reserveRound).toEqual(['update_todo'])
 
     // The context outlives the turn — the full toolset must come back.
     expect(c.tools).toBe(originalTools)
@@ -194,5 +194,28 @@ describe('wrap-up reserve', () => {
     )
 
     expect(c.tools.map((t: any) => t.name)).toContain('game')
+  }, 30_000)
+
+  test('a memory-only write does not satisfy operational persistence', async () => {
+    const logs: Array<[string, string]> = []
+    let round = 0
+    const { runAgentTurn } = await loadLoop(async () => {
+      round++
+      if (round === 1) {
+        return assistant([{ type: 'toolCall', id: 'm1', name: 'update_memory', arguments: { content: 'market unavailable' } }])
+      }
+      if (round <= 4) return assistant([queryCall(`c${round}`)])
+      return assistant([{ type: 'toolCall', id: 't1', name: 'update_todo', arguments: { content: 'move on' } }])
+    })
+
+    await runAgentTurn(
+      model(), ctx(), stubConnection(), 'p-wrapup-memory-only', 'Test',
+      ((t: string, s: string) => { logs.push([t, s]) }) as any,
+      { value: 'buy unavailable ammo' } as any, { value: '' } as any,
+      { maxToolRounds: 4 },
+    )
+
+    expect(logs.some(([t, s]) => t === 'system' && s.includes('no TODO write (memory was updated)'))).toBe(true)
+    expect(round).toBe(5)
   }, 30_000)
 })

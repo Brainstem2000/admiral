@@ -11,6 +11,75 @@ import { codexLookup, codexChain, priceAdvisory, codexGet } from './catalog'
 
 // Extended query result cache: keyed by "profileId:command:argsJSON"
 const queryCache = new Map<string, { result: string; timestamp: number }>()
+const marketNoSupply = new Map<string, Array<{ itemId: string; baseId: string; timestamp: number }>>()
+const MARKET_DEAD_END_WINDOW_MS = 15 * 60_000
+
+export interface MarketPurchaseVerdict {
+  itemId: string
+  baseId: string
+  unavailable: boolean
+  message: string
+}
+
+/** Turn adversarial order-book fields into an explicit purchase decision. */
+export function buildMarketPurchaseVerdict(
+  resultData: unknown,
+  commandArgs: Record<string, unknown> | undefined,
+): MarketPurchaseVerdict | null {
+  const itemId = String(commandArgs?.item_id ?? commandArgs?.item ?? '').toLowerCase()
+  if (!itemId || !resultData || typeof resultData !== 'object') return null
+  const data = resultData as Record<string, unknown>
+  const baseId = String(data.base_id ?? data.station_id ?? data.base ?? 'this station')
+  const items = Array.isArray(data.items) ? data.items as Array<Record<string, unknown>>
+    : Array.isArray(data.market) ? data.market as Array<Record<string, unknown>> : []
+  const item = items.find(i => String(i.item_id ?? i.id ?? '').toLowerCase() === itemId)
+  if (!item) {
+    return {
+      itemId, baseId, unavailable: true,
+      message: `PURCHASE VERDICT — ${itemId} is NOT FOR SALE at ${baseId}: no matching orders. Do not repeat this market query; record the sourcing blocker and continue the higher-level objective.`,
+    }
+  }
+  const asks = Array.isArray(item.sell_orders) ? item.sell_orders : []
+  const ask = Number(item.best_sell ?? item.sell_price ?? 0) || 0
+  const askQty = Number(item.best_sell_qty ?? item.sell_quantity ?? 0) || 0
+  if (asks.length === 0 || ask <= 0 || askQty <= 0) {
+    const bid = Number(item.best_buy ?? item.buy_price ?? 0) || 0
+    const bidOnly = bid > 0
+    return {
+      itemId, baseId, unavailable: true,
+      message: bidOnly
+        ? `PURCHASE VERDICT — BID ONLY at ${baseId}: the station will PAY YOU ${bid}cr for ${itemId}; it has none for sale. You cannot buy here. Do not repeat this query or attempt buy.`
+        : `PURCHASE VERDICT — ${itemId} is NOT FOR SALE at ${baseId}: there is no ASK/sell depth. Do not repeat this query or attempt buy.`,
+    }
+  }
+  return {
+    itemId, baseId, unavailable: false,
+    message: `PURCHASE VERDICT — AVAILABLE at ${baseId}: ASK ${ask}cr, sell depth ${askQty}. This is what you pay to buy.`,
+  }
+}
+
+/** Return a deterministic no-op when reload would consume cargo for no benefit. */
+export function fullWeaponReloadVerdict(
+  shipData: unknown,
+  commandArgs: Record<string, unknown> | undefined,
+): string | null {
+  if (!shipData || typeof shipData !== 'object') return null
+  const data = shipData as Record<string, unknown>
+  const modules = Array.isArray(data.modules) ? data.modules as Array<Record<string, unknown>>
+    : Array.isArray((data.ship as Record<string, unknown> | undefined)?.modules)
+      ? (data.ship as Record<string, unknown>).modules as Array<Record<string, unknown>> : []
+  const targetId = String(
+    commandArgs?.weapon_instance_id ?? commandArgs?.weapon_id ?? commandArgs?.module_id ?? commandArgs?.id ?? '',
+  )
+  if (!targetId) return null
+  const weapon = modules.find(m => String(m.module_id ?? m.instance_id ?? m.id ?? '') === targetId)
+  if (!weapon) return null
+  const current = Number(weapon.current_ammo ?? weapon.ammo ?? NaN)
+  const capacity = Number(weapon.magazine_size ?? weapon.max_ammo ?? NaN)
+  if (!Number.isFinite(current) || !Number.isFinite(capacity) || capacity <= 0 || current < capacity - 1) return null
+  const name = String(weapon.name ?? weapon.type_id ?? 'weapon')
+  return `NO-OP: ${name} (${targetId}) is already combat-ready at ${current}/${capacity}. Reload was not sent and no cargo ammo was consumed. Continue the mission; do not shop for ammo or retry reload for this weapon.`
+}
 
 // --- Tool Definitions ---
 
@@ -274,6 +343,7 @@ export const LOOP_FLUSH_SENTINEL = '🔁 LOOP ESCALATION: '
 export function consumeContextFlushRequest(profileId: string): boolean {
   if (!contextFlushRequests.has(profileId)) return false
   contextFlushRequests.delete(profileId)
+  marketNoSupply.delete(profileId)
   return true
 }
 
@@ -1215,6 +1285,23 @@ export async function executeTool(
   // Also strip v2 tool group prefix (e.g. "market_view_market" → "view_market")
   const deepBare = bareCommand.replace(/^(?:market|storage|social|intel|faction|faction_admin|salvage|catalog|ship|battle|transfer|facility|auth)_/, '')
   const isQuery = isQueryCommand(command, commandArgs)
+
+  // Reload is a mutation that consumes one cargo ammo item. Verify the target
+  // against the free live get_ship query before spending the tick or the item.
+  // This converts "reload a full gun" into a deterministic, informative no-op.
+  if (deepBare === 'reload') {
+    try {
+      const shipResp = await ctx.connection.execute('get_ship')
+      if (!shipResp.error) {
+        const verdict = fullWeaponReloadVerdict(shipResp.structuredContent ?? shipResp.result, commandArgs)
+        if (verdict) {
+          ctx.log('tool_result', verdict)
+          return verdict
+        }
+      }
+    } catch { /* inability to verify must not block a legitimate reload */ }
+  }
+
   if (!isQuery) {
     let remainingMs = actionCooldownRemaining(ctx.profileId)
     if (remainingMs !== null && remainingMs <= COOLDOWN_ABSORB_MAX_MS) {
@@ -1372,6 +1459,32 @@ export async function executeTool(
     const resultData = resp.structuredContent ?? resp.result
     let result = formatToolResult(command, resultData, resp.notifications)
 
+    // A specific-item market read should answer the question the agent is
+    // actually asking: "can I buy this here?" Raw best_buy/best_sell fields
+    // made a BID look like cheap inventory and sustained station-to-station
+    // sourcing loops. Put the computed verdict before the raw book.
+    if (deepBare === 'view_market') {
+      const verdict = buildMarketPurchaseVerdict(resultData, commandArgs)
+      if (verdict) {
+        let deadEnd = ''
+        const now = Date.now()
+        let recent = (marketNoSupply.get(ctx.profileId) ?? [])
+          .filter(x => now - x.timestamp < MARKET_DEAD_END_WINDOW_MS)
+        if (verdict.unavailable) {
+          recent = recent.filter(x => !(x.itemId === verdict.itemId && x.baseId === verdict.baseId))
+          recent.push({ itemId: verdict.itemId, baseId: verdict.baseId, timestamp: now })
+          const stations = new Set(recent.filter(x => x.itemId === verdict.itemId).map(x => x.baseId))
+          if (stations.size >= 2) {
+            deadEnd = `\nSOURCING DEAD END — ${verdict.itemId} was unavailable at ${stations.size} recently checked stations. Stop making this purchase a prerequisite: update the TODO with the blocker and continue the higher-level mission.`
+          }
+        } else {
+          recent = recent.filter(x => x.itemId !== verdict.itemId)
+        }
+        marketNoSupply.set(ctx.profileId, recent)
+        result = verdict.message + deadEnd + '\n\n' + result
+      }
+    }
+
     // Order-book legend. The game's field names are adversarial — `best_buy` is
     // the BID (station pays you) and `best_sell` is the ASK (you pay). Three
     // agents across two model families have inverted them (Grit −14,424cr,
@@ -1380,13 +1493,20 @@ export async function executeTool(
     {
       const bareM = command.replace(/^spacemolt_/, '').replace(/^market_/, '')
       if (bareM === 'view_market' || bareM === 'analyze_market' || bareM === 'view_orders') {
-        result =
+        const legend =
           `ORDER BOOK LEGEND — read before acting:\n` +
           `  best_buy  = BID = what the station PAYS YOU when you sell (with best_buy_qty depth).\n` +
           `  best_sell = ASK = what YOU PAY when you buy.\n` +
           `  Profit means selling into a BID somewhere that is HIGHER than the ASK you paid.\n` +
-          `  Buying at the ask and selling into the bid at the SAME station is always a loss.\n` +
-          result
+          `  Buying at the ask and selling into the bid at the SAME station is always a loss.\n`
+        if (result.startsWith('PURCHASE VERDICT')) {
+          const split = result.indexOf('\n\n')
+          result = split >= 0
+            ? result.slice(0, split) + '\n\n' + legend + result.slice(split + 2)
+            : result + '\n\n' + legend
+        } else {
+          result = legend + result
+        }
       }
     }
 
