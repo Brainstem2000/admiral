@@ -1,5 +1,6 @@
 /** Shared card shell for the Character dossier — title strip + scrollable body. */
 import type { ReactNode } from 'react'
+import { DISPLAY } from './dossier-shared'
 
 interface Props {
   title: string
@@ -19,7 +20,7 @@ export function DossierCard({ title, icon, source, action, children, className =
     <div className={`dossier-card flex flex-col min-h-0 ${className}`}>
       <div className="flex items-center gap-2 px-3 py-2 border-b border-border/60 shrink-0">
         {icon && <span className="text-muted-foreground shrink-0">{icon}</span>}
-        <span className="text-[11px] uppercase tracking-[1.5px] font-medium text-foreground/80 flex-1 truncate">{title}</span>
+        <span className="text-[11px] uppercase tracking-[1.5px] font-medium text-foreground/80 flex-1 truncate" style={DISPLAY}>{title}</span>
         {source && (
           <span className="text-[9px] leading-none uppercase tracking-wider" style={{ color: `hsl(${sourceColor})` }}>
             {source}

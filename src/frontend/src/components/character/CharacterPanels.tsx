@@ -12,6 +12,7 @@ import {
   FilterCheckbox, loadSavedFilters, persistFilters, formatTime,
 } from '@/components/log/log-shared'
 import { DossierCard } from './DossierCard'
+import { DISPLAY, Bar, Chip, ageOf, fmtCr } from './dossier-shared'
 
 const CONNECTION_MODE_LABELS: Record<string, string> = {
   http: 'HTTP v1',
@@ -36,7 +37,7 @@ export function CharacterHeader({ profile, status, onOpenEditor }: {
     <div className="dossier-card flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
       <div className={`status-dot ${dot}`} style={{ width: 8, height: 8 }} />
       <div className="flex items-baseline gap-2 min-w-0">
-        <h2 className="text-base font-semibold text-foreground tracking-wide truncate">{profile.name}</h2>
+        <h2 className="text-base font-semibold text-foreground tracking-wide truncate" style={DISPLAY}>{profile.name}</h2>
         {profile.username && <span className="text-[11px] text-muted-foreground">@{profile.username}</span>}
       </div>
 
@@ -99,28 +100,10 @@ function InfoCell({ icon, label, value, sub, color }: {
     <div className="min-w-0">
       <div className="flex items-center gap-1.5 mb-0.5">
         <span style={color ? { color: `hsl(${color})` } : undefined} className={color ? '' : 'text-muted-foreground'}>{icon}</span>
-        <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px]">{label}</span>
+        <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px]" style={DISPLAY}>{label}</span>
       </div>
       <div className="text-sm font-medium truncate" style={color ? { color: `hsl(${color})` } : undefined}>{value}</div>
       {sub && <div className="text-[10px] text-muted-foreground truncate">{sub}</div>}
-    </div>
-  )
-}
-
-function Gauge({ icon, label, color, cur, max }: {
-  icon: React.ReactNode; label: string; color: string; cur: number; max: number
-}) {
-  const pct = max > 0 ? Math.max(0, Math.min(100, (cur / max) * 100)) : 0
-  return (
-    <div className="min-w-0">
-      <div className="flex items-center gap-1.5 mb-1">
-        <span style={{ color: `hsl(${color})` }}>{icon}</span>
-        <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] flex-1 truncate">{label}</span>
-        <span className="text-xs tabular-nums text-foreground/90">{cur.toLocaleString()}<span className="text-muted-foreground/50">/{max.toLocaleString()}</span></span>
-      </div>
-      <div className="h-1.5 w-full bg-border/40 overflow-hidden">
-        <div className="h-full transition-all duration-300" style={{ width: `${pct}%`, background: `hsl(${color})` }} />
-      </div>
     </div>
   )
 }
@@ -143,9 +126,9 @@ export function VitalsPanel({ playerData }: { playerData: Record<string, unknown
   const credits = Number(player.credits ?? playerData.credits ?? 0)
 
   const gauges = [
-    { label: 'Hull', icon: <Heart size={12} />, color: 'var(--destructive)', ...vitalPair(ship, 'hull', 'hull', 'max_hull') },
+    { label: 'Hull', icon: <Heart size={12} />, color: 'var(--destructive)', flagLow: true, ...vitalPair(ship, 'hull', 'hull', 'max_hull') },
     { label: 'Shield', icon: <Shield size={12} />, color: 'var(--primary)', ...vitalPair(ship, 'shield', 'shield', 'max_shield') },
-    { label: 'Fuel', icon: <Fuel size={12} />, color: 'var(--smui-orange)', ...vitalPair(ship, 'fuel', 'fuel', 'max_fuel') },
+    { label: 'Fuel', icon: <Fuel size={12} />, color: 'var(--smui-orange)', flagLow: true, ...vitalPair(ship, 'fuel', 'fuel', 'max_fuel') },
     { label: 'Cargo', icon: <Package size={12} />, color: 'var(--smui-green)', ...vitalPair(ship, 'cargo', 'cargo_used', 'cargo_capacity') },
     { label: 'CPU', icon: <Cpu size={12} />, color: 'var(--smui-purple)', ...vitalPair(ship, 'cpu', 'cpu_used', 'cpu_capacity') },
     { label: 'Power', icon: <Zap size={12} />, color: 'var(--smui-frost-3)', ...vitalPair(ship, 'power', 'power_used', 'power_capacity') },
@@ -160,7 +143,7 @@ export function VitalsPanel({ playerData }: { playerData: Record<string, unknown
       </div>
       {/* Gauges — 3 across so all six fit in two even rows (Power up with Cargo/CPU) */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3.5">
-        {gauges.map(g => <Gauge key={g.label} {...g} />)}
+        {gauges.map(g => <Bar key={g.label} {...g} />)}
       </div>
     </DossierCard>
   )
@@ -176,9 +159,23 @@ export function MarkdownCard({ title, kind, content, source }: {
 }) {
   const icon = kind === 'directive' ? <FileText size={12} /> : kind === 'todo' ? <ListTodo size={12} /> : <Brain size={12} />
   const empty = kind === 'directive' ? 'No directive set' : kind === 'todo' ? 'No TODO items' : 'No memory stored yet'
+  const trimmed = content?.trim() || ''
+  const words = trimmed ? trimmed.split(/\s+/).length : 0
+  // Directives/memories that outgrow the system-prompt budget are a real cost —
+  // surface the size so bloat is visible at a glance.
+  const sizeLabel = trimmed.length >= 1000 ? `${(trimmed.length / 1000).toFixed(1)}k chars` : trimmed ? `${trimmed.length} chars` : ''
   return (
-    <DossierCard title={title} icon={icon} source={source} className="min-h-[140px] max-h-[420px]" bodyClassName="px-3 py-2.5">
-      {content?.trim()
+    <DossierCard
+      title={title}
+      icon={icon}
+      source={source}
+      className="min-h-[140px] max-h-[420px]"
+      bodyClassName="px-3 py-2.5"
+      action={trimmed
+        ? <Chip label={sizeLabel} title={`${words.toLocaleString()} words — lives inside the cached system prompt; size is token cost`} />
+        : undefined}
+    >
+      {trimmed
         ? <MarkdownRenderer content={content} />
         : <span className="text-[11px] text-muted-foreground/50 italic">{empty}</span>}
     </DossierCard>
@@ -252,9 +249,12 @@ export function CaptainsLogCard({ profileId, connected }: { profileId: string; c
       source="Server"
       className="min-h-[140px] max-h-[420px]"
       action={
-        <button onClick={fetchLog} disabled={!connected || loading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
-          <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
-        </button>
+        <span className="flex items-center gap-2">
+          {entries.length > 0 && <Chip label={`${entries.length} entries`} />}
+          <button onClick={fetchLog} disabled={!connected || loading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
+            <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
+          </button>
+        </span>
       }
     >
       {!connected ? (
@@ -265,8 +265,9 @@ export function CaptainsLogCard({ profileId, connected }: { profileId: string; c
         entries.map(e => (
           <div key={e.index} className="px-3 py-2 border-t border-border/30 first:border-t-0">
             <div className="flex items-center gap-1.5 mb-1">
-              <span className="text-[9px] text-muted-foreground/40">#{e.index}</span>
-              <span className="text-[9px] text-muted-foreground/40">{e.created_at}</span>
+              <span className="text-[9px] text-muted-foreground/40" style={DISPLAY}>#{e.index}</span>
+              <span className="text-[9px] text-muted-foreground/40 tabular-nums" title={e.created_at}>{e.created_at}</span>
+              <span className="text-[9px] text-muted-foreground/60 tabular-nums ml-auto">{ageOf(e.created_at)} ago</span>
             </div>
             <MarkdownRenderer content={e.entry} />
           </div>
@@ -328,7 +329,7 @@ export function RecentActivityFeed({ entries }: { entries: LogEntry[] }) {
       {/* Title strip */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-border/60 shrink-0">
         <span className="text-muted-foreground shrink-0"><Activity size={12} /></span>
-        <span className="text-[11px] uppercase tracking-[1.5px] font-medium text-foreground/80 flex-1 truncate">Recent Activity</span>
+        <span className="text-[11px] uppercase tracking-[1.5px] font-medium text-foreground/80 flex-1 truncate" style={DISPLAY}>Recent Activity</span>
       </div>
       {/* Filter bar — mirrors LogPane */}
       <div className="flex items-center flex-wrap gap-0.5 px-2 py-1.5 border-b border-border/40 shrink-0">
@@ -384,11 +385,15 @@ export function FinancialSparkline({ profileId }: { profileId: string }) {
   const latest = points.length ? points[points.length - 1].wallet : null
   const first = points.length ? points[0].wallet : null
   const delta = latest != null && first != null ? latest - first : null
+  const deltaPct = delta != null && first ? (delta / Math.abs(first)) * 100 : null
 
   let path = ''
+  let lo = 0
+  let hi = 0
   if (points.length >= 2) {
     const vals = points.map(p => p.wallet)
     const min = Math.min(...vals), max = Math.max(...vals)
+    lo = min; hi = max
     const range = max - min || 1
     const W = 100, H = 28
     path = vals.map((v, i) => {
@@ -405,20 +410,25 @@ export function FinancialSparkline({ profileId }: { profileId: string }) {
       {latest != null ? (
         <div className="flex flex-col gap-2">
           <div className="flex items-baseline gap-2">
-            <span className="text-lg font-medium tabular-nums" style={{ color: 'hsl(var(--smui-yellow))' }}>
+            <span className="text-lg font-medium tabular-nums" style={{ color: 'hsl(var(--smui-yellow))', ...DISPLAY }}>
               {latest.toLocaleString()}
             </span>
             <span className="text-[10px] text-muted-foreground">cr</span>
             {delta != null && (
               <span className="text-[11px] tabular-nums ml-auto" style={{ color: `hsl(${deltaColor})` }}>
                 {delta >= 0 ? '+' : ''}{delta.toLocaleString()}
+                {deltaPct != null && <span className="text-[9px] opacity-70 ml-1">({deltaPct >= 0 ? '+' : ''}{deltaPct.toFixed(1)}%)</span>}
               </span>
             )}
           </div>
           {path ? (
-            <svg viewBox="0 0 100 28" preserveAspectRatio="none" className="w-full h-10">
-              <path d={path} fill="none" stroke="hsl(var(--smui-frost-2))" strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
-            </svg>
+            <div className="relative">
+              <svg viewBox="0 0 100 28" preserveAspectRatio="none" className="w-full h-10">
+                <path d={path} fill="none" stroke="hsl(var(--smui-frost-2))" strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
+              </svg>
+              <span className="absolute top-0 right-0 text-[8px] text-muted-foreground/50 tabular-nums">{fmtCr(hi)}</span>
+              <span className="absolute bottom-0 right-0 text-[8px] text-muted-foreground/50 tabular-nums">{fmtCr(lo)}</span>
+            </div>
           ) : (
             <span className="text-[10px] text-muted-foreground/50 italic">Not enough history yet for a trend.</span>
           )}

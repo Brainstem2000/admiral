@@ -12,6 +12,7 @@ import type { Profile } from '@/types'
 import type { LedgerEntry, LedgerResponse, ReconcileWindow } from '@shared/ledger-types'
 import { formatTime } from '@/components/log/log-shared'
 import { DossierCard } from '../DossierCard'
+import { DISPLAY, Freshness, fmtCr, fmtSigned, parseTs } from '../dossier-shared'
 
 interface Snapshot { profile_id: string; timestamp: string; wallet: number; storage: number; total: number }
 
@@ -30,20 +31,6 @@ function sinceFor(period: Period): string {
   if (period === '7d') return sqliteSince(24 * 7)
   return '2000-01-01 00:00:00'
 }
-
-function parseTs(ts: string): number {
-  const t = Date.parse(ts.includes('T') ? ts : `${ts.replace(' ', 'T')}Z`)
-  return Number.isFinite(t) ? t : 0
-}
-
-function fmtCr(n: number): string {
-  const sign = n < 0 ? '-' : ''
-  const abs = Math.abs(n)
-  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(abs >= 10_000_000 ? 0 : 1)}M`
-  if (abs >= 10_000) return `${sign}${Math.round(abs / 1_000)}k`
-  return `${sign}${abs.toLocaleString()}`
-}
-function fmtSigned(n: number): string { return n > 0 ? `+${fmtCr(n)}` : fmtCr(n) }
 
 const KIND_COLORS: Record<string, string> = {
   buy: 'var(--smui-red)',
@@ -72,6 +59,7 @@ function useFinancials(profileId: string, connected: boolean, period: Period) {
   const [reconcile, setReconcile] = useState<ReconcileWindow[] | null | undefined>(undefined)
   const [snaps, setSnaps] = useState<Snapshot[] | null>(null)
   const [liveWallet, setLiveWallet] = useState<number | null>(null)
+  const [walletAt, setWalletAt] = useState<number | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -109,7 +97,7 @@ function useFinancials(profileId: string, connected: boolean, period: Period) {
   // Live wallet via get_status (free query command), refreshed every 60s like the
   // other tabs — the "live" tag must not go stale; falls back to latest snapshot.
   useEffect(() => {
-    if (!connected) { setLiveWallet(null); return }
+    if (!connected) { setLiveWallet(null); setWalletAt(null); return }
     let cancelled = false
     const fetchWallet = () => {
       fetch(`/api/profiles/${profileId}/command`, {
@@ -122,7 +110,7 @@ function useFinancials(profileId: string, connected: boolean, period: Period) {
           if (cancelled) return
           const result = data.structuredContent || data.result || data
           const credits = (result?.player as Record<string, unknown> | undefined)?.credits
-          if (typeof credits === 'number') setLiveWallet(credits)
+          if (typeof credits === 'number') { setLiveWallet(credits); setWalletAt(Date.now()) }
         })
         .catch(() => { /* ignore — snapshot fallback */ })
     }
@@ -131,7 +119,7 @@ function useFinancials(profileId: string, connected: boolean, period: Period) {
     return () => { cancelled = true; clearInterval(t) }
   }, [profileId, connected])
 
-  return { ledger, reconcile, snaps, liveWallet }
+  return { ledger, reconcile, snaps, liveWallet, walletAt }
 }
 
 // ── Small pieces ─────────────────────────────────────────────────────────────
@@ -139,7 +127,7 @@ function useFinancials(profileId: string, connected: boolean, period: Period) {
 function Cell({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="min-w-0">
-      <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-0.5">{label}</div>
+      <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-0.5" style={DISPLAY}>{label}</div>
       {children}
     </div>
   )
@@ -175,7 +163,7 @@ export function FinancialsTab({ profile, connected }: { profile: Profile; connec
   // sort stays one header-click away.
   const [sortKey, setSortKey] = useState<'amount' | 'time'>('time')
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc')
-  const { ledger, reconcile, snaps, liveWallet } = useFinancials(profile.id, connected, period)
+  const { ledger, reconcile, snaps, liveWallet, walletAt } = useFinancials(profile.id, connected, period)
 
   const points = useMemo(() =>
     (snaps || [])
@@ -187,6 +175,11 @@ export function FinancialsTab({ profile, connected }: { profile: Profile; connec
   const maxWallet = points.length ? Math.max(...points.map(p => p.v)) : 0
   const wallet = liveWallet ?? (points.length ? points[points.length - 1].v : null)
   const pnl = points.length >= 2 ? points[points.length - 1].v - points[0].v : null
+
+  // Net worth = wallet + station storage, from the latest snapshot that has both.
+  const latestSnap = (snaps || []).filter(s => typeof s.total === 'number').at(-1) ?? null
+  const firstSnap = (snaps || []).filter(s => typeof s.total === 'number')[0] ?? null
+  const totalDelta = latestSnap && firstSnap && latestSnap !== firstSnap ? latestSnap.total - firstSnap.total : null
 
   // Escrow = order_create rows with no matching fill/cancel in the period.
   const escrow = useMemo(() => {
@@ -379,12 +372,28 @@ export function FinancialsTab({ profile, connected }: { profile: Profile; connec
   return (
     <div className="flex flex-col gap-4">
       <DossierCard title="Net Worth" icon={<Wallet size={12} />} source="Server" className="min-h-[80px]" bodyClassName="p-3" action={periodSelector}>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2">
           <Cell label="Wallet">
             {wallet != null ? (
               <div className="text-sm font-medium tabular-nums truncate" style={{ color: 'hsl(var(--smui-yellow))' }}>
                 {wallet.toLocaleString()} cr
-                <span className="text-[9px] text-muted-foreground/60 ml-1.5 normal-case">{liveWallet != null ? 'live' : 'snapshot'}</span>
+                <span className="text-[9px] text-muted-foreground/60 ml-1.5 normal-case">
+                  {liveWallet != null && walletAt != null ? <Freshness at={walletAt} prefix="live," /> : 'snapshot'}
+                </span>
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground/50">{snaps == null ? 'Loading...' : '—'}</div>
+            )}
+          </Cell>
+          <Cell label="Net Worth">
+            {latestSnap ? (
+              <div className="text-sm font-medium tabular-nums truncate">
+                {latestSnap.total.toLocaleString()} cr
+                {totalDelta != null && totalDelta !== 0 && (
+                  <span className="text-[10px] ml-1.5" style={{ color: `hsl(${totalDelta >= 0 ? 'var(--smui-green)' : 'var(--smui-red)'})` }}>
+                    {fmtSigned(totalDelta)}
+                  </span>
+                )}
               </div>
             ) : (
               <div className="text-sm text-muted-foreground/50">{snaps == null ? 'Loading...' : '—'}</div>
@@ -485,21 +494,25 @@ export function FinancialsTab({ profile, connected }: { profile: Profile; connec
               </Cell>
             </div>
             <div className="space-y-1.5">
-              {kinds.map(([kind, v]) => (
-                <div key={kind} className="flex items-center gap-2">
-                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground w-28 shrink-0 truncate">{kind.replace(/_/g, ' ')}</span>
-                  <span className="text-[9px] text-muted-foreground/60 tabular-nums w-8 shrink-0 text-right">{v.count}×</span>
-                  <div className="flex-1 h-2 bg-border/30 overflow-hidden">
-                    <div
-                      className="h-full transition-all duration-300"
-                      style={{ width: `${(Math.abs(v.total) / maxKindAbs) * 100}%`, background: `hsl(${v.total >= 0 ? 'var(--smui-green)' : 'var(--smui-red)'})` }}
-                    />
+              {kinds.map(([kind, v]) => {
+                const share = Math.abs(v.total) / maxKindAbs
+                return (
+                  <div key={kind} className="flex items-center gap-2">
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground w-28 shrink-0 truncate" style={DISPLAY}>{kind.replace(/_/g, ' ')}</span>
+                    <span className="text-[9px] text-muted-foreground/60 tabular-nums w-8 shrink-0 text-right">{v.count}×</span>
+                    <div className="flex-1 h-2 bg-border/30 overflow-hidden">
+                      <div
+                        className="h-full transition-all duration-300"
+                        style={{ width: `${share * 100}%`, background: `hsl(${v.total >= 0 ? 'var(--smui-green)' : 'var(--smui-red)'})` }}
+                      />
+                    </div>
+                    <span className="w-8 shrink-0 text-right text-[9px] tabular-nums text-muted-foreground/60">{Math.round(share * 100)}%</span>
+                    <span className="w-20 shrink-0 text-right text-[11px] tabular-nums" style={{ color: `hsl(${v.total >= 0 ? 'var(--smui-green)' : 'var(--smui-red)'})` }}>
+                      {fmtSigned(v.total)}
+                    </span>
                   </div>
-                  <span className="w-20 shrink-0 text-right text-[11px] tabular-nums" style={{ color: `hsl(${v.total >= 0 ? 'var(--smui-green)' : 'var(--smui-red)'})` }}>
-                    {fmtSigned(v.total)}
-                  </span>
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )}
@@ -514,7 +527,7 @@ export function FinancialsTab({ profile, connected }: { profile: Profile; connec
           <div className="px-3 py-3 text-[11px] text-muted-foreground/50 italic">No transactions in this period.</div>
         ) : (
           <>
-            <div className="flex items-center gap-2.5 px-3 py-1.5 border-b border-border/40 text-[9px] uppercase tracking-wider text-muted-foreground">
+            <div className="flex items-center gap-2.5 px-3 py-1.5 border-b border-border/40 text-[9px] uppercase tracking-wider text-muted-foreground" style={DISPLAY}>
               <span className="w-20 shrink-0">Kind</span>
               <span className="flex-1 min-w-0">Item</span>
               <span className="w-24 shrink-0 text-right hidden sm:block">Qty × Price</span>

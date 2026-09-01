@@ -7,7 +7,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { Rocket, RefreshCw, Heart, Shield, Fuel, Cpu, Zap, Package, Crosshair, ShieldCheck, Wrench, TrendingUp, Sparkles } from 'lucide-react'
 import type { Profile } from '@/types'
 import { DossierCard } from '../DossierCard'
-import { DISPLAY, StatCell } from '../dossier-shared'
+import { DISPLAY, Bar, StatCell } from '../dossier-shared'
 
 interface UpgradeCandidate {
   id: string; name?: string
@@ -45,29 +45,6 @@ const SLOT_META: Record<string, { label: string; icon: React.ReactNode; color: s
   weapon: { label: 'Weapon Bays', icon: <Crosshair size={11} />, color: 'var(--smui-red)' },
   defense: { label: 'Defense Bays', icon: <ShieldCheck size={11} />, color: 'var(--primary)' },
   utility: { label: 'Utility Bays', icon: <Wrench size={11} />, color: 'var(--smui-frost-2)' },
-}
-
-function Bar({ icon, label, color, cur, max, suffix, flagHigh }: {
-  icon: React.ReactNode; label: string; color: string; cur: number; max: number; suffix?: string; flagHigh?: boolean
-}) {
-  const pct = max > 0 ? Math.max(0, Math.min(100, (cur / max) * 100)) : 0
-  const hot = flagHigh && pct > 90
-  const barColor = hot ? 'var(--smui-orange)' : color
-  return (
-    <div className="min-w-0">
-      <div className="flex items-center gap-1.5 mb-1">
-        <span style={{ color: `hsl(${barColor})` }}>{icon}</span>
-        <span className="text-[10px] text-muted-foreground uppercase tracking-[1.5px] flex-1 truncate" style={DISPLAY}>{label}</span>
-        <span className="text-[10px] tabular-nums text-muted-foreground/60">{Math.round(pct)}%</span>
-        <span className="text-xs tabular-nums text-foreground/90">
-          {cur.toLocaleString()}<span className="text-muted-foreground/50">/{max.toLocaleString()}{suffix || ''}</span>
-        </span>
-      </div>
-      <div className="h-2 w-full bg-border/40 overflow-hidden">
-        <div className="h-full transition-all duration-300" style={{ width: `${pct}%`, background: `hsl(${barColor})` }} />
-      </div>
-    </div>
-  )
 }
 
 /** One upgrade candidate line: what it is, what it beats, where to get it. */

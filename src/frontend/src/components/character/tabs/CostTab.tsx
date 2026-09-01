@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react'
 import { Cpu, Coins, TrendingUp } from 'lucide-react'
 import type { Profile } from '@/types'
 import { DossierCard } from '../DossierCard'
+import { DISPLAY, StatCell } from '../dossier-shared'
 
 interface TokenStats {
   calls: number
@@ -48,17 +49,8 @@ function fmtCost(cost: number): string {
 function ConfigRow({ label, value, accent }: { label: string; value: string; accent?: string }) {
   return (
     <div className="flex items-baseline gap-2 py-1 border-t border-border/30 first:border-t-0">
-      <span className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground w-32 shrink-0">{label}</span>
+      <span className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground w-32 shrink-0" style={DISPLAY}>{label}</span>
       <span className="text-xs truncate" style={accent ? { color: `hsl(${accent})` } : undefined}>{value}</span>
-    </div>
-  )
-}
-
-function StatCell({ label, value, accent }: { label: string; value: string; accent?: string }) {
-  return (
-    <div className="min-w-0">
-      <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-0.5">{label}</div>
-      <div className="text-sm font-medium tabular-nums truncate" style={accent ? { color: `hsl(${accent})` } : undefined}>{value}</div>
     </div>
   )
 }
@@ -149,22 +141,36 @@ export function CostTab({ profile, connected: _connected }: { profile: Profile; 
           <span className="text-[11px] text-muted-foreground/50 italic">No LLM calls in this period.</span>
         ) : (
           <div className="space-y-3">
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-x-4 gap-y-2">
               <StatCell label="Calls" value={stats.calls.toLocaleString()} />
-              <StatCell label="Input tok" value={stats.inputTokens.toLocaleString()} />
-              <StatCell label="Output tok" value={stats.outputTokens.toLocaleString()} />
+              <StatCell label="Input tok" value={stats.inputTokens.toLocaleString()} sub={`${Math.round(stats.inputTokens / Math.max(1, stats.calls)).toLocaleString()} / call`} />
+              <StatCell label="Output tok" value={stats.outputTokens.toLocaleString()} sub={`${Math.round(stats.outputTokens / Math.max(1, stats.calls)).toLocaleString()} / call`} />
               <StatCell label="Cost" value={fmtCost(stats.cost)} accent="var(--smui-yellow)" />
+              <StatCell
+                label="Cost / Call"
+                value={stats.calls > 0 ? `$${(stats.cost / stats.calls).toFixed(4)}` : '—'}
+                hint="Period cost divided by call count"
+              />
             </div>
             {models.length > 0 && (
               <div>
-                <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-1">By model</div>
-                {models.map(([model, m]) => (
-                  <div key={model} className="flex items-baseline gap-2 py-1 border-t border-border/30 first:border-t-0">
-                    <span className="text-[11px] text-[hsl(var(--smui-purple))] truncate flex-1">{model}</span>
-                    <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">{m.calls.toLocaleString()} calls</span>
-                    <span className="text-[11px] tabular-nums shrink-0" style={{ color: 'hsl(var(--smui-yellow))' }}>{fmtCost(m.cost)}</span>
-                  </div>
-                ))}
+                <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-1" style={DISPLAY}>By model</div>
+                {models.map(([model, m]) => {
+                  const share = stats.cost > 0 ? m.cost / stats.cost : 0
+                  return (
+                    <div key={model} className="py-1 border-t border-border/30 first:border-t-0">
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-[11px] text-[hsl(var(--smui-purple))] truncate flex-1">{model}</span>
+                        <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">{m.calls.toLocaleString()} calls</span>
+                        <span className="text-[9px] text-muted-foreground/60 tabular-nums shrink-0">{Math.round(share * 100)}%</span>
+                        <span className="text-[11px] tabular-nums shrink-0" style={{ color: 'hsl(var(--smui-yellow))' }}>{fmtCost(m.cost)}</span>
+                      </div>
+                      <div className="h-1 mt-1 bg-border/30 overflow-hidden">
+                        <div className="h-full transition-all duration-300" style={{ width: `${share * 100}%`, background: 'hsl(var(--smui-purple))' }} />
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>
@@ -173,13 +179,10 @@ export function CostTab({ profile, connected: _connected }: { profile: Profile; 
 
       <DossierCard title="ROI" icon={<TrendingUp size={12} />} source="Server" className="min-h-[80px]" bodyClassName="p-3">
         {roi ? (
-          <div className="flex items-baseline gap-2 flex-wrap">
-            <span className="text-sm font-medium tabular-nums" style={{ color: 'hsl(var(--smui-green))' }}>
-              {roi.creditsPerDollar.toLocaleString()} cr / $
-            </span>
-            <span className="text-[10px] text-muted-foreground tabular-nums">
-              {roi.totalCredits.toLocaleString()} cr earned · {fmtCost(roi.apiCost)} spent (24h cost window)
-            </span>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2">
+            <StatCell label="Yield" value={`${roi.creditsPerDollar.toLocaleString()} cr / $`} accent="var(--smui-green)" hint="Credits earned per dollar of LLM spend (24h cost window)" />
+            <StatCell label="Credits Earned" value={roi.totalCredits.toLocaleString()} accent="var(--smui-yellow)" />
+            <StatCell label="LLM Spend" value={fmtCost(roi.apiCost)} sub="24h cost window" />
           </div>
         ) : (
           <span className="text-[11px] text-muted-foreground/50 italic">{roi === undefined ? 'Loading...' : 'No ROI data.'}</span>

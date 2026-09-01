@@ -4,6 +4,7 @@ import { Users, MessageSquare, RefreshCw } from 'lucide-react'
 import type { Profile } from '@/types'
 import { formatTime } from '@/components/log/log-shared'
 import { DossierCard } from '../DossierCard'
+import { DISPLAY, Chip, Freshness } from '../dossier-shared'
 
 interface FactionMember {
   player_id: string
@@ -50,6 +51,13 @@ const CHANNEL_COLOR: Record<string, string> = {
 
 const factionCache = new Map<string, FactionInfo>()
 const chatCache = new Map<string, ChatMessage[]>()
+const fetchedAtCache = new Map<string, { faction?: number; chat?: number }>()
+
+function markFetched(profileId: string, key: 'faction' | 'chat') {
+  const cur = fetchedAtCache.get(profileId) || {}
+  cur[key] = Date.now()
+  fetchedAtCache.set(profileId, cur)
+}
 
 async function runCommand(profileId: string, command: string, args?: Record<string, unknown>) {
   const resp = await fetch(`/api/profiles/${profileId}/command`, {
@@ -79,6 +87,7 @@ export function CommsTab({ profile, connected }: { profile: Profile; connected: 
   const [factionLoading, setFactionLoading] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>(() => chatCache.get(profile.id) || [])
   const [chatLoading, setChatLoading] = useState(false)
+  const [fetchedAt, setFetchedAt] = useState<{ faction?: number; chat?: number }>(() => fetchedAtCache.get(profile.id) || {})
   const profileIdRef = useRef(profile.id)
   const chatScrollRef = useRef<HTMLDivElement>(null)
 
@@ -87,6 +96,7 @@ export function CommsTab({ profile, connected }: { profile: Profile; connected: 
     setFaction(factionCache.get(profile.id) || null)
     setFactionNote(null)
     setMessages(chatCache.get(profile.id) || [])
+    setFetchedAt(fetchedAtCache.get(profile.id) || {})
   }, [profile.id])
 
   const fetchFaction = useCallback(async () => {
@@ -109,6 +119,8 @@ export function CommsTab({ profile, connected }: { profile: Profile; connected: 
         factionCache.set(targetId, result as FactionInfo)
         setFaction(result as FactionInfo)
         setFactionNote(null)
+        markFetched(targetId, 'faction')
+        setFetchedAt(fetchedAtCache.get(targetId) || {})
       } else {
         setFaction(null)
         setFactionNote('Not in a faction')
@@ -144,6 +156,8 @@ export function CommsTab({ profile, connected }: { profile: Profile; connected: 
       collected.sort((a, b) => (a.timestamp_utc || '').localeCompare(b.timestamp_utc || ''))
       const recent = collected.slice(-MAX_MESSAGES)
       chatCache.set(targetId, recent)
+      markFetched(targetId, 'chat')
+      setFetchedAt(fetchedAtCache.get(targetId) || {})
       // Keep the previous array when nothing changed so the [messages] scroll
       // effect doesn't yank a reader to the bottom on every poll tick.
       setMessages(prev =>
@@ -170,6 +184,7 @@ export function CommsTab({ profile, connected }: { profile: Profile; connected: 
 
   const allies = faction && Array.isArray(faction.allies) ? faction.allies : []
   const enemies = faction && Array.isArray(faction.enemies) ? faction.enemies : []
+  const onlineCount = faction ? (faction.members || []).filter(m => m.is_online).length : 0
 
   return (
     <div className="flex flex-col gap-4">
@@ -179,9 +194,12 @@ export function CommsTab({ profile, connected }: { profile: Profile; connected: 
         source="Server"
         className="min-h-[140px] max-h-[420px]"
         action={
-          <button onClick={fetchFaction} disabled={!connected || factionLoading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
-            <RefreshCw size={11} className={factionLoading ? 'animate-spin' : ''} />
-          </button>
+          <span className="flex items-center gap-2">
+            <Freshness at={fetchedAt.faction ?? null} />
+            <button onClick={fetchFaction} disabled={!connected || factionLoading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
+              <RefreshCw size={11} className={factionLoading ? 'animate-spin' : ''} />
+            </button>
+          </span>
         }
       >
         {!connected ? (
@@ -193,12 +211,15 @@ export function CommsTab({ profile, connected }: { profile: Profile; connected: 
         ) : (
           <div className="p-3 space-y-3">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm font-medium text-foreground">{faction.name}</span>
+              <span className="text-sm font-medium text-foreground" style={DISPLAY}>{faction.name}</span>
               <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 border border-border text-muted-foreground">[{faction.tag}]</span>
-              {faction.at_war && (
-                <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 border" style={{ color: 'hsl(var(--smui-red))', borderColor: 'hsl(var(--smui-red) / 0.4)' }}>
-                  At war
-                </span>
+              {faction.at_war && <Chip label="At war" color="var(--smui-red)" filled />}
+              {onlineCount > 0 && (
+                <Chip
+                  label={`${onlineCount}/${(faction.members || []).length} online`}
+                  color="var(--smui-green)"
+                  title="Faction members currently online"
+                />
               )}
               {faction.leader_username && (
                 <span className="text-[10px] text-muted-foreground ml-auto">Leader: {faction.leader_username}</span>
@@ -208,7 +229,7 @@ export function CommsTab({ profile, connected }: { profile: Profile; connected: 
               <p className="text-[11px] text-muted-foreground leading-relaxed">{faction.description}</p>
             )}
             <div>
-              <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-1">
+              <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-1" style={DISPLAY}>
                 Members{typeof faction.member_count === 'number' ? ` (${faction.member_count})` : ''}
               </div>
               {(faction.members || []).map(m => (
@@ -221,7 +242,7 @@ export function CommsTab({ profile, connected }: { profile: Profile; connected: 
             </div>
             {allies.length > 0 && (
               <div>
-                <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-1">Allies ({allies.length})</div>
+                <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-1" style={DISPLAY}>Allies ({allies.length})</div>
                 <div className="flex flex-wrap gap-1">
                   {allies.map(a => <FactionChip key={a.id} faction={a} />)}
                 </div>
@@ -229,7 +250,7 @@ export function CommsTab({ profile, connected }: { profile: Profile; connected: 
             )}
             {enemies.length > 0 && (
               <div>
-                <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-1">Enemies ({enemies.length})</div>
+                <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-1" style={DISPLAY}>Enemies ({enemies.length})</div>
                 <div className="flex flex-wrap gap-1">
                   {enemies.map(e => <FactionChip key={e.id} faction={e} hostile />)}
                 </div>
@@ -245,9 +266,12 @@ export function CommsTab({ profile, connected }: { profile: Profile; connected: 
         source="Server"
         className="min-h-[140px]"
         action={
-          <button onClick={fetchChat} disabled={!connected || chatLoading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
-            <RefreshCw size={11} className={chatLoading ? 'animate-spin' : ''} />
-          </button>
+          <span className="flex items-center gap-2">
+            <Freshness at={fetchedAt.chat ?? null} />
+            <button onClick={fetchChat} disabled={!connected || chatLoading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
+              <RefreshCw size={11} className={chatLoading ? 'animate-spin' : ''} />
+            </button>
+          </span>
         }
       >
         {!connected ? (

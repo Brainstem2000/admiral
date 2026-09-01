@@ -5,6 +5,7 @@ import type { Profile, LogEntry } from '@/types'
 import type { KillZone } from '@shared/fleet-intel-types'
 import { formatTime } from '@/components/log/log-shared'
 import { DossierCard } from '../DossierCard'
+import { DISPLAY, StatCell, Freshness, ageOf, parseTs } from '../dossier-shared'
 
 interface Skill {
   name: string
@@ -15,7 +16,7 @@ interface Skill {
   next_level_xp: number
 }
 
-interface CombatStats { stats: Record<string, number>; empireSkill: Skill | null }
+interface CombatStats { stats: Record<string, number>; empireSkill: Skill | null; fetchedAt: number }
 
 interface BattleRow {
   battle_id: string
@@ -70,32 +71,6 @@ async function runCommand(profileId: string, command: string) {
     body: JSON.stringify({ command, silent: true }),
   })
   return resp.json()
-}
-
-function parseTs(ts: string): number {
-  const t = Date.parse(ts.includes('T') ? ts : `${ts.replace(' ', 'T')}Z`)
-  return Number.isFinite(t) ? t : 0
-}
-
-function ageOf(ts: string | null): string {
-  if (!ts) return '—'
-  const ms = Date.now() - parseTs(ts)
-  if (ms < 0 || !Number.isFinite(ms)) return '—'
-  const m = Math.floor(ms / 60_000)
-  if (m < 1) return 'now'
-  if (m < 60) return `${m}m`
-  const h = Math.floor(m / 60)
-  if (h < 48) return `${h}h`
-  return `${Math.floor(h / 24)}d`
-}
-
-function StatCell({ label, value, accent }: { label: string; value: string; accent?: string }) {
-  return (
-    <div className="min-w-0">
-      <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-0.5">{label}</div>
-      <div className="text-sm font-medium tabular-nums truncate" style={accent ? { color: `hsl(${accent})` } : undefined}>{value}</div>
-    </div>
-  )
 }
 
 export function CombatTab({ profile, connected }: { profile: Profile; connected: boolean }) {
@@ -161,7 +136,7 @@ export function CombatTab({ profile, connected }: { profile: Profile; connected:
         empireSkill = Object.values(skillsResult.skills as Record<string, Skill>).find(s => s?.category === 'Empire') || null
       }
       if (stats && typeof stats === 'object') {
-        const next: CombatStats = { stats: stats as Record<string, number>, empireSkill }
+        const next: CombatStats = { stats: stats as Record<string, number>, empireSkill, fetchedAt: Date.now() }
         combatCache.set(targetId, next)
         setCombat(next)
       }
@@ -233,6 +208,10 @@ export function CombatTab({ profile, connected }: { profile: Profile; connected:
   const deaths = stats
     ? (stats.deaths ?? (Number(stats.deaths_by_pirate || 0) + Number(stats.deaths_by_player || 0) + Number(stats.deaths_by_self_destruct || 0)))
     : null
+  const totalKills = stats ? Number(stats.pirates_destroyed || 0) + Number(stats.ships_destroyed || 0) : 0
+  const kdRatio = deaths == null || Number(deaths) === 0
+    ? (totalKills > 0 ? `${totalKills.toLocaleString()} / 0` : '—')
+    : (totalKills / Number(deaths)).toFixed(1)
 
   // Ghost rows sort last; live rows by recency. `ghost` may be absent pre-deploy — treat as 0.
   const sortedZones = useMemo(() => {
@@ -283,9 +262,12 @@ export function CombatTab({ profile, connected }: { profile: Profile; connected:
         className="min-h-[80px]"
         bodyClassName="p-3"
         action={
-          <button onClick={fetchCombat} disabled={!connected || loading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
-            <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
-          </button>
+          <span className="flex items-center gap-2">
+            <Freshness at={combat?.fetchedAt ?? null} />
+            <button onClick={fetchCombat} disabled={!connected || loading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
+              <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
+            </button>
+          </span>
         }
       >
         {!connected && !stats ? (
@@ -293,10 +275,16 @@ export function CombatTab({ profile, connected }: { profile: Profile; connected:
         ) : !stats ? (
           <span className="text-[11px] text-muted-foreground/50 italic">{loading ? 'Loading...' : 'No combat data'}</span>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-x-4 gap-y-2">
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-x-4 gap-y-2">
             <StatCell label="Pirates Destroyed" value={Number(stats.pirates_destroyed || 0).toLocaleString()} accent="var(--smui-red)" />
             <StatCell label="Ships Destroyed" value={Number(stats.ships_destroyed || 0).toLocaleString()} accent="var(--smui-orange)" />
-            {deaths != null && <StatCell label="Deaths" value={Number(deaths).toLocaleString()} />}
+            {deaths != null && <StatCell label="Deaths" value={Number(deaths).toLocaleString()} accent={Number(deaths) > 0 ? 'var(--smui-red)' : undefined} />}
+            <StatCell
+              label="Kills / Death"
+              value={kdRatio}
+              accent="var(--smui-green)"
+              hint="pirates + ships destroyed, divided by deaths"
+            />
             <StatCell label="Jumps Completed" value={Number(stats.jumps_completed || 0).toLocaleString()} />
             <StatCell label="Systems Explored" value={Number(stats.systems_explored || 0).toLocaleString()} />
             <StatCell label="Damage Dealt" value={Number(stats.damage_dealt || 0).toLocaleString()} />
@@ -431,7 +419,7 @@ export function CombatTab({ profile, connected }: { profile: Profile; connected:
           <div className="px-3 py-3 text-[11px] text-muted-foreground/50 italic">No kill zones mapped yet — combat agents log them as they scan.</div>
         ) : (
           <>
-            <div className="flex items-center gap-2.5 px-3 py-1.5 border-b border-border/40 text-[9px] uppercase tracking-wider text-muted-foreground">
+            <div className="flex items-center gap-2.5 px-3 py-1.5 border-b border-border/40 text-[9px] uppercase tracking-wider text-muted-foreground" style={DISPLAY}>
               <span className="flex-1 min-w-0">POI</span>
               <span className="w-24 shrink-0 hidden sm:block">System</span>
               <span className="w-16 shrink-0 text-right">Pirates</span>
@@ -486,7 +474,7 @@ export function CombatTab({ profile, connected }: { profile: Profile; connected:
             </button>
           </span>
         </div>
-        <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-1">Encounters</div>
+        <div className="text-[10px] uppercase tracking-[1.5px] text-muted-foreground mb-1" style={DISPLAY}>Encounters</div>
         {encounters.length === 0 ? (
           <div className="text-[11px] text-muted-foreground/50 italic">no contact</div>
         ) : (
