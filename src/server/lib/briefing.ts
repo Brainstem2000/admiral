@@ -7,7 +7,7 @@
  * Kill switch: preference "situational_briefing" = "off" disables injection.
  */
 import type { GameConnection, CommandResult } from './connections/interface'
-import { listObligations, getProfile, listPlaybook, getStorageSummaryForProfile, getNavIntel } from './db'
+import { listObligations, getProfile, listPlaybook, getStorageSummaryForProfile, getNavIntel, getHuntIntel } from './db'
 import { galaxyMarketLines, directiveMarketLines } from './galaxy-market'
 
 const REFRESH_INTERVAL = 60_000 // 60 seconds
@@ -395,6 +395,31 @@ export function buildSituationalBriefing(profileId: string): string {
             lines.push('== FLEET INTEL: HERE AND ONE JUMP OUT (what the fleet already knows — do NOT re-scout this) ==')
             lines.push(...navLines)
             lines.push('  (STATION = you can dock there. Fly to one of these rather than guessing.)')
+          }
+
+          // Standing answers to a combat agent's recurring questions: where are
+          // the pirates, what is worth looting, and where do I pick up stackable
+          // contracts. Ranked by hops so it is a next-move list, not an atlas.
+          const hunt = getHuntIntel(sysId)
+          const huntLines: string[] = []
+          if (hunt.missionStations.length) {
+            huntLines.push(`  MISSION BOARDS: ${hunt.missionStations
+              .map(m => `${m.system_id} (${m.hops === 0 ? 'HERE' : m.hops + ' jump' + (m.hops > 1 ? 's' : '')}${m.police_level !== null ? `, police ${m.police_level}` : ''})`)
+              .join(' · ')}`)
+          }
+          if (hunt.killzones.length) {
+            huntLines.push(`  PIRATE GROUNDS: ${hunt.killzones
+              .map(k => `${k.system_id}/${k.poi_name} (${k.pirates} seen${k.last_seen ? ', last ' + String(k.last_seen).slice(0, 10) : ''})`)
+              .join(' · ')}`)
+          }
+          if (hunt.wrecks.length) {
+            huntLines.push(`  WRECKS TO LOOT: ${hunt.wrecks
+              .map(w => `${w.system_id} x${w.n}${w.value ? ` (~${w.value}cr)` : ''}`)
+              .join(' · ')}`)
+          }
+          if (huntLines.length) {
+            lines.push('== FLEET INTEL: HUNTING & CONTRACTS (nearest first) ==')
+            lines.push(...huntLines)
           }
         }
       }

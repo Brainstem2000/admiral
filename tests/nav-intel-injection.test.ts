@@ -25,13 +25,28 @@ import path from 'node:path'
 const cwd = process.cwd()
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'admiral-navintel-test-'))
 process.chdir(workspace)
+
+// GUARD: db.ts resolves DB_PATH from process.cwd() AT MODULE LOAD, so the
+// chdir above must happen before db.ts is imported anywhere in this file —
+// hence the dynamic imports below. A static import would bind the real
+// data/admiral.db and this test would write fixtures into live fleet state.
+// (It did, once: 43 fake systems and 42 fake links had to be deleted by hand.)
 afterAll(() => {
   process.chdir(cwd)
   fs.rmSync(workspace, { recursive: true, force: true })
 })
 
-const { getDb, getNavIntel } = await import('../src/server/lib/db')
+const { getDb, getNavIntel, getHuntIntel } = await import('../src/server/lib/db')
 const db = getDb()
+// Fail loudly rather than silently polluting the real database.
+{
+  // fs.realpathSync on both sides: macOS resolves /var -> /private/var, so a
+  // naive prefix check on the mkdtemp path fails even when it is correct.
+  const opened = fs.realpathSync((db as unknown as { filename: string }).filename)
+  if (!opened.startsWith(fs.realpathSync(workspace))) {
+    throw new Error(`refusing to run: db opened outside the temp workspace (${opened})`)
+  }
+}
 
 // A tiny galaxy: a hub with a full-service station, a pirate den, and a dead end.
 db.query(`INSERT OR REPLACE INTO fleet_intel_systems
@@ -105,5 +120,26 @@ describe('fleet intel injection', () => {
     expect(nav.current).toBeNull()
     expect(nav.neighbours).toEqual([])
     expect(() => getNavIntel('')).not.toThrow()
+  })
+
+  test('hunting intel answers the standing combat questions, nearest first', () => {
+    // A pirate den one jump out, and a contract board where the agent stands.
+    const hunt = getHuntIntel('hub')
+    expect(hunt.missionStations.some(m => m.system_id === 'hub' && m.hops === 0)).toBe(true)
+    const den = hunt.killzones.find(k => k.system_id === 'den')
+    expect(den?.pirates).toBe(9)
+    expect(den?.poi_name).toContain('Den Gas Cloud')
+  })
+
+  test('hunting intel is capped so it cannot grow into an atlas', () => {
+    for (let i = 0; i < 30; i++) {
+      db.query(`INSERT OR REPLACE INTO fleet_intel_killzones
+        (poi_id, system_id, system_name, poi_name, poi_type, pirate_seen, wreck_seen, discovered_by)
+        VALUES (?,?,?,?,?,?,?,?)`).run(`kz_${i}`, `kzsys_${i}`, `KZ ${i}`, `KZ POI ${i}`, 'belt', 5, 0, 't')
+    }
+    const hunt = getHuntIntel('hub')
+    expect(hunt.killzones.length).toBeLessThanOrEqual(5)
+    expect(hunt.wrecks.length).toBeLessThanOrEqual(5)
+    expect(hunt.missionStations.length).toBeLessThanOrEqual(5)
   })
 })

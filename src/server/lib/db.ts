@@ -2999,3 +2999,85 @@ export function getNavIntel(systemId: string, maxNeighbours = 8): {
 
   return { current: enrich(cur), neighbours }
 }
+
+export interface HuntIntel {
+  killzones: Array<{ system_id: string; poi_name: string; pirates: number; last_seen: string | null }>
+  wrecks: Array<{ system_id: string; n: number; value: number | null; last_seen: string | null }>
+  missionStations: Array<{ system_id: string; empire: string | null; police_level: number | null; hops: number }>
+}
+
+/**
+ * Where to hunt and where to bank the contracts, from what the fleet has
+ * already seen — the standing questions for a combat agent: "where are the
+ * pirates", "what is there to loot", "where do I pick up stackable missions".
+ *
+ * Ranked by distance from the agent (1 hop, then 2), so it is actionable rather
+ * than a galaxy-wide list. Caps are deliberate: this is injected every turn.
+ */
+export function getHuntIntel(systemId: string, limit = 5): HuntIntel {
+  const d = getDb()
+  const today = new Date().toISOString().slice(0, 10)
+
+  const hop1 = (d.query(
+    `SELECT DISTINCT CASE WHEN a = ? THEN b ELSE a END s FROM system_links WHERE a = ? OR b = ?`,
+  ).all(systemId, systemId, systemId) as Array<{ s: string }>).map(r => r.s)
+
+  const hop2 = new Set<string>()
+  for (const h of hop1.slice(0, 8)) {
+    for (const r of d.query(
+      `SELECT DISTINCT CASE WHEN a = ? THEN b ELSE a END s FROM system_links WHERE a = ? OR b = ? LIMIT 8`,
+    ).all(h, h, h) as Array<{ s: string }>) {
+      if (r.s !== systemId && !hop1.includes(r.s)) hop2.add(r.s)
+    }
+  }
+  const near = [systemId, ...hop1]
+  const rank = (s: string) => (s === systemId ? 0 : hop1.includes(s) ? 1 : hop2.has(s) ? 2 : 9)
+
+  const killzones = (d.query(
+    `SELECT system_id, system_name, poi_name, pirate_seen, last_pirate_at
+     FROM fleet_intel_killzones WHERE pirate_seen > 0`,
+  ).all() as Array<Record<string, unknown>>)
+    .map(k => ({
+      system_id: String(k.system_id ?? k.system_name ?? '?'),
+      poi_name: String(k.poi_name ?? ''),
+      pirates: Number(k.pirate_seen ?? 0),
+      last_seen: (k.last_pirate_at as string) ?? null,
+    }))
+    .sort((a, b) => (rank(a.system_id) - rank(b.system_id)) || (b.pirates - a.pirates))
+    .slice(0, limit)
+
+  const wrecks = (d.query(
+    `SELECT system_id, COUNT(*) n, SUM(salvage_value) val, MAX(last_seen) seen
+     FROM fleet_intel_wrecks WHERE expires_at IS NULL OR expires_at > ?
+     GROUP BY system_id`,
+  ).all(today) as Array<Record<string, unknown>>)
+    .map(w => ({
+      system_id: String(w.system_id),
+      n: Number(w.n ?? 0),
+      value: w.val === null || w.val === undefined ? null : Number(w.val),
+      last_seen: (w.seen as string) ?? null,
+    }))
+    .sort((a, b) => (rank(a.system_id) - rank(b.system_id)) || (b.n - a.n))
+    .slice(0, limit)
+
+  const candidates = [...near, ...hop2]
+  const missionStations: HuntIntel['missionStations'] = []
+  if (candidates.length > 0) {
+    const q = candidates.map(() => '?').join(',')
+    for (const r of d.query(
+      `SELECT system_id, empire, police_level FROM fleet_intel_systems
+       WHERE system_id IN (${q}) AND has_station = 1 AND station_services LIKE '%mission%'`,
+    ).all(...candidates) as Array<Record<string, unknown>>) {
+      missionStations.push({
+        system_id: String(r.system_id),
+        empire: (r.empire as string) ?? null,
+        police_level: r.police_level === null || r.police_level === undefined ? null : Number(r.police_level),
+        hops: rank(String(r.system_id)),
+      })
+    }
+    missionStations.sort((a, b) => (a.hops - b.hops) || ((b.police_level ?? 0) - (a.police_level ?? 0)))
+    missionStations.splice(limit)
+  }
+
+  return { killzones, wrecks, missionStations }
+}

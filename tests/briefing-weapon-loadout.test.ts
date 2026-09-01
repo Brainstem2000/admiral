@@ -10,6 +10,12 @@ import path from 'node:path'
 const cwd = process.cwd()
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'admiral-briefing-test-'))
 process.chdir(workspace)
+
+// GUARD: db.ts resolves DB_PATH from process.cwd() AT MODULE LOAD, so the
+// chdir above must happen before db.ts is imported anywhere in this file —
+// hence the dynamic imports below. A static import would bind the real
+// data/admiral.db and this test would write fixtures into live fleet state.
+// (It did, once: 43 fake systems and 42 fake links had to be deleted by hand.)
 afterAll(() => {
   process.chdir(cwd)
   fs.rmSync(workspace, { recursive: true, force: true })
