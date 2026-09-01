@@ -222,8 +222,9 @@ export function buildSituationalBriefing(profileId: string): string {
 
   // Standing drains — every agent sees its own rents every turn. A Crew Bunk +
   // Ledger Desk billed one agent ~2M over 30 days precisely because no surface
-  // showed it. Rent silent >6h is shown as (lapsed?) rather than dropped: absence
-  // of a payment is weaker evidence than a dismantle event.
+  // showed it. For stale rows (>6h without a new payment), state the default
+  // action explicitly ("treat as ended") so the model does not spin on
+  // investigative facility-list loops for likely phantom rentals.
   {
     const obs = listObligations(profileId).filter(o => o.obligation_type === 'rent' && o.status === 'active')
     if (obs.length > 0) {
@@ -234,7 +235,9 @@ export function buildSituationalBriefing(profileId: string): string {
         // which sits inside the CACHED prompt prefix — stays stable between payments
         // instead of invalidating the cache every rent cycle.
         const roughTotal = Math.round(o.total_paid / 10_000) * 10_000
-        return `${o.facility} @${o.station_id} ${o.last_cost}cr/cycle (~${fmtNum(roughTotal)} paid to date${staleH > 6 ? ', lapsed?' : ''})`
+        return staleH > 6
+          ? `${o.facility} @${o.station_id} ${o.last_cost}cr/cycle (~${fmtNum(roughTotal)} paid to date, stale>${Math.floor(staleH)}h — treat as ENDED unless a fresh rent_paid event appears)`
+          : `${o.facility} @${o.station_id} ${o.last_cost}cr/cycle (~${fmtNum(roughTotal)} paid to date)`
       })
       lines.push(`⚠ ACTIVE RENTALS DRAINING YOUR WALLET: ${parts.join('; ')} — cancel any you are not actively using, or post NEED if unsure how.`)
     }
@@ -246,6 +249,25 @@ export function buildSituationalBriefing(profileId: string): string {
     const cargoUsed = ship.cargo_used ?? '?'
     const cargoMax = ship.cargo_capacity ?? ship.max_cargo ?? '?'
     lines.push(`Ship: ${shipClass} | Cargo: ${cargoUsed}/${cargoMax}`)
+  }
+
+  // Weapon/loadout snapshot. Keeps "what can I fire/reload right now?" visible
+  // without burning game ticks on repeated get_ship loops.
+  {
+    const shipModules = Array.isArray(ship?.modules) ? ship.modules as unknown[] : []
+    const rootModules = Array.isArray(gs.modules) ? gs.modules as unknown[] : []
+    const modules = (shipModules.length > 0 ? shipModules : rootModules)
+      .map((m) => m as Record<string, unknown>)
+    const weapons = modules.filter((m) => String(m.slot ?? '').toLowerCase() === 'weapon')
+    if (weapons.length > 0) {
+      const items = weapons.slice(0, 8).map((w) => {
+        const id = String(w.id ?? w.instance_id ?? w.module_id ?? '').trim()
+        const name = String(w.item_id ?? w.module_type ?? w.name ?? 'weapon')
+        const ammo = w.current_ammo !== undefined ? `${w.current_ammo}/${w.magazine_size ?? '?'}` : null
+        return `${name}${id ? `#${id}` : '#?'}${ammo ? ` ammo:${ammo}` : ''}`
+      })
+      lines.push(`Weapons: ${items.join(' | ')}`)
+    }
   }
 
   // Cargo contents

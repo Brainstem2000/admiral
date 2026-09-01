@@ -1029,6 +1029,17 @@ export async function executeTool(
         commandArgs.target_system = cleaned
       }
     }
+    // get_system does not accept system_id. If the model supplied one, it means
+    // "look up this system", which is search_systems(query=...).
+    if (bare === 'get_system' || bare.endsWith('_get_system')) {
+      const requested = String(commandArgs.system_id ?? commandArgs.target_system ?? commandArgs.system ?? '').trim()
+      if (requested) {
+        const next = command.replace(/get_system$/, 'search_systems')
+        ctx.log('system', `Normalized ${command}(system_id=...) -> ${next}(query=...)`)
+        command = next
+        commandArgs = { query: requested }
+      }
+    }
     // search_systems uses query, not text
     if ((bare === 'search_systems' || bare.endsWith('_search_systems')) && !commandArgs.query && commandArgs.text) {
       commandArgs.query = commandArgs.text; delete commandArgs.text
