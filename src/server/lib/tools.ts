@@ -950,6 +950,47 @@ export async function executeTool(
     commandArgs = Object.keys(args).length > 0 ? args : undefined
   }
 
+  // Repair two malformations seen from gpt-oss models on the local MLX server.
+  // Both are recoverable with certainty, and both otherwise cost a full tool
+  // round out of the turn's 12 on a guaranteed `unknown_command`.
+  //
+  // 1. Leaked harmony control tokens. gpt-oss speaks the harmony format, whose
+  //    channel markers (`<|channel|>`, `<|message|>`, ...) are meant to be
+  //    consumed by the serving layer's parser. It occasionally emits one inside
+  //    a tool call instead: `facility<|channel|>commentary`. Everything from the
+  //    first marker on is transcript, not command.
+  //
+  // 2. A game() call nested inside another game(), which is how the same
+  //    malformation usually arrives in practice — observed verbatim:
+  //    `game(game<|channel|>commentary, command=spacemolt_market_view_market
+  //    args={"item_id":"cargo_expander_i"})`. Stripping the marker alone leaves
+  //    the bare wrapper name `game`, which is still not a command; the real call
+  //    is one level down in the args.
+  //
+  // Interleaved because unwrapping can expose another marked name. Bounded, so
+  // a pathological payload cannot spin here.
+  for (let pass = 0; pass < 3; pass++) {
+    if (command.includes('<|')) {
+      const cleaned = command.slice(0, command.indexOf('<|')).trim()
+      if (!cleaned) break
+      ctx.log('system', `Stripped model control tokens from command name: "${command}" -> "${cleaned}"`)
+      command = cleaned
+    }
+    // Only unwrap the wrapper tool's own name. Unwrapping any command that
+    // happens to carry a `command` argument would corrupt legitimate calls.
+    const nested = commandArgs?.command
+    if ((command === 'game' || command === 'spacemolt_game') && typeof nested === 'string' && nested) {
+      const innerArgs = commandArgs?.args
+      ctx.log('system', `Unwrapped nested game() call: "${command}" -> "${nested}"`)
+      command = nested
+      commandArgs = innerArgs && typeof innerArgs === 'object' && !Array.isArray(innerArgs)
+        ? innerArgs as Record<string, unknown>
+        : undefined
+      continue
+    }
+    break
+  }
+
   // Auto-correct common parameter mistakes to reduce wasted API calls
   if (commandArgs) {
     const bare = command.replace(/^spacemolt_/, '')

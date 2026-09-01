@@ -26,6 +26,18 @@ import fs from 'fs'
 import path from 'path'
 
 const TURN_INTERVAL = 2000
+/** Providers that serve models off the local machine rather than a hosted API.
+ *  Their generation rate is bounded by local memory bandwidth, not by a
+ *  datacenter GPU, so the hosted-API timeout is wildly wrong for them. */
+const LOCAL_PROVIDERS = new Set(['custom', 'ollama', 'lmstudio'])
+/** The 90s default is a hosted-API figure. A dense 27B at 8-bit on Apple
+ *  silicon measured ~14 output tok/s (Morg'Thar, 2026-09-01: 485 tokens in
+ *  35s), so the 4096-token executor budget needs ~293s to finish. At 90s the
+ *  model could only ever emit ~1,260 tokens — under a third of what it is
+ *  allowed — which meant a reasoning model that thinks before acting was
+ *  killed mid-thought on 6 of 8 calls and never reached its tool call.
+ *  300s covers the full budget at the measured rate. */
+const LOCAL_LLM_TIMEOUT_MS = 300_000
 /** How often a push-capable agent re-reads get_status purely to refresh its
  *  wallet. get_status costs no game tick, so this is free; 60s keeps the
  *  dashboard honest without adding meaningful traffic. */
@@ -397,6 +409,12 @@ export class Agent {
         const turnRole = isPlanningTurn ? routing.planner! : routing.executor
         const turnResolved = isPlanningTurn ? plannerResolved : executorResolved
         const phasePrefix = isPlanningTurn ? '[Planning] ' : (hasDualModel ? '[Executing] ' : '')
+        // Resolve the timeout against the provider actually serving THIS turn —
+        // a dual-model agent can pair a local planner with a hosted executor, so
+        // this cannot be decided once per agent. An explicit `llm_timeout`
+        // preference still overrides both defaults.
+        const turnLlmTimeoutMs = llmTimeoutMs
+          ?? (LOCAL_PROVIDERS.has(turnRole.provider) ? LOCAL_LLM_TIMEOUT_MS : undefined)
 
         // Planning turns get fewer tool rounds — Opus should set strategy, not do exhaustive research.
         // Lowered 10->5: audit found 51-62% of Opus planning turns hit the 10-round cap against the
@@ -426,7 +444,7 @@ export class Agent {
               options: {
                 signal: this.abortController.signal,
                 maxToolRounds: turnMaxToolRounds,
-                llmTimeoutMs,
+                llmTimeoutMs: turnLlmTimeoutMs,
                 onActivity: (a) => this.setActivity(`${phasePrefix}${a}`),
                 isConnectionDown: () => this.everConnected && !(this.connection?.isConnected() ?? false),
               },
@@ -441,7 +459,7 @@ export class Agent {
                 // ...and again mid-turn if the token is rotated out from under us.
                 refreshApiKey: () => resolveApiKey(turnRole.provider),
                 maxToolRounds: turnMaxToolRounds,
-                llmTimeoutMs,
+                llmTimeoutMs: turnLlmTimeoutMs,
                 // 2048 was tuned for Sonnet 4.6, which almost never reached it (5 of 1,829
                 // calls, 0.3%). Sonnet 5 writes longer and hit it on 96 of 1,260 calls —
                 // 7.6%, 25x more often — at $0.230 a truncated call against $0.055 for a

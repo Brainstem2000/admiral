@@ -15,6 +15,9 @@ const DEFAULT_MAX_TOOL_ROUNDS = 12
 // 5s base all land inside ~35s, so a blip lasting a minute burned the whole turn — Morg'Thar
 // lost one that way on 2026-08-19 at ~1% of his calls. 5 retries at a 10s base spans ~310s.
 const MAX_RETRIES = 5
+/** Abort/timeout retries are capped far below MAX_RETRIES — see the rationale
+ *  at the throw site. One retry, then the turn ends. */
+const MAX_ABORT_RETRIES = 1
 const RETRY_BASE_DELAY = 10_000
 const DEFAULT_LLM_TIMEOUT_MS = 90_000
 
@@ -475,7 +478,10 @@ async function summarizeViaLLM(
 
 // --- LLM call with retry ---
 
-async function completeWithRetry(
+/** Exported for tests: the abort/timeout handling here is the difference
+ *  between a stalled local model retrying and the same model being silently
+ *  scored as an idle agent. */
+export async function completeWithRetry(
   model: Model<any>,
   context: Context,
   log: LogFn,
@@ -483,6 +489,7 @@ async function completeWithRetry(
   compaction?: CompactionState,
 ): Promise<AssistantMessage> {
   let lastError: Error | null = null
+  let abortAttempts = 0
 
   const timeoutMs = options?.llmTimeoutMs || DEFAULT_LLM_TIMEOUT_MS
   // Mutable across attempts: an OAuth rotation mid-turn invalidates the key we
@@ -513,6 +520,24 @@ async function completeWithRetry(
         }
         if (result.content.length === 0) {
           throw new Error('LLM returned empty response')
+        }
+        // A timed-out call can come back as a *successful-looking* result:
+        // stopReason 'aborted' with a partial `thinking` block and 0/0 usage.
+        // It clears both guards above, so it used to be returned as a real
+        // response — which the turn loop then read as "zero tool calls", i.e.
+        // a deliberate no-op, and scored as an idle turn (see the `rounds === 0`
+        // branch below). Observed 2026-09-01: Morg'Thar on a local 27B dense
+        // model aborted 6 of 8 calls at exactly 90s, each one starting a brand
+        // new turn that re-ran read_todo/read_memory/get_status from scratch,
+        // then tripped the idle backoff and sat unreachable until nudged.
+        // Local reasoning models spend their whole budget thinking, so this is
+        // their normal failure mode, not an edge case. Route it into the retry
+        // path where it belongs.
+        if (result.stopReason === 'aborted' && !options?.signal?.aborted) {
+          throw new Error(
+            `LLM call aborted after ${timeoutMs / 1000}s with no tool call ` +
+            `(partial output discarded) — likely the generation budget, not a stall.`,
+          )
         }
 
         return result
@@ -569,6 +594,25 @@ async function completeWithRetry(
           }
         } catch (err) {
           log('system', `Auth error — credential refresh failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
+
+      // Timeout aborts are not transient the way a malformed-JSON blip is:
+      // the prompt and the budget are identical on every attempt, so a call
+      // that ran out of clock will usually do it again. Burning the full 5
+      // attempts at a local provider's 300s timeout would tie one agent up for
+      // ~25 minutes on a single turn — worse than the failure it replaces.
+      // Allow one retry (covers a genuine one-off stall, e.g. another agent
+      // monopolising the local server) and then give up on the turn.
+      const isAbort = lastError.message.includes('LLM call aborted after')
+      if (isAbort) {
+        abortAttempts++
+        if (abortAttempts > MAX_ABORT_RETRIES) {
+          log('error',
+            `LLM aborted ${abortAttempts}x on this turn — ending it rather than retrying further. ` +
+            `The model is not finishing inside its time budget: raise the \`llm_timeout\` preference, ` +
+            `lower maxTokens, or move this agent to a faster (MoE) model.`)
+          throw lastError
         }
       }
 

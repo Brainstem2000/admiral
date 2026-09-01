@@ -72,6 +72,18 @@ Stored in SQLite `preferences` table. Key ones:
 6. **`admiral.exe` locks on Windows** — must `Stop-Process` before rebuilding, or build will fail with EPERM.
 7. **Background tasks need `stopRequested`** — when stopping an agent, add profileId to `stopRequested` set to prevent auto-restart via backoff.
 
+## Session History Friction Patterns (Chronicle)
+
+- **Verify live state before asserting it.** In prior sessions, incorrect claims about connected/disconnected agents caused course correction. Before stating fleet status or changing plan, read live API state in the same cycle (`/api/profiles` and relevant inventory endpoints). If evidence is incomplete, state uncertainty explicitly instead of asserting.
+
+- **Treat item logistics as physical movement.** Session corrections repeatedly flagged transfer assumptions. Item gifts do not replace hauling requirements for station-scoped commissioning inputs; plans must include origin station, destination station, and route/hauler assignment. Credit transfers can be treated as location-agnostic.
+
+- **Honor transferred mission context unless contradicted by fresh evidence.** Takeover sessions include authoritative mission briefs and standing decisions. Do not re-derive or override that context unless live API/codex evidence conflicts; when conflicts appear, show both sources with timestamps and resolve explicitly.
+
+- **Track full dependency chains for commissioning goals.** Build/commission work drifted when hidden requirements were omitted. Always account for complete requirement sets: base build materials, default modules, and facility prerequisites from codex chain + commission quote. Keep one “open lines” ledger with deltas rather than multiple partial tallies.
+
+- **When running standing fleet-watch loops, resume the loop after interventions.** Prior sessions needed redirection when loops were dropped mid-mission. If autonomous watch cadence is established, continue cadence and report concise deltas/alerts after any interruption unless a hard blocker prevents execution.
+
 ## Testing
 No test suite currently exists. Verify changes by:
 1. `bun run build` (must succeed)
