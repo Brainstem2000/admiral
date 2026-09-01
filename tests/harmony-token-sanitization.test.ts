@@ -87,4 +87,55 @@ describe('harmony control tokens in command names', () => {
     expect(seen[0]).toBe('view_market')
     expect(passedArgs).toMatchObject({ item_id: 'iron_ore' })
   })
+
+  test('a game() call nested inside another game() is unwrapped', async () => {
+    const { executeTool } = await import('../src/server/lib/tools')
+    const seen: string[] = []
+    let passedArgs: Record<string, unknown> | undefined
+
+    const conn = stubConnection(seen)
+    conn.execute = async (command: string, args?: Record<string, unknown>) => {
+      seen.push(command)
+      if (seen.length === 1) passedArgs = args
+      return { result: 'ok' }
+    }
+
+    // Verbatim shape observed from custom/gpt-oss-120b-MXFP4-Q8: the marker is
+    // on the WRAPPER name and the real call sits one level down. Stripping
+    // alone would dispatch the bare tool name `game`, which is not a command.
+    await executeTool(
+      'game',
+      {
+        command: 'game<|channel|>commentary',
+        args: { command: 'spacemolt_market_view_market', args: { item_id: 'cargo_expander_i' } },
+      },
+      ctxFor(conn),
+    )
+
+    // The v2 `spacemolt_` prefix is normalised away downstream, as for any
+    // other command — what matters is that the real call, not the wrapper,
+    // is what gets dispatched.
+    expect(seen[0]).toBe('market_view_market')
+    expect(passedArgs).toMatchObject({ item_id: 'cargo_expander_i' })
+  })
+
+  test('a real command carrying a `command` argument is not unwrapped', async () => {
+    const { executeTool } = await import('../src/server/lib/tools')
+    const seen: string[] = []
+    let passedArgs: Record<string, unknown> | undefined
+
+    const conn = stubConnection(seen)
+    conn.execute = async (command: string, args?: Record<string, unknown>) => {
+      seen.push(command)
+      if (seen.length === 1) passedArgs = args
+      return { result: 'ok' }
+    }
+
+    // `help` legitimately takes a topic that can be a command name. Unwrapping
+    // anything that merely carries a `command` key would eat calls like this.
+    await executeTool('game', { command: 'help', args: { command: 'dock' } }, ctxFor(conn))
+
+    expect(seen[0]).toBe('help')
+    expect(passedArgs).toMatchObject({ command: 'dock' })
+  })
 })
