@@ -95,6 +95,21 @@ src/shared/types.ts shared TS interfaces
   local memory bandwidth and get `LOCAL_LLM_TIMEOUT_MS` (300s) instead. Sanity-check
   any timeout against `maxTokens / measured tok-per-s`: if the budget cannot fit the
   token allowance, the model is guaranteed to be killed mid-generation.
+- **All local agents must share ONE model.** oMLX (the local MLX server) keeps a
+  single model resident and swaps on demand, so two different local models across
+  the fleet thrash: measured 2026-09-01, alternating gpt-oss-120b (59GB) and
+  Qwen3.6-35B-A3B (35GB) on a 128GB box collapsed throughput from 73.5 tok/s to
+  12.3 and then returned HTTP 400s once free memory hit ~285MB with 1.5GB swap in
+  use. A local planner paired with a *hosted* executor is fine; two local models
+  are not. Measured generation throughput, from oMLX's own `~/.oMLX/stats.json`
+  over 1,489 production requests:
+  gpt-oss-120b-MXFP4-Q8 **48.4 tok/s** · Muse-Glimmer-30B-4bit 29.8 ·
+  Qwen3.8-27B-OptiQ-4bit 24.5 · Qwen3.8-27B-MLX-8bit 16.7. The largest model is
+  the fastest because it is sparse MoE (5.1B active of 117B) — parameter count is
+  not the speed predictor, active parameters are.
+- **Qwen3.8 defaults to `reasoning_effort: xhigh`** in its chat template
+  (`reasoning_effort|default('xhigh')`), which is why it burned whole timeouts
+  thinking. Set it to `low` before judging that family on speed.
 - **Cron schedules** are validated on create (`validateCronExpression`) — reject
   malformed expressions rather than storing ones that silently never fire.
 - **Tables are pruned** periodically (`pruneOldData` in `index.ts`): logs, financial
