@@ -74,6 +74,18 @@ src/shared/types.ts shared TS interfaces
   Connections clear notification handlers on `disconnect()`.
 - **Stopping an agent:** add the profileId to `stopRequested` so backoff doesn't
   auto-restart it; `Agent.stop()` also clears per-profile state in `tools.ts`.
+- **An aborted LLM response is a failure, never an idle turn.** A timed-out call
+  returns `stopReason: 'aborted'` with a *partial* `thinking` block and 0/0 usage —
+  it is not `'error'` and its content is not empty, so it slips past both guards in
+  `completeWithRetry` unless explicitly caught. If it is returned as a real
+  response, the turn loop sees zero tool calls on round 0, scores the turn `idle`,
+  and three of those trip the idle backoff, which parks the agent until a human
+  nudges it. Covered by `tests/llm-abort-handling.test.ts`.
+- **Timeouts are per-provider, not global.** `DEFAULT_LLM_TIMEOUT_MS` (90s) is a
+  hosted-API figure. Local providers (`custom`/`ollama`/`lmstudio`) are bounded by
+  local memory bandwidth and get `LOCAL_LLM_TIMEOUT_MS` (300s) instead. Sanity-check
+  any timeout against `maxTokens / measured tok-per-s`: if the budget cannot fit the
+  token allowance, the model is guaranteed to be killed mid-generation.
 - **Cron schedules** are validated on create (`validateCronExpression`) — reject
   malformed expressions rather than storing ones that silently never fire.
 - **Tables are pruned** periodically (`pruneOldData` in `index.ts`): logs, financial
