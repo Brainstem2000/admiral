@@ -277,13 +277,41 @@ function stableStringify(v: unknown): string {
 
 // Record one failed game command and return how many identical failures (same command, same
 // args, same error code) this profile has produced inside the window, including this one.
+// The v2 API exposes the same query in two spellings: a grouped command name
+// (`facility_owned`) and a group command carrying the action as an argument
+// (`facility` + {action:'owned'}). They are the same question and return the
+// same answer, but keyed literally they look like different calls — so the
+// query cache misses and, worse, the loop breakers never see a repeat.
+//
+// Morg'Thar 2026-09-01 asked "what facilities do I own" 22 times across four
+// spellings (facility_owned, facility{action:owned}, facility_list,
+// facility{action:list}) while the game answered `facilities: []` every time.
+// The identical-call breaker counted them as four different questions and did
+// not fire until a fifth exact repeat happened to line up.
+//
+// Fold the action-argument form into the underscore form for KEYING ONLY. The
+// command actually sent to the game is untouched.
+function canonicalKey(command: string, args: Record<string, unknown> | undefined): string {
+  let name = command.replace(/^spacemolt_/, '')
+  const rest = { ...(args ?? {}) }
+  const action = rest.action
+  if (typeof action === 'string' && action && !name.endsWith(`_${action}`)) {
+    name = `${name}_${action}`
+    delete rest.action
+  }
+  // Drop the v2 tool-group prefix last, so `facility` + action:'owned' and
+  // `facility_owned` both reduce to the same bare name.
+  name = name.replace(/^(?:market|storage|social|intel|faction|faction_admin|salvage|catalog|ship|battle|transfer|facility|auth)_/, '')
+  return `${name}|${stableStringify(rest)}`
+}
+
 function recordFailureAndCountRepeats(
   profileId: string,
   command: string,
   commandArgs: Record<string, unknown> | undefined,
   errorCode: string,
 ): number {
-  const key = `${command}|${stableStringify(commandArgs ?? {})}|${errorCode}`
+  const key = `${canonicalKey(command, commandArgs)}|${errorCode}`
   const now = Date.now()
   const list = (recentFailures.get(profileId) ?? []).filter((f) => now - f.timestamp < FAILURE_LOOP_WINDOW_MS)
   list.push({ key, timestamp: now })
@@ -345,6 +373,16 @@ const QUERY_COMMANDS = new Set([
   'faction_list_missions',
   'faction_admin_list_roles',
   'salvage_wrecks', 'salvage_policies',
+  // Facility READS. These are lookups — "what do I own", "what is here", "what
+  // exists" — and cost no game tick, but were absent, so every one was charged
+  // an action cooldown. Morg'Thar ran 22 facility calls in one session chasing
+  // a rental he did not have and paid a tick for each. The MUTATIONS
+  // (build, upgrade, dismantle, faction_build, rent...) are deliberately NOT
+  // listed here and remain rate-limited.
+  'facility_owned', 'facility_list', 'facility_types', 'facility_upgrades',
+  'facility_faction_list', 'facility_faction_owned', 'facility_job_list',
+  'facility_personal_visit',
+  'owned', 'upgrades', 'job_list', 'personal_visit',
   'catalog_catalog', 'catalog_browse_ships',
   'ship_get_ship', 'ship_get_cargo',
   'battle_get_battle_status',
@@ -355,8 +393,17 @@ const QUERY_COMMANDS = new Set([
  * manual/API path via bookLedgerFromCommand). Queries are free — no game tick, no
  * cooldown — and never move credits, so they are never booked to the ledger.
  */
-export function isQueryCommand(command: string): boolean {
-  const bare = command.replace(/^spacemolt_/, '')
+export function isQueryCommand(command: string, args?: Record<string, unknown>): boolean {
+  // The v2 group form carries the verb in an `action` argument
+  // (`facility` + {action:'owned'}), so the command name alone says nothing
+  // about whether it reads or writes. Fold the action in before classifying,
+  // or every group-form read gets charged an action cooldown.
+  let name = command.replace(/^spacemolt_/, '')
+  const action = args?.action
+  if (typeof action === 'string' && action && !name.endsWith(`_${action}`)) {
+    name = `${name}_${action}`
+  }
+  const bare = name
   const deep = bare.replace(/^(?:market|storage|social|intel|faction|faction_admin|salvage|catalog|ship|battle|transfer|facility|auth)_/, '')
   return QUERY_COMMANDS.has(command) || QUERY_COMMANDS.has(bare) || QUERY_COMMANDS.has(deep)
     // Heuristic: commands starting with get_/view_/list_/query_/browse_/search_/find_/estimate_ are queries
@@ -1126,7 +1173,7 @@ export async function executeTool(
   const bareCommand = command.replace(/^spacemolt_/, '')
   // Also strip v2 tool group prefix (e.g. "market_view_market" → "view_market")
   const deepBare = bareCommand.replace(/^(?:market|storage|social|intel|faction|faction_admin|salvage|catalog|ship|battle|transfer|facility|auth)_/, '')
-  const isQuery = isQueryCommand(command)
+  const isQuery = isQueryCommand(command, commandArgs)
   if (!isQuery) {
     let remainingMs = actionCooldownRemaining(ctx.profileId)
     if (remainingMs !== null && remainingMs <= COOLDOWN_ABSORB_MAX_MS) {
@@ -1154,7 +1201,7 @@ export async function executeTool(
   // explicit query. In-game queries are free (no tick), so this costs only a round-trip.
   if (isQuery && getPreference('situational_briefing') !== 'off') {
     // Extended query cache: catalog (static, 1h TTL) and market queries (60s TTL)
-    const cacheKey = `${ctx.profileId}:${deepBare}:${JSON.stringify(commandArgs ?? {})}`
+    const cacheKey = `${ctx.profileId}:${canonicalKey(command, commandArgs)}`
     const cached = queryCache.get(cacheKey)
     const CATALOG_COMMANDS = new Set(['catalog', 'browse_ships', 'commission_quote'])
     const MARKET_COMMANDS = new Set(['view_market', 'analyze_market', 'view_orders', 'estimate_purchase'])
@@ -1301,7 +1348,7 @@ export async function executeTool(
     // jump or macro is in flight.
     {
       const bareQ = command.replace(/^spacemolt_/, '')
-      if (bareQ !== 'get_status' && isQueryCommand(command)) {
+      if (bareQ !== 'get_status' && isQueryCommand(command, commandArgs)) {
         const repeats = recordFailureAndCountRepeats(ctx.profileId, command, commandArgs, '__ok__')
         if (repeats >= QUERY_LOOP_FLUSH_THRESHOLD) {
           // Note injected at 4 and ignored — escalate to an automatic context flush.
@@ -1470,7 +1517,7 @@ export async function executeTool(
     if (isQuery && getPreference('situational_briefing') !== 'off') {
       const CACHEABLE = new Set(['catalog', 'browse_ships', 'commission_quote', 'view_market', 'analyze_market', 'view_orders', 'estimate_purchase'])
       if (CACHEABLE.has(deepBare)) {
-        const cacheKey = `${ctx.profileId}:${deepBare}:${JSON.stringify(commandArgs ?? {})}`
+        const cacheKey = `${ctx.profileId}:${canonicalKey(command, commandArgs)}`
         queryCache.set(cacheKey, { result, timestamp: Date.now() })
         // Prune cache if it grows too large (max 200 entries)
         if (queryCache.size > 200) {
