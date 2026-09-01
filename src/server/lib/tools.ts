@@ -241,6 +241,18 @@ function actionCooldownRemaining(profileId: string): number | null {
 const recentFailures = new Map<string, Array<{ key: string; timestamp: number }>>()
 // Fuel-floor checkpoint state: last blocked jump per profile (see fuel floor guard).
 const fuelFloorBlocks = new Map<string, { dest: string; at: number }>()
+/** Stations/factions that refused docking on reputation, per profile. Reputation
+ *  recovers slowly if at all, so a refusal is treated as sticky for a while
+ *  rather than re-tested every few minutes. */
+const reputationLockouts = new Map<string, { where: string; rep: string | null; at: number }>()
+const REPUTATION_LOCKOUT_MS = 60 * 60_000
+
+/** Record a docking refusal so the gate above can stop the repeat trip. */
+export function noteReputationRefusal(profileId: string, resultText: string, where: string): void {
+  if (!/insufficient_reputation/i.test(resultText)) return
+  const m = /current:\s*(-?\d+)/i.exec(resultText)
+  reputationLockouts.set(profileId, { where, rep: m ? m[1] : null, at: Date.now() })
+}
 const FAILURE_LOOP_WINDOW_MS = 5 * 60_000
 const FAILURE_LOOP_THRESHOLD = 3   // fire on the 3rd identical failure
 const FAILURE_LOOP_KEEP = 20       // per-profile history cap — this is a breaker, not a log
@@ -334,6 +346,7 @@ export function cleanupProfileToolState(profileId: string): void {
   recentFailures.delete(profileId)
   contextFlushRequests.delete(profileId)
   fuelFloorBlocks.delete(profileId)
+  reputationLockouts.delete(profileId)
   lastDestinations.delete(profileId)
   const prefix = `${profileId}:`
   for (const key of queryCache.keys()) {
@@ -534,6 +547,30 @@ export function checkDoctrineGuards(
   // Technique guidance lives in the HUNTING DOCTRINE directive block instead:
   // find herds with get_nearby in RICH fields, scan before engaging, and do not
   // hunt a belt you have already mined thin.
+
+  // Reputation lockout: a system that has already refused you does not change
+  // its mind because you flew back. Morg'Thar attacked a faction target under
+  // Voss Redoubt Station's guns on 2026-09-01, dropped to -5 reputation, was
+  // refused docking, left — then returned to Alhena twice more and was refused
+  // again at -10, each trip costing fuel and turns for a guaranteed rejection.
+  // The refusal names the alternative rather than just blocking.
+  {
+    const bareRep = command.replace(/^spacemolt_/, '').replace(/^ship_/, '')
+    if (bareRep === 'dock' && getPreference('reputation_gate') !== 'off') {
+      const locked = reputationLockouts.get(profileId)
+      if (locked && Date.now() - locked.at < REPUTATION_LOCKOUT_MS) {
+        return (
+          `BLOCKED by Admiral doctrine: ${locked.where} refused you docking ` +
+          `${Math.round((Date.now() - locked.at) / 60_000)} minute(s) ago for insufficient reputation ` +
+          `(${locked.rep ?? 'negative'}). Reputation does not recover by flying back — this trip is a ` +
+          `guaranteed rejection and you have already made it more than once.\n\n` +
+          `Go somewhere you are WELCOME instead: your home space (crimson_war_citadel at Krynn) or any ` +
+          `station of a faction you have not attacked. Record in your TODO that this station is closed ` +
+          `to you, so you stop routing here.`
+        )
+      }
+    }
+  }
 
   // Jettison: nothing with a bid is worthless.
   {
@@ -1229,6 +1266,15 @@ export async function executeTool(
 
       // Augment common errors with actionable hints to reduce wasted turns
       const errCode = resp.error.code
+
+      // Remember a reputation refusal so the dock gate can stop the repeat trip.
+      if (errCode === 'insufficient_reputation') {
+        const gs = ctx.connection.getLocalState?.() ?? null
+        const loc = (gs?.location ?? {}) as Record<string, unknown>
+        const where = String(loc.system_name ?? loc.system ?? gs?.system ?? 'that station')
+        noteReputationRefusal(ctx.profileId, errMsg, where)
+        errMsg += `\n\nReputation does not recover by returning. Do NOT route back here — go to a station of a faction you have not attacked (your home space is crimson_war_citadel at Krynn), and record in your TODO that this one is closed to you.`
+      }
 
       // A `no_facility` refusal names the nearest public site for the recipe. That sentence
       // is free intelligence the fleet has been discarding — it is the only reason we ever
