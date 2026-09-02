@@ -669,15 +669,30 @@ export function buildSituationalBriefing(profileId: string): string {
     }
   }
 
-  // Active missions
+  // Active missions. The FULL mission id is printed: abandon/complete need all
+  // 32 characters, and an 8-char prefix the agent copied from a truncated read
+  // cost two mission_not_found rounds (2026-09-01). Counters and rewards are
+  // what a hunter plans around; auto-attached distress entries are left out so
+  // the paid contracts are what the line shows.
   if (cache.missions && cache.missions.length > 0) {
-    const missionStrs = cache.missions.slice(0, 3).map((m: unknown) => {
-      const mission = m as Record<string, unknown>
-      const desc = mission.description ?? mission.title ?? mission.type ?? '?'
+    const all = cache.missions.map((m) => m as Record<string, unknown>)
+    const paid = all.filter((m) => !isAutoAttachedMission(m))
+    const shown = (paid.length > 0 ? paid : all).slice(0, 5)
+    const missionStrs = shown.map((mission) => {
+      const title = String(mission.title ?? mission.name ?? mission.type ?? mission.description ?? '?').slice(0, 40)
+      const id = String(mission.mission_id ?? mission.id ?? '')
+      const objs = Array.isArray(mission.objectives) ? mission.objectives as Array<Record<string, unknown>> : []
+      const counter = objs
+        .filter((o) => o && typeof o.current === 'number' && typeof o.required === 'number')
+        .map((o) => `${o.current}/${o.required}`).join(',')
+      const rewards = (mission.rewards && typeof mission.rewards === 'object' ? mission.rewards : {}) as Record<string, unknown>
+      const reward = Number(rewards.credits ?? mission.reward_credits ?? mission.reward ?? NaN)
       const target = mission.target_poi ?? mission.destination ?? ''
-      return `${desc}${target ? ' → ' + target : ''}`
+      return `${title}${id ? ` [id ${id}]` : ''}${counter ? ` ${counter}` : ''}` +
+        `${Number.isFinite(reward) ? ` ${fmtNum(reward)}cr` : ''} exp ${fmtExpiry(mission)}${target ? ' → ' + target : ''}`
     })
-    lines.push(`Missions: ${missionStrs.join(' | ')}`)
+    const extra = all.length - shown.length
+    lines.push(`Missions (${paid.length} paid held, cap 5): ${missionStrs.join(' | ')}${extra > 0 ? ` (+${extra} more)` : ''}`)
   }
 
   // System POIs

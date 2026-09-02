@@ -129,7 +129,7 @@ describe('wrap-up reserve', () => {
     expect(round).toBe(5)
   }, 30_000)
 
-  test('the reserve restricts the toolset to state writes, and restores it after', async () => {
+  test('the reserve refuses everything but state writes at dispatch, without touching the toolset', async () => {
     const logs: Array<[string, string]> = []
     let round = 0
     const toolsSeenPerRound: string[][] = []
@@ -141,6 +141,9 @@ describe('wrap-up reserve', () => {
       { name: 'codex', description: '', parameters: {} },
     ]
     const originalTools = c.tools
+    let executed = 0
+    const conn = stubConnection()
+    conn.execute = async () => { executed++; return { result: 'ok' } }
 
     const { runAgentTurn } = await loadLoop(async (_m: any, context: any) => {
       round++
@@ -149,27 +152,28 @@ describe('wrap-up reserve', () => {
     })
 
     await runAgentTurn(
-      model(), c, stubConnection(), 'p-wrapup-4', 'Test',
+      model(), c, conn, 'p-wrapup-4', 'Test',
       ((t: string, s: string) => { logs.push([t, s]) }) as any,
       { value: '' } as any, { value: '' } as any,
       { maxToolRounds: 4 },
     )
 
-    // Normal rounds see everything.
-    expect(toolsSeenPerRound[0]).toContain('game')
-    // Once the reserve engages, querying is not an option the model HAS —
-    // this is the part that does not depend on it choosing to comply.
-    const reserveRound = toolsSeenPerRound[toolsSeenPerRound.length - 1]
-    expect(reserveRound).not.toContain('game')
-    expect(reserveRound).not.toContain('codex')
-    expect(reserveRound).toEqual(['update_todo'])
-
-    // The context outlives the turn — the full toolset must come back.
+    // The declared toolset is never swapped: on a harmony-format local server a
+    // different tool list rewrites the developer message and re-prefills the
+    // KV cache, and executeTool runs whatever the model names anyway.
     expect(c.tools).toBe(originalTools)
-    expect(c.tools.map((t: any) => t.name)).toContain('game')
+    for (const seen of toolsSeenPerRound) expect(seen).toContain('game')
+
+    // Once the reserve engages, a query is refused at dispatch — it never
+    // reaches the game — and the refusal is what the model reads back.
+    const results = c.messages.filter((m: any) => m.role === 'toolResult')
+    const refused = results.filter((m: any) => m.content[0].text.startsWith('Not executed — wrap-up reserve'))
+    expect(refused.length).toBeGreaterThan(0)
+    expect(executed).toBeLessThan(round)
+    expect(logs.some(([t, s]) => t === 'system' && s.includes('refused game'))).toBe(true)
   }, 30_000)
 
-  test('the toolset is restored even when the turn exits early', async () => {
+  test('a refused reserve call still gets a tool result, so the history stays paired', async () => {
     let round = 0
     const c = ctx()
     c.tools = [
@@ -180,20 +184,24 @@ describe('wrap-up reserve', () => {
 
     const { runAgentTurn } = await loadLoop(async () => {
       round++
-      return assistant([queryCall(`c${round}`)])
+      return assistant([queryCall(`c${round}`), queryCall(`d${round}`)])
     })
 
-    // Connection reports dead partway through, forcing an early return from
-    // inside the reserve window.
-    let calls = 0
     await runAgentTurn(
       model(), c, stubConnection(), 'p-wrapup-5', 'Test',
       (() => {}) as any,
       { value: '' } as any, { value: '' } as any,
-      { maxToolRounds: 4, isConnectionDown: () => ++calls > 4 },
+      { maxToolRounds: 4 },
     )
 
-    expect(c.tools.map((t: any) => t.name)).toContain('game')
+    const callIds = new Set<string>()
+    const resultIds = new Set<string>()
+    for (const m of c.messages) {
+      if (m.role === 'assistant') for (const b of m.content) if (b.type === 'toolCall') callIds.add(b.id)
+      if (m.role === 'toolResult') resultIds.add(m.toolCallId)
+    }
+    expect(callIds.size).toBeGreaterThan(0)
+    expect([...callIds].every((id) => resultIds.has(id))).toBe(true)
   }, 30_000)
 
   test('a memory-only write does not satisfy operational persistence', async () => {

@@ -156,7 +156,9 @@ export function stopGalaxyMarketCollector(): void {
  * Briefing lines: galaxy best bid for each cargo item the agent holds, plus a
  * compact sellable-ore board. Empty array when the feed has never succeeded.
  */
-export function galaxyMarketLines(cargoItemIds: string[]): string[] {
+/** @param opts.oreBoard render the galaxy-wide sellable-ore board (default true).
+ *  Hunters carry no mining laser, so for them it is noise that reads as a plan. */
+export function galaxyMarketLines(cargoItemIds: string[], opts: { oreBoard?: boolean } = {}): string[] {
   if (lastFetchOk === 0) return []
   const lines: string[] = []
   const cargoLines: string[] = []
@@ -172,7 +174,7 @@ export function galaxyMarketLines(cargoItemIds: string[]): string[] {
     }
   }
   if (cargoLines.length > 0) lines.push(`Galaxy bids for your cargo: ${cargoLines.join(' | ')}`)
-  if (oreBoard.length > 0) {
+  if (oreBoard.length > 0 && opts.oreBoard !== false) {
     const board = oreBoard.map((e) => `${e.item} → ${e.q.empire} ${e.q.bid} x${e.q.depth}`)
     lines.push(`Best sellable ores galaxy-wide: ${board.join(' | ')} (empire-level — find the station with analyze_market/trade intel when docked)`)
   }

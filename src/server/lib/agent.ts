@@ -12,13 +12,13 @@ import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
 import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest } from './tools'
-import { runAgentTurn, type CompactionState } from './loop'
+import { runAgentTurn, VOLATILE_STATE_HEADER, VOLATILE_STATE_END, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
 import { FleetIntelCollector, buildDepositBriefing } from './fleet-intel'
 import { safeTruncate } from './text-safe'
 import { LedgerCollector } from './ledger'
-import { startBriefingCollector, stopBriefingCollector, clearBriefingCache, buildSituationalBriefing, buildFactionBriefing, getCachedSystemName } from './briefing'
+import { startBriefingCollector, stopBriefingCollector, clearBriefingCache, buildSituationalBriefing, buildFactionBriefing, getCachedSystemName, ensureBriefingWarm } from './briefing'
 import { checkEventTriggers } from './event-watcher'
 import { ingestActionLog } from './action-log'
 import { EventEmitter } from 'events'
@@ -71,12 +71,40 @@ export class Agent {
   private restartRequested = false
   private pendingNudges: string[] = []
   private _activity: string = 'idle'
+  /** The user message carrying the most recent CURRENT STATE block, and the
+   *  non-state text that was appended to it. When the next turn's block is
+   *  injected, this one is rewritten IN PLACE to just its remainder — see the
+   *  turn-assembly comment in runLoop for why. */
+  private lastVolatileMessage: { role: 'user'; content: string; timestamp: number } | null = null
+  private lastVolatileRest = ''
   private _gameState: Record<string, unknown> | null = null
   private lastWalletRefresh = 0
   private lastActionLog = 0
   private _sessionExpired = false
   pendingSafeDock = false
   safeDockTurnsRemaining = 0
+
+  /** Append the next turn's user message. Exactly one CURRENT STATE block is
+   *  ever in the conversation: the previous carrier is rewritten in place to
+   *  its non-state remainder first (only if compaction has not already dropped
+   *  it — object identity survives compaction, which keeps recent messages). */
+  private pushTurnMessage(context: Context, rest: string, volatileBlock: string): void {
+    if (this.lastVolatileMessage && context.messages.includes(this.lastVolatileMessage)) {
+      this.lastVolatileMessage.content =
+        this.lastVolatileRest || '(state block superseded — see the latest CURRENT STATE message)'
+    }
+    this.lastVolatileMessage = null
+    const msg = {
+      role: 'user' as const,
+      content: volatileBlock ? `${volatileBlock}\n${rest}` : rest,
+      timestamp: Date.now(),
+    }
+    context.messages.push(msg)
+    if (volatileBlock) {
+      this.lastVolatileMessage = msg
+      this.lastVolatileRest = rest
+    }
+  }
 
   constructor(profileId: string) {
     this.profileId = profileId
@@ -341,6 +369,27 @@ export class Agent {
     if (this.abortController.signal.aborted) { this.setActivity('idle'); return }
     this.running = true
 
+    // First turn under the volatile split. The boot message used to be the bare
+    // directive: no memory, no TODO, no briefing — the collector's first refresh
+    // runs 5s after connect and connect_llm follows connect inside that window.
+    // Morg'Thar booted blind that way on 2026-09-01 and wrote "travel to Horizon
+    // station" into his TODO from nothing (Horizon has no station). Wait, bounded,
+    // for the briefing cache, then give turn 1 the same state block every later
+    // turn gets.
+    if (profile.volatile_split) {
+      this.setActivity('Warming briefing for the first turn...')
+      const warm = await ensureBriefingWarm(this.profileId, this.connection)
+      if (!warm) this.log('system', 'Briefing not warm before the first turn — turn 1 runs on memory/TODO only')
+      const fresh = getProfile(this.profileId) ?? profile
+      const state = buildVolatileState(fresh, this.profileId)
+      if (state.trim()) {
+        const boot = context.messages.pop()
+        const rest = typeof boot?.content === 'string' ? boot.content : `Begin your mission: ${profile.directive || ''}`
+        this.pushTurnMessage(context, rest, VOLATILE_STATE_HEADER + state + '\n' + VOLATILE_STATE_END)
+      }
+    }
+    if (this.abortController.signal.aborted) { this.setActivity('idle'); this.running = false; return }
+
     let consecutiveConnLostTurns = 0
     // Idle backoff: consecutive zero-tool-call turns escalate the inter-turn
     // sleep (5/10/15 min, capped) instead of re-burning a full-context LLM
@@ -467,6 +516,10 @@ export class Agent {
                 // and the turn has to be redone. Raising the ceiling costs nothing on turns
                 // that finish early, because output is billed on what is actually produced.
                 maxTokens: isPlanningTurn ? 8192 : 4096,
+                // One decision per turn: the turn ends after the first successful
+                // game action (plus the wrap-up reserve if the TODO is unwritten).
+                // Preference `turn_ends_on_action` = 'off' restores run-to-cap.
+                endTurnAfterAction: getPreference('turn_ends_on_action') !== 'off',
                 contextBudgetRatio,
                 onActivity: (a) => this.setActivity(`${phasePrefix}${a}`),
                 compactionModel: hasDualModel ? executorResolved?.model : undefined,
@@ -532,6 +585,8 @@ export class Agent {
         } else if (outcome === 'completed') {
           consecutiveIdleTurns = 0
         }
+        // 'interrupted' (operator nudge / restart / stop cut the turn short) is
+        // deliberately neither: not progress, not idleness.
 
         // Safe dock check: if pending and agent is now docked (or timeout), auto-disconnect.
         // Completion must be judged on a live get_status — the cached state has
@@ -714,26 +769,22 @@ export class Agent {
       // Agents on the volatile/stable split get memory, TODO, briefings and fleet
       // orders here rather than in the system prompt. It rides at the END of the
       // conversation, so the large cached prefix in front of it never moves.
+      //
+      // The block is REPLACED, not accumulated: the previous turn's copy is
+      // rewritten in place to just its non-state remainder before the fresh
+      // one is appended. Appending a new ~9k-token copy every turn was the
+      // compaction thrash — on Morg'Thar (2026-09-01) it fired on 79% of turns
+      // and the summarizer ran ~95 minutes a day, mostly summarizing stale
+      // copies of a block the next turn was about to re-inject anyway.
+      let volatileBlock = ''
       {
         const vp = getProfile(this.profileId)
         if (vp?.volatile_split) {
           const state = buildVolatileState(vp, this.profileId)
-          if (state.trim()) {
-            nudgeParts.unshift(
-              '## CURRENT STATE (auto-injected every turn — do NOT re-query this)\n' +
-              'This replaces the state block that used to sit in your system prompt. It is\n' +
-              'refreshed every turn and is authoritative over anything you remember.\n\n' +
-              state,
-            )
-          }
+          if (state.trim()) volatileBlock = VOLATILE_STATE_HEADER + state + '\n' + VOLATILE_STATE_END
         }
       }
-
-      context.messages.push({
-        role: 'user' as const,
-        content: nudgeParts.join('\n'),
-        timestamp: Date.now(),
-      })
+      this.pushTurnMessage(context, nudgeParts.join('\n'), volatileBlock)
 
       // Refresh system prompt only when inputs have changed (memory, phase, directive)
       const freshProfile = getProfile(this.profileId)

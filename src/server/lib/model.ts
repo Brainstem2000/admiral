@@ -116,7 +116,13 @@ export async function resolveModel(modelStr: string): Promise<{ model: Model<any
     name: modelId,
     provider: provider,
     baseUrl,
-    reasoning: false,
+    // Both flags gate whether pi-ai's openai-completions adapter emits
+    // `reasoning_effort` at all (buildParams: `model.reasoning &&
+    // compat.supportsReasoningEffort`). With `reasoning: false` the value the
+    // loop asks for was silently dropped and gpt-oss ran at its template
+    // default (medium); the groq template this is cloned from disables it too.
+    reasoning: true,
+    compat: { ...(base.compat ?? {}), supportsReasoningEffort: true },
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128_000,

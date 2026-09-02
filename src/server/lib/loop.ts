@@ -2,7 +2,10 @@ import { complete } from '@mariozechner/pi-ai'
 import type { Model, Context, AssistantMessage, ToolCall, Message } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import type { LogFn } from './tools'
-import { executeTool, ACTION_PENDING_SENTINEL, COOLDOWN_BLOCKED_SENTINEL, LOOP_FLUSH_SENTINEL } from './tools'
+import {
+  executeTool, isMacroTool, isQueryCommand,
+  ACTION_PENDING_SENTINEL, COOLDOWN_BLOCKED_SENTINEL, LOOP_FLUSH_SENTINEL,
+} from './tools'
 import { safeTruncate, scrubContextSurrogates } from './text-safe'
 import { recordLlmSpend } from './db'
 
@@ -10,15 +13,24 @@ import { recordLlmSpend } from './db'
 // and (pre-fix) re-firing into the cooldown gate. With the cooldown-block early-exit below, 12 is
 // ample for any real turn (place an action → exit) and stops the per-turn over-deliberation.
 const DEFAULT_MAX_TOOL_ROUNDS = 12
-/** Extra rounds granted ONLY to persist state when a turn would otherwise be
- *  guillotined at the cap without writing anything. Not general-purpose
- *  budget — see the wrap-up reserve in runAgentTurn. */
+/** Extra rounds granted ONLY to persist state when a turn would otherwise end
+ *  without writing anything. Not general-purpose budget — see the wrap-up
+ *  reserve in runAgentTurn. */
 const WRAPUP_RESERVE_ROUNDS = 2
-/** The only tools available during the wrap-up reserve. */
-// Operational continuity lives in the TODO. Memory is valuable background, but
-// a memory-only wrap-up can leave a disproven objective in place and restart the
-// exact same loop next turn. During the reserve, require the TODO first.
-const TODO_WRITE_TOOLS = new Set(['update_todo'])
+/** The only tools accepted during the wrap-up reserve. Operational continuity
+ *  lives in the TODO: memory is valuable background, but a memory-only wrap-up
+ *  can leave a disproven objective in place and restart the exact same loop
+ *  next turn. So both may run during the reserve, and only `update_todo`
+ *  SATISFIES it. */
+const STATE_WRITE_TOOLS = new Set(['update_todo', 'update_memory'])
+/** Mirror of tools.ts LOCAL_TOOLS — tools that run inside Admiral and never
+ *  touch the game, so they can never be a game action. tools.ts does not
+ *  export its set; until it does, keep this list in step with it. A tool
+ *  declared in `context.tools` is also treated as local (see classifyToolCall). */
+const KNOWN_LOCAL_TOOLS = new Set([
+  'save_credentials', 'update_todo', 'read_todo', 'update_memory', 'read_memory',
+  'status_log', 'fleet_order', 'read_fleet_orders', 'codex', 'codex_chain', 'fleet_route',
+])
 // The upstream occasionally answers with a non-JSON body ("JSON Parse error: Unable to
 // parse JSON string") or an empty one. It is transient and self-heals, but 3 retries at a
 // 5s base all land inside ~35s, so a blip lasting a minute burned the whole turn — Morg'Thar
@@ -28,12 +40,138 @@ const MAX_RETRIES = 5
  *  at the throw site. One retry, then the turn ends. */
 const MAX_ABORT_RETRIES = 1
 const RETRY_BASE_DELAY = 10_000
-const DEFAULT_LLM_TIMEOUT_MS = 90_000
 
-const CHARS_PER_TOKEN = 2  // Game JSON tokenizes at ~1.7 chars/token; 2 is a safe approximation
+// --- Per-provider tuning -------------------------------------------------------
+//
+// Local servers (oMLX / Ollama / LM Studio / vLLM on this machine) differ from hosted
+// APIs in three ways the loop has to know about, all keyed on `model.provider`:
+//   1. TIMEOUT — generation is bounded by local memory bandwidth, not a datacenter
+//      GPU, so the 90s hosted figure kills a reasoning model mid-thought.
+//   2. SAMPLING — gpt-oss defaults to harmony `reasoning_effort: medium` and Qwen3.8
+//      to `xhigh`; neither is sent anything unless we say so. Tool turns are
+//      "pick the next command", not essays: low effort and a cool temperature.
+//   3. TOKENIZER — o200k-family tokenizers pack ~3.5 chars/token on our prompt mix,
+//      against the ~2 the hosted estimate assumes (measured: prompt.md 4.04,
+//      text-rendered status 2.9, JSON 3.0; oMLX reported 33.8k prompt tokens where
+//      the 2-chars/token estimate said 47.6k).
+
+/** The 90s default is a hosted-API figure. */
+export const DEFAULT_LLM_TIMEOUT_MS = 90_000
+/** A dense 27B at 8-bit on Apple silicon measured ~14 output tok/s, so the
+ *  4096-token executor budget needs ~293s to finish. At 90s the model could
+ *  only ever emit ~1,260 tokens and was killed mid-thought on 6 of 8 calls. */
+export const LOCAL_LLM_TIMEOUT_MS = 300_000
+/** Providers whose base URL is this machine. `custom` is whatever the operator
+ *  pointed at (today: oMLX on :8000). */
+export const LOCAL_PROVIDERS = new Set(['custom', 'ollama', 'lmstudio', 'vllm'])
+/** Per-provider timeouts. These WIN over the global `llm_timeout` preference:
+ *  a single global number cannot be right for both a hosted API and a local
+ *  server, and when it was allowed to override (llm_timeout=300) every hosted
+ *  call inherited the local server's 5-minute leash. Providers absent from
+ *  this table fall back to the preference, then to DEFAULT_LLM_TIMEOUT_MS. */
+export const PROVIDER_LLM_TIMEOUT_MS: Readonly<Record<string, number>> = {
+  custom: LOCAL_LLM_TIMEOUT_MS,
+  ollama: LOCAL_LLM_TIMEOUT_MS,
+  lmstudio: LOCAL_LLM_TIMEOUT_MS,
+  vllm: LOCAL_LLM_TIMEOUT_MS,
+}
+export const LOCAL_REASONING_EFFORT = 'low' as const
+export const LOCAL_TOOL_TURN_TEMPERATURE = 0.3
+
+export function isLocalProvider(provider: string | undefined): boolean {
+  return !!provider && LOCAL_PROVIDERS.has(provider)
+}
+
+/** Resolve the LLM call timeout for a provider. Order: the provider's own entry
+ *  in PROVIDER_LLM_TIMEOUT_MS, then the caller's value (agent.ts passes the
+ *  global `llm_timeout` preference here), then the hosted default. */
+export function resolveLlmTimeoutMs(provider: string | undefined, requestedMs?: number): number {
+  const perProvider = provider ? PROVIDER_LLM_TIMEOUT_MS[provider] : undefined
+  if (perProvider !== undefined) return perProvider
+  if (requestedMs !== undefined && Number.isFinite(requestedMs) && requestedMs > 0) return requestedMs
+  return DEFAULT_LLM_TIMEOUT_MS
+}
+
+/** Sampling parameters sent to pi-ai's `complete()` for a model. Only local
+ *  providers get anything: hosted models keep their own defaults.
+ *
+ *  How this reaches the wire: `complete()` forwards the options object to the
+ *  api's stream function; for `openai-completions` that is `streamOpenAICompletions`,
+ *  whose `OpenAICompletionsOptions` carries `reasoningEffort` and (via StreamOptions)
+ *  `temperature`. `buildParams` then emits `reasoning_effort` ONLY when
+ *  `model.reasoning && compat.supportsReasoningEffort` — both are set on local
+ *  models in model.ts (`reasoning: false` there used to silently drop it). */
+export function localProviderCallOptions(
+  model: Pick<Model<any>, 'provider'>,
+  kind: 'tool' | 'summary',
+): { reasoningEffort?: typeof LOCAL_REASONING_EFFORT; temperature?: number } {
+  if (!isLocalProvider(model.provider)) return {}
+  // The summarizer keeps default sampling: a summary wants the model's own
+  // temperature, but never deep reasoning — it is transcription, not planning.
+  return kind === 'tool'
+    ? { reasoningEffort: LOCAL_REASONING_EFFORT, temperature: LOCAL_TOOL_TURN_TEMPERATURE }
+    : { reasoningEffort: LOCAL_REASONING_EFFORT }
+}
+
+// --- Token estimation ------------------------------------------------------------
+
+const CHARS_PER_TOKEN = 2  // Hosted (Claude) tokenizer on game JSON: ~1.7 chars/token; 2 is a safe approximation
+/** Local o200k-family tokenizers. Deliberately BELOW the measured prose figure
+ *  (prompt.md: 4.04) so the estimate errs toward over-counting, which is the
+ *  safe direction for the compaction budget; a JSON-heavy context lands within
+ *  ~10% (fixture in tests/local-provider-routing.test.ts). */
+export const LOCAL_CHARS_PER_TOKEN = 3.5
 const CONTEXT_BUDGET_RATIO = 0.45  // Trigger compaction earlier to leave room
 const MIN_RECENT_MESSAGES = 10
-const SUMMARY_MAX_TOKENS = 1024
+/** 1,024 truncated the summaries that mattered most — a 12-round turn's worth
+ *  of verified facts does not fit — and a cut summary is re-derived next turn. */
+const SUMMARY_MAX_TOKENS = 2048
+
+/** Delimiters of the per-turn CURRENT STATE block (volatile split). agent.ts
+ *  injects it between these; the summarizer drops everything between them,
+ *  because the block is re-injected fresh every turn and summarizing stale
+ *  copies of it was most of what the summarizer did. */
+export const VOLATILE_STATE_HEADER =
+  '## CURRENT STATE (auto-injected every turn — do NOT re-query this)\n' +
+  'This replaces the state block that used to sit in your system prompt. It is\n' +
+  'refreshed every turn and is authoritative over anything you remember.\n\n'
+export const VOLATILE_STATE_END = '## END CURRENT STATE'
+
+/** The text of a user message with its CURRENT STATE block removed. */
+export function stripVolatileState(text: string): string {
+  const start = text.indexOf(VOLATILE_STATE_HEADER)
+  if (start < 0) return text
+  const end = text.indexOf(VOLATILE_STATE_END, start)
+  if (end < 0) return text.slice(0, start)
+  return (text.slice(0, start) + text.slice(end + VOLATILE_STATE_END.length)).replace(/^\n+/, '')
+}
+const SUMMARY_TIMEOUT_MS = 30_000
+/** 1,024 summary tokens at ~48 tok/s is ~21s before the transcript is even
+ *  prefilled; the hosted 30s would abort most local summaries. */
+const LOCAL_SUMMARY_TIMEOUT_MS = 120_000
+
+export function charsPerTokenFor(model: Pick<Model<any>, 'provider'> | undefined): number {
+  return isLocalProvider(model?.provider) ? LOCAL_CHARS_PER_TOKEN : CHARS_PER_TOKEN
+}
+
+export function estimateTokensFor(model: Pick<Model<any>, 'provider'> | undefined, text: string): number {
+  return estimateTokens(text, charsPerTokenFor(model))
+}
+
+/** The compaction budget, kept as an exported pure function so the invariant
+ *  can be tested: `(contextWindow − systemPromptTokens) * ratio`, floored to
+ *  min(8000, 15% of the window), never zero or negative. */
+export function messageBudgetFor(contextWindow: number, systemPromptTokens: number, ratio: number): number {
+  // Budget = fraction of the space REMAINING after the system prompt, not the full window.
+  // The system prompt is large (~30-50k tokens) and fixed — only messages can be compacted.
+  // Clamp the usable window to >= 0 and floor the budget: an oversized system
+  // prompt (approaching/exceeding the window) would otherwise yield a zero or
+  // negative budget, which makes the `messageTokens < messageBudget` guard
+  // always false and compaction thrash (summarize every single turn).
+  const usableWindow = Math.max(0, contextWindow - systemPromptTokens)
+  const minMessageBudget = Math.max(1, Math.min(8000, Math.floor(contextWindow * 0.15)))
+  return Math.max(minMessageBudget, Math.floor(usableWindow * ratio))
+}
 
 export interface LoopOptions {
   signal?: AbortSignal
@@ -46,6 +184,9 @@ export interface LoopOptions {
   refreshApiKey?: () => Promise<string | undefined>
   maxToolRounds?: number
   maxTokens?: number  // Override LLM maxTokens (default: 4096)
+  /** The caller's timeout — agent.ts passes the global `llm_timeout` preference.
+   *  It is a FALLBACK: a provider with its own entry in PROVIDER_LLM_TIMEOUT_MS
+   *  ignores it (see resolveLlmTimeoutMs). */
   llmTimeoutMs?: number
   /** Probes for pending operator interrupts (nudge, turn restart, safe-dock).
    *  Long-running macro tools poll this between steps so a 24-hop goto_system
@@ -60,16 +201,102 @@ export interface LoopOptions {
    *  now reports disconnected). Checked per round so a turn doesn't burn LLM
    *  calls driving a connection the harness has to reconnect anyway. */
   isConnectionDown?: () => boolean
+  /** End the turn after the first SUCCESSFUL game action (default true).
+   *
+   *  A turn is one decision: gather what you need, act once, record it. Left to
+   *  run on, the model treats the round cap as a quota — 65% of Morg'Thar's
+   *  turns hit the 12-round ceiling on 2026-09-01, most of them firing queries
+   *  after the action had already landed. Queries never end a turn (they cost
+   *  no tick and change nothing); a failed or refused action never ends a turn
+   *  (the model should get to react). Macros (goto_system, mine_until_full,
+   *  sell_cargo) count as actions when they report DONE. The wrap-up reserve
+   *  still runs after the action if nothing was persisted this turn. Set false
+   *  to restore the run-to-cap behaviour. */
+  endTurnAfterAction?: boolean
+  /** Raw pass-through overrides for the tool-turn call (tests, experiments).
+   *  Defaults come from localProviderCallOptions. */
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  temperature?: number
 }
 
 /** How a turn ended. `connection_lost` means the game connection is dead or
  *  repeatedly failing — the caller (agent loop) decides whether to exit so
- *  agent-manager's bounded backoff can reconnect. */
-export type TurnOutcome = 'completed' | 'connection_lost' | 'idle'
+ *  agent-manager's bounded backoff can reconnect. `interrupted` means an
+ *  OPERATOR cut the turn short (nudge, directive restart, disconnect): not a
+ *  model failure, not an idle turn — it must never feed the idle backoff or
+ *  the error stream. */
+export type TurnOutcome = 'completed' | 'connection_lost' | 'idle' | 'interrupted'
 
 export interface CompactionState {
   summary: string
 }
+
+// --- Tool-call classification ----------------------------------------------------
+
+export type ToolCallKind = 'local' | 'macro' | 'query' | 'action'
+
+/** What a tool call would DO if executed, decided the same way tools.ts
+ *  dispatches it: macros are actions; `game` calls are classified by their
+ *  command (with the same top-level-arg folding executeTool applies);
+ *  anything Admiral runs locally is never an action; any other bare name
+ *  is sent to the game as a command and classified like one. */
+export function classifyToolCall(
+  name: string,
+  args: Record<string, unknown> | undefined,
+  declaredTools?: Set<string>,
+): ToolCallKind {
+  if (isMacroTool(name)) return 'macro'
+  const a = args ?? {}
+  if (name === 'game') {
+    const command = String(a.command ?? '')
+    if (!command) return 'local'  // executeTool rejects it without touching the game
+    const extras: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(a)) {
+      if (k !== 'command' && k !== 'args' && v !== undefined) extras[k] = v
+    }
+    const nested = (a.args && typeof a.args === 'object' ? a.args : {}) as Record<string, unknown>
+    return isQueryCommand(command, { ...extras, ...nested }) ? 'query' : 'action'
+  }
+  if (KNOWN_LOCAL_TOOLS.has(name) || declaredTools?.has(name)) return 'local'
+  return isQueryCommand(name, a) ? 'query' : 'action'
+}
+
+/** Result prefixes that mean "the game did NOT do it" — see executeTool.
+ *  Built on demand: tools.ts → agent-manager → agent → loop → tools is an
+ *  import cycle, so the sentinels are still in their temporal dead zone when
+ *  this module is first evaluated from the tools.ts side. */
+function failedActionPrefixes(): string[] {
+  return [
+    'Error', 'BLOCKED', 'MACRO ABORT', 'MACRO ERROR', 'Skipped', 'Not executed',
+    COOLDOWN_BLOCKED_SENTINEL, LOOP_FLUSH_SENTINEL,
+  ]
+}
+
+/** Did this tool result represent a game action that actually happened?
+ *  A queued action (ACTION_PENDING) counts: the game accepted it. A macro
+ *  counts only when it reports DONE — PARTIAL/INTERRUPTED leave the model
+ *  something to react to, so the turn goes on. */
+export function isSuccessfulActionResult(kind: ToolCallKind, name: string, result: string): boolean {
+  if (kind === 'macro') return result.startsWith(`${name} DONE`)
+  if (kind !== 'action') return false
+  if (result.startsWith(ACTION_PENDING_SENTINEL)) return true
+  return !failedActionPrefixes().some(p => result.startsWith(p))
+}
+
+const WRAPUP_NOTE_CAP =
+  `⏳ TURN ENDING — you have not updated your TODO this turn, so your remaining tool calls ` +
+  `are restricted to update_todo and update_memory (anything else will be refused, not run). ` +
+  `Memory alone is not enough: the next turn executes the TODO, and a disproven or completed ` +
+  `TODO restarts the same loop.\n\n` +
+  `Replace the TODO now with what you verified, what is finished or blocked, and the single ` +
+  `next action. Do not preserve a premise the game disproved.`
+
+const WRAPUP_NOTE_ACTION =
+  `✅ ACTION DONE — this turn ends here; one action per turn. You have not updated your TODO ` +
+  `this turn, so your remaining tool calls are restricted to update_todo and update_memory ` +
+  `(anything else will be refused, not run).\n\n` +
+  `Replace the TODO now with what you verified, what you just did, and the single next action ` +
+  `— so the next turn resumes instead of re-deriving all of this.`
 
 export async function runAgentTurn(
   model: Model<any>,
@@ -84,7 +311,9 @@ export async function runAgentTurn(
   compaction?: CompactionState,
 ): Promise<TurnOutcome> {
   const maxRounds = options?.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS
+  const endTurnAfterAction = options?.endTurnAfterAction ?? true
   const summaryModel = options?.compactionModel || model
+  const cpt = charsPerTokenFor(model)
   let rounds = 0
   let connectionFailures = 0
   // Did the agent persist anything this turn? Progress that is never written
@@ -93,17 +322,72 @@ export async function runAgentTurn(
   let wroteTodo = false
   let wroteMemory = false
   let wrapUpInjected = false
-  // Original toolset, stashed while the wrap-up reserve narrows it. The
-  // context object outlives the turn, so this must always be put back.
-  let restoreTools: typeof context.tools | null = null
+  let wrapUpReason: 'cap' | 'action' = 'cap'
+  // Round count at which the reserve is exhausted; set when the wrap-up is injected.
+  let reserveEndsAt = 0
+  // Names the model can legitimately call. Anything declared here that is not
+  // `game` or a macro runs inside Admiral and can never be a game action.
+  const declaredTools = new Set((context.tools ?? []).map(t => t.name))
 
-  try {
-  while (rounds < maxRounds + WRAPUP_RESERVE_ROUNDS) {
-    // The reserve is not general-purpose budget: once past maxRounds the turn
-    // is over except for recording what happened. If the agent has already
-    // persisted (or spent the reserve without doing so), stop here.
-    if (rounds >= maxRounds && (wroteTodo || !wrapUpInjected)) break
-    if (options?.signal?.aborted) return 'completed'
+  // Operator interrupts (nudge, directive restart, disconnect) end the turn
+  // as `interrupted`: a distinct outcome with its own log shape. They used to
+  // surface as "LLM call failed" errors or as aborted llm_call rows that the
+  // idle scorer then read as a zero-tool-call turn.
+  const interrupted = (where: string, extra?: Record<string, unknown>): TurnOutcome => {
+    const reason = options?.interruptPending?.() ?? 'operator stop'
+    log('system', `Turn interrupted (${reason}) — ${where}`,
+      JSON.stringify({ stopReason: 'interrupted', reason, where, rounds, ...extra }, null, 2))
+    return 'interrupted'
+  }
+
+  // Wrap-up reserve. The prompt tells the agent to record progress AFTER
+  // acting ("execute the next action, then update the TODO"), so a turn that
+  // ends without a state write loses everything it learned — and the next
+  // turn, reading the same stale todo/memory, re-derives it from scratch.
+  // That is self-sustaining: re-derivation is what exhausts the budget in
+  // the first place. Observed on Morg'Thar 2026-09-01: 47 tool calls across
+  // 4 turns, 3 of them hitting the cap, ZERO state writes — his todo, his
+  // memory and the live game disagreed on his location three ways.
+  //
+  // Two parts, and the second is why this is not merely a prompt tweak:
+  //   1. the loop is allowed a bounded reserve past the point where the turn
+  //      would otherwise end (the round cap, or the first successful action),
+  //      so the chance to persist EXISTS at all;
+  //   2. during the reserve every tool call that is not update_todo /
+  //      update_memory is REFUSED at the dispatch site below, so persisting
+  //      is the only move that does anything. A note alone was measurably
+  //      not enough — one turn took the reserve, read the note and still
+  //      ended without writing.
+  // The refusal is enforced here rather than by swapping `context.tools`:
+  // executeTool runs whatever the model names regardless of the declared
+  // list (so a swap was advisory), and on a harmony-format local server a
+  // different tool list rewrites the developer message and re-prefills
+  // ~10k tokens of KV cache for the reserve rounds and again after them.
+  const injectWrapUp = (reason: 'cap' | 'action') => {
+    wrapUpInjected = true
+    wrapUpReason = reason
+    reserveEndsAt = reason === 'cap' ? maxRounds + WRAPUP_RESERVE_ROUNDS : rounds + WRAPUP_RESERVE_ROUNDS
+    context.messages.push({
+      role: 'user',
+      content: reason === 'cap' ? WRAPUP_NOTE_CAP : WRAPUP_NOTE_ACTION,
+      timestamp: Date.now(),
+    })
+    const memNote = wroteMemory ? ' (memory was updated)' : ''
+    log('system', reason === 'cap'
+      ? `Wrap-up reserve: ${rounds}/${maxRounds} rounds used with no TODO write${memNote} — only update_todo/update_memory are accepted from here`
+      : `Wrap-up reserve: action completed after ${rounds} round(s) with no TODO write${memNote} — only update_todo/update_memory are accepted from here`)
+  }
+
+  while (true) {
+    if (wrapUpInjected) {
+      // The reserve is not general-purpose budget: once in it the turn is
+      // over except for recording what happened. Stop as soon as the agent
+      // has written the TODO, or when the reserve is spent.
+      if (wroteTodo || rounds >= reserveEndsAt) break
+    } else if (rounds >= maxRounds) {
+      break
+    }
+    if (options?.signal?.aborted) return interrupted('before the LLM call')
 
     // Dead-connection guard: don't spend an LLM call on a connection that is
     // already known to be down — reconnects are owned by the harness, and no
@@ -113,13 +397,23 @@ export async function runAgentTurn(
       return 'connection_lost'
     }
 
-    await compactContext(summaryModel, context, compaction, options)
+    // Compact between turns only. Mid-turn compaction can summarize away the
+    // turn's own opening (its fresh state block, the query results it is
+    // acting on) — the split point is a user-message boundary, and the wrap-up
+    // note is a user message. A turn's growth is bounded by the round cap and
+    // the result caps; overflow mid-turn is still caught by emergency compaction.
+    if (rounds === 0) await compactContext(summaryModel, context, compaction, options, model)
 
     options?.onActivity?.('Waiting for LLM response...')
+    const callStartedAt = Date.now()
     let response: AssistantMessage
     try {
       response = await completeWithRetry(model, context, log, options, compaction)
     } catch (err) {
+      const durationMs = Date.now() - callStartedAt
+      if (options?.signal?.aborted) {
+        return interrupted(`LLM call cancelled after ${(durationMs / 1000).toFixed(1)}s`, { durationMs })
+      }
       const msg = err instanceof Error ? err.message : String(err)
       // An empty or overloaded LLM response that survives the retry loop is transient, not a real
       // fault — the agent just takes another turn next cycle. Log those as a benign 'system' note so
@@ -128,10 +422,20 @@ export async function runAgentTurn(
       log(benign ? 'system' : 'error', `${benign ? 'LLM transient (will retry next turn)' : 'LLM call failed'}: ${msg}`, JSON.stringify({
         model: { name: (model as any).name || 'unknown', contextWindow: model.contextWindow },
         messageCount: context.messages.length,
-        estimatedTokens: totalMessageTokens(context.messages),
+        estimatedTokens: totalMessageTokens(context.messages, cpt),
+        durationMs,
         error: msg,
       }, null, 2))
       return 'completed'
+    }
+    const durationMs = Date.now() - callStartedAt
+
+    // The operator pulled the plug while the model was talking. Whatever came
+    // back is partial (or complete but moot — the turn restarts on the new
+    // orders); pushing it into the context would leave a half-thought in the
+    // transcript, and scoring it as a zero-tool-call turn would be a lie.
+    if (options?.signal?.aborted || response.stopReason === 'aborted') {
+      return interrupted(`LLM call cancelled after ${(durationMs / 1000).toFixed(1)}s; partial output discarded`, { durationMs })
     }
 
     // Log rich LLM call metadata
@@ -140,7 +444,7 @@ export async function runAgentTurn(
       const costStr = u.cost.total < 0.001 ? '<$0.001' : `$${u.cost.total.toFixed(3)}`
       const inStr = u.input >= 1000 ? `${(u.input / 1000).toFixed(1)}k` : String(u.input)
       const outStr = u.output >= 1000 ? `${(u.output / 1000).toFixed(1)}k` : String(u.output)
-      const summary = `${response.model} | ${inStr}/${outStr} tokens | ${costStr} | ${response.stopReason}`
+      const summary = `${response.model} | ${inStr}/${outStr} tokens | ${costStr} | ${response.stopReason} | ${(durationMs / 1000).toFixed(1)}s`
 
       const textBlocks = response.content.filter(b => b.type === 'text').length
       const thinkingBlocks = response.content.filter(b => b.type === 'thinking').length
@@ -154,6 +458,8 @@ export async function runAgentTurn(
         model: response.model,
         provider: response.provider,
         stopReason: response.stopReason,
+        // Wall-clock for the whole call including any retries — what the agent waited.
+        durationMs,
         usage: {
           input: u.input,
           output: u.output,
@@ -164,8 +470,10 @@ export async function runAgentTurn(
         },
         context: {
           messageCount: context.messages.length,
-          estimatedTokens: totalMessageTokens(context.messages),
-          systemPromptTokens: context.systemPrompt ? estimateTokens(context.systemPrompt) : 0,
+          // ESTIMATES (chars / charsPerToken), not provider counts — see usage above for those.
+          estimatedTokens: totalMessageTokens(context.messages, cpt),
+          systemPromptTokens: context.systemPrompt ? estimateTokens(context.systemPrompt, cpt) : 0,
+          charsPerToken: cpt,
           omittedMessages: context.messages.length,
         },
         content: {
@@ -223,31 +531,54 @@ export async function runAgentTurn(
 
     let showedReason = false
     let actionPending = false
+    let actionSucceeded = false
     let cooldownBlocked = false
     let loopFlush = false
+    let interruptedMidRound = false
+    const refusedInReserve: string[] = []
+    const pushSynthetic = (toolCall: ToolCall, text: string) => {
+      context.messages.push({
+        role: 'toolResult',
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        content: [{ type: 'text', text }],
+        isError: false,
+        timestamp: Date.now(),
+      })
+    }
     for (const toolCall of toolCalls) {
-      if (options?.signal?.aborted) return 'completed'
+      // Every toolCall MUST get a matching toolResult, or the next request is
+      // malformed (tool_use without tool_result → API 400). So calls that are
+      // not executed — for any of the reasons below — get a synthetic result
+      // instead of being dropped.
+      if (options?.signal?.aborted) interruptedMidRound = true
+      if (interruptedMidRound) {
+        pushSynthetic(toolCall, 'Skipped — turn interrupted by the operator. This call was not executed; reissue it next turn if still needed.')
+        continue
+      }
 
       // Hard-stop: once a cooldown block (or a queued action) is seen, the turn is ending. Do NOT
       // execute the remaining queued tool calls in this assistant message — they would only re-fire
-      // into the gate or stack a second action. But every toolCall MUST still get a matching
-      // toolResult, or the next turn's complete() request is malformed (tool_use without
-      // tool_result → API 400). So skipped calls get a synthetic result instead of executing.
+      // into the gate or stack a second action.
       if (cooldownBlocked || actionPending || loopFlush) {
-        context.messages.push({
-          role: 'toolResult',
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
-          content: [{ type: 'text', text: 'Skipped — turn is ending (cooldown active / action pending). This call was not executed; reissue it next turn if still needed.' }],
-          isError: false,
-          timestamp: Date.now(),
-        })
+        pushSynthetic(toolCall, 'Skipped — turn is ending (cooldown active / action pending). This call was not executed; reissue it next turn if still needed.')
+        continue
+      }
+
+      // Wrap-up reserve enforcement (see injectWrapUp): nothing but a state
+      // write runs once the reserve has begun.
+      if (wrapUpInjected && !STATE_WRITE_TOOLS.has(toolCall.name)) {
+        refusedInReserve.push(toolCall.name)
+        pushSynthetic(toolCall,
+          'Not executed — wrap-up reserve: only update_todo and update_memory are accepted for the rest of ' +
+          'this turn. Record what you verified, what you finished, and the single next action now.')
         continue
       }
 
       options?.onActivity?.(`Executing tool: ${toolCall.name}`)
       const callReason = !showedReason ? reason : undefined
       showedReason = true
+      const kind = classifyToolCall(toolCall.name, toolCall.arguments, declaredTools)
       const result = await executeTool(toolCall.name, toolCall.arguments, toolCtx, callReason)
 
       // If local tools changed todo/memory, sync back
@@ -257,6 +588,7 @@ export async function runAgentTurn(
       if (result.startsWith(ACTION_PENDING_SENTINEL)) actionPending = true
       if (result.startsWith(COOLDOWN_BLOCKED_SENTINEL)) cooldownBlocked = true
       if (result.startsWith(LOOP_FLUSH_SENTINEL)) loopFlush = true
+      if (isSuccessfulActionResult(kind, toolCall.name, result)) actionSucceeded = true
       if (toolCall.name === 'update_todo') wroteTodo = true
       if (toolCall.name === 'update_memory') wroteMemory = true
       if (result.startsWith('Error: [connection_failed]')) connectionFailures++
@@ -271,6 +603,12 @@ export async function runAgentTurn(
       }
       context.messages.push(toolResultMessage)
     }
+
+    if (refusedInReserve.length > 0) {
+      log('system', `Wrap-up reserve: refused ${refusedInReserve.join(', ')} — only update_todo/update_memory are accepted`)
+    }
+
+    if (interruptedMidRound) return interrupted('mid-round; remaining tool calls skipped')
 
     // Connection-failure escalation: end the turn once failures are confirmed —
     // either the connection now reports dead, or repeated rounds keep failing
@@ -288,10 +626,26 @@ export async function runAgentTurn(
       return 'completed'
     }
 
-    // Early exit: if an action is pending, end the turn immediately instead of burning more rounds
-    if (actionPending) {
-      log('system', 'Action pending — ending turn early')
-      return 'completed'
+    rounds++
+
+    // One action per turn. A successful (or queued) game action is the turn's
+    // decision; everything after it is either recording state or waste.
+    if (actionPending || actionSucceeded) {
+      const what = actionPending ? 'Action pending' : 'Action completed'
+      if (endTurnAfterAction) {
+        if (wroteTodo) {
+          log('system', `${what} — TODO already recorded this turn, ending turn`)
+          return 'completed'
+        }
+        if (!wrapUpInjected) {
+          injectWrapUp('action')
+          continue
+        }
+      } else if (actionPending) {
+        // Legacy behaviour: a queued action ends the turn immediately.
+        log('system', 'Action pending — ending turn early')
+        return 'completed'
+      }
     }
 
     // Early exit: a cooldown-block means the agent just acted and must wait ~a tick before it can
@@ -303,79 +657,50 @@ export async function runAgentTurn(
       return 'completed'
     }
 
-    rounds++
-
-    // Wrap-up reserve. The prompt tells the agent to record progress AFTER
-    // acting ("execute the next action, then update the TODO"), so a turn
-    // guillotined at the round cap loses everything it learned — and the next
-    // turn, reading the same stale todo/memory, re-derives it from scratch.
-    // That is self-sustaining: re-derivation is what exhausts the budget in
-    // the first place. Observed on Morg'Thar 2026-09-01: 47 tool calls across
-    // 4 turns, 3 of them hitting the cap, ZERO state writes — his todo, his
-    // memory and the live game disagreed on his location three ways.
-    //
-    // Two parts, and the second is why this is not merely a prompt tweak:
-    //   1. the loop is allowed a bounded reserve past the cap, so the chance
-    //      to persist EXISTS at all (at `maxRounds` the loop simply exited);
-    //   2. during the reserve the toolset is REPLACED with the state-writing
-    //      tools only, so persisting is the sole legal move. A note alone was
-    //      measurably not enough — one turn took the reserve, read the note
-    //      and still ended without writing.
+    // Cap path: one round before the ceiling, with no TODO written, open the reserve.
     if (!wroteTodo && !wrapUpInjected && rounds >= maxRounds - 1) {
-      wrapUpInjected = true
-      restoreTools = context.tools
-      context.tools = context.tools.filter(t => TODO_WRITE_TOOLS.has(t.name))
-      context.messages.push({
-        role: 'user',
-        content:
-          `⏳ TURN ENDING — you have not updated your TODO, so your remaining tool calls are ` +
-          `restricted to update_todo. Memory alone is not enough: the next turn executes the TODO, ` +
-          `and a disproven or completed TODO restarts the same loop.\n\n` +
-          `Replace the TODO now with what you verified, what is finished or blocked, and the single ` +
-          `next action. Do not preserve a premise the game disproved.`,
-        timestamp: Date.now(),
-      })
-      log('system', `Wrap-up reserve: ${rounds}/${maxRounds} rounds used with no TODO write${wroteMemory ? ' (memory was updated)' : ''} — restricting tools to update_todo`)
+      injectWrapUp('cap')
     }
   }
-  } finally {
-    // Unconditional: the turn has nine exit paths and `context` is reused by
-    // the next turn. Leaking the narrowed toolset would leave an agent able to
-    // do nothing but rewrite its TODO, forever.
-    if (restoreTools) context.tools = restoreTools
-  }
 
-  if (wroteTodo) {
+  if (wrapUpInjected) {
+    const opened = wrapUpReason === 'cap' ? `round cap (${maxRounds})` : 'action'
+    if (wroteTodo) {
+      log('system', `Turn ending after ${opened} — TODO recorded in the wrap-up reserve (${rounds} rounds)`)
+    } else {
+      log('system', `Turn ending after ${opened} — wrap-up reserve exhausted with NO TODO write this turn${wroteMemory ? ' (memory was updated)' : ''}; next turn resumes from an unchanged objective`)
+    }
+  } else if (wroteTodo) {
     log('system', `Reached max tool rounds (${maxRounds}), ending turn`)
   } else {
-    log('system', `Reached max tool rounds (${maxRounds}), ending turn — NO TODO write this turn; next turn resumes from an unchanged objective`)
+    log('system', `Reached max tool rounds (${maxRounds}), ending turn — NO TODO write this turn${wroteMemory ? ' (memory was updated)' : ''}; next turn resumes from an unchanged objective`)
   }
   return 'completed'
 }
 
 // --- Context compaction ---
 
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN)
+function estimateTokens(text: string, cpt: number = CHARS_PER_TOKEN): number {
+  return Math.ceil(text.length / cpt)
 }
 
-function estimateMessageTokens(msg: Message): number {
-  if (typeof msg.content === 'string') return estimateTokens(msg.content)
+function estimateMessageTokens(msg: Message, cpt: number = CHARS_PER_TOKEN): number {
+  if (typeof msg.content === 'string') return estimateTokens(msg.content, cpt)
   if (Array.isArray(msg.content)) {
     let total = 0
     for (const block of msg.content) {
-      if ('text' in block) total += estimateTokens((block as any).text)
-      else if ('name' in block) total += estimateTokens((block as any).name + JSON.stringify((block as any).arguments))
-      else if ('thinking' in block) total += estimateTokens((block as any).thinking)
+      if ('text' in block) total += estimateTokens((block as any).text, cpt)
+      else if ('name' in block) total += estimateTokens((block as any).name + JSON.stringify((block as any).arguments), cpt)
+      else if ('thinking' in block) total += estimateTokens((block as any).thinking, cpt)
     }
     return total
   }
   return 0
 }
 
-function totalMessageTokens(messages: Message[]): number {
+function totalMessageTokens(messages: Message[], cpt: number = CHARS_PER_TOKEN): number {
   let total = 0
-  for (const msg of messages) total += estimateMessageTokens(msg)
+  for (const msg of messages) total += estimateMessageTokens(msg, cpt)
   return total
 }
 
@@ -393,8 +718,8 @@ function formatMessagesForSummary(messages: Message[]): string {
   const lines: string[] = []
   for (const msg of messages) {
     if (msg.role === 'user') {
-      const text = typeof msg.content === 'string' ? msg.content : '(complex)'
-      lines.push(`[USER] ${text}`)
+      const text = typeof msg.content === 'string' ? stripVolatileState(msg.content) : '(complex)'
+      if (text.trim()) lines.push(`[USER] ${text}`)
     } else if (msg.role === 'assistant') {
       for (const block of msg.content) {
         if ('text' in block && (block as any).text?.trim()) {
@@ -419,11 +744,18 @@ function formatMessagesForSummary(messages: Message[]): string {
   return lines.join('\n')
 }
 
+/**
+ * @param model       the model that WRITES the summary (may be a cheaper one)
+ * @param budgetModel the model whose context the messages are going INTO —
+ *                    its window and tokenizer decide when to compact. Defaults
+ *                    to `model` for callers that use one model for both.
+ */
 async function compactContext(
   model: Model<any>,
   context: Context,
   compaction?: CompactionState,
   options?: LoopOptions,
+  budgetModel: Model<any> = model,
 ): Promise<void> {
   // Proactively truncate oversized tool results to prevent token bloat
   for (const msg of context.messages) {
@@ -440,17 +772,10 @@ async function compactContext(
   }
 
   const ratio = options?.contextBudgetRatio ?? CONTEXT_BUDGET_RATIO
-  const systemPromptTokens = context.systemPrompt ? estimateTokens(context.systemPrompt) : 0
-  // Budget = fraction of the space REMAINING after the system prompt, not the full window.
-  // The system prompt is large (~30-50k tokens) and fixed — only messages can be compacted.
-  // Clamp the usable window to >= 0 and floor the budget: an oversized system
-  // prompt (approaching/exceeding the window) would otherwise yield a zero or
-  // negative budget, which makes the `messageTokens < messageBudget` guard below
-  // always false and compaction thrash (summarize every single turn).
-  const usableWindow = Math.max(0, model.contextWindow - systemPromptTokens)
-  const minMessageBudget = Math.min(8000, Math.floor(model.contextWindow * 0.15))
-  const messageBudget = Math.max(minMessageBudget, Math.floor(usableWindow * ratio))
-  const messageTokens = totalMessageTokens(context.messages)
+  const cpt = charsPerTokenFor(budgetModel)
+  const systemPromptTokens = context.systemPrompt ? estimateTokens(context.systemPrompt, cpt) : 0
+  const messageBudget = messageBudgetFor(budgetModel.contextWindow, systemPromptTokens, ratio)
+  const messageTokens = totalMessageTokens(context.messages, cpt)
 
   if (messageTokens < messageBudget) return
 
@@ -459,7 +784,7 @@ async function compactContext(
   let splitIdx = context.messages.length
 
   for (let i = context.messages.length - 1; i >= 1; i--) {
-    const msgTokens = estimateMessageTokens(context.messages[i])
+    const msgTokens = estimateMessageTokens(context.messages[i], cpt)
     if (recentTokens + msgTokens > recentBudget && splitIdx < context.messages.length - MIN_RECENT_MESSAGES) {
       break
     }
@@ -517,7 +842,8 @@ async function summarizeViaLLM(
   }
 
   const timeoutController = new AbortController()
-  const timeout = setTimeout(() => timeoutController.abort(), 30_000)
+  const timeoutMs = isLocalProvider(model.provider) ? LOCAL_SUMMARY_TIMEOUT_MS : SUMMARY_TIMEOUT_MS
+  const timeout = setTimeout(() => timeoutController.abort(), timeoutMs)
   const signal = options?.signal
     ? combineAbortSignals(options.signal, timeoutController.signal)
     : timeoutController.signal
@@ -528,6 +854,7 @@ async function summarizeViaLLM(
       signal,
       apiKey: options?.apiKey,
       maxTokens: SUMMARY_MAX_TOKENS,
+      ...localProviderCallOptions(model, 'summary'),
     })
     clearTimeout(timeout)
 
@@ -559,7 +886,16 @@ export async function completeWithRetry(
   let lastError: Error | null = null
   let abortAttempts = 0
 
-  const timeoutMs = options?.llmTimeoutMs || DEFAULT_LLM_TIMEOUT_MS
+  const cpt = charsPerTokenFor(model)
+  // Per-provider first, then the caller's (global preference) value, then the default.
+  const timeoutMs = resolveLlmTimeoutMs(model.provider, options?.llmTimeoutMs)
+  // Local models are told how hard to think and how warm to sample; hosted
+  // models keep their defaults. Explicit options override either.
+  const tuning: { reasoningEffort?: string; temperature?: number } = {
+    ...localProviderCallOptions(model, 'tool'),
+    ...(options?.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+    ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+  }
   // Mutable across attempts: an OAuth rotation mid-turn invalidates the key we
   // started with, and retrying with it can only ever 401 again.
   let apiKey = options?.apiKey
@@ -580,6 +916,7 @@ export async function completeWithRetry(
           apiKey,
           maxTokens: options?.maxTokens ?? 4096,
           cacheRetention: 'long',
+          ...tuning,
         })
         clearTimeout(timeout)
 
@@ -594,13 +931,15 @@ export async function completeWithRetry(
         // It clears both guards above, so it used to be returned as a real
         // response — which the turn loop then read as "zero tool calls", i.e.
         // a deliberate no-op, and scored as an idle turn (see the `rounds === 0`
-        // branch below). Observed 2026-09-01: Morg'Thar on a local 27B dense
-        // model aborted 6 of 8 calls at exactly 90s, each one starting a brand
-        // new turn that re-ran read_todo/read_memory/get_status from scratch,
-        // then tripped the idle backoff and sat unreachable until nudged.
+        // branch in runAgentTurn). Observed 2026-09-01: Morg'Thar on a local 27B
+        // dense model aborted 6 of 8 calls at exactly 90s, each one starting a
+        // brand new turn that re-ran read_todo/read_memory/get_status from
+        // scratch, then tripped the idle backoff and sat unreachable until nudged.
         // Local reasoning models spend their whole budget thinking, so this is
         // their normal failure mode, not an edge case. Route it into the retry
-        // path where it belongs.
+        // path where it belongs. (An OPERATOR abort — options.signal — is not
+        // a failure at all: it is handed straight back for runAgentTurn to
+        // record as `interrupted`.)
         if (result.stopReason === 'aborted' && !options?.signal?.aborted) {
           throw new Error(
             `LLM call aborted after ${timeoutMs / 1000}s with no tool call ` +
@@ -641,8 +980,8 @@ export async function completeWithRetry(
         log('system', `Emergency compaction: context overflow detected (${context.messages.length} messages). Force-compacting...`)
         const compactModel = options?.compactionModel || model
         await emergencyCompact(compactModel, context, compaction, options)
-        const sysToks = context.systemPrompt ? estimateTokens(context.systemPrompt) : 0
-        const msgToks = totalMessageTokens(context.messages)
+        const sysToks = context.systemPrompt ? estimateTokens(context.systemPrompt, cpt) : 0
+        const msgToks = totalMessageTokens(context.messages, cpt)
         log('system', `Emergency compaction complete: ${context.messages.length} messages, ~${sysToks + msgToks} total tokens (system: ${sysToks}, messages: ${msgToks})`)
       }
 
@@ -676,10 +1015,14 @@ export async function completeWithRetry(
       if (isAbort) {
         abortAttempts++
         if (abortAttempts > MAX_ABORT_RETRIES) {
+          const local = isLocalProvider(model.provider)
           log('error',
             `LLM aborted ${abortAttempts}x on this turn — ending it rather than retrying further. ` +
-            `The model is not finishing inside its time budget: raise the \`llm_timeout\` preference, ` +
-            `lower maxTokens, or move this agent to a faster (MoE) model.`)
+            `The model is not finishing inside its ${timeoutMs / 1000}s budget` +
+            (local
+              ? ` (fixed per-provider for local servers — the \`llm_timeout\` preference does not raise it): ` +
+                `lower maxTokens, keep reasoning effort low, or move this agent to a faster (MoE) model.`
+              : `: raise the \`llm_timeout\` preference, lower maxTokens, or move this agent to a faster model.`))
           throw lastError
         }
       }
@@ -688,7 +1031,7 @@ export async function completeWithRetry(
       log('error', `LLM error (attempt ${attempt + 1}/${MAX_RETRIES}): ${lastError.message}`, JSON.stringify({
         model: { name: (model as any).name || 'unknown', contextWindow: model.contextWindow },
         messageCount: context.messages.length,
-        estimatedTokens: totalMessageTokens(context.messages),
+        estimatedTokens: totalMessageTokens(context.messages, cpt),
         attempt: attempt + 1,
         maxRetries: MAX_RETRIES,
         error: lastError.message,
