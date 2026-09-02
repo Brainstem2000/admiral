@@ -291,6 +291,12 @@ const WRAPUP_NOTE_CAP =
   `Replace the TODO now with what you verified, what is finished or blocked, and the single ` +
   `next action. Do not preserve a premise the game disproved.`
 
+const TEXT_ONLY_RETRY_NOTE =
+  `⚠️ That was text, not an action — nothing was executed and nothing was saved. This turn ` +
+  `needs a TOOL CALL: execute the single next action you just described (game(...), ` +
+  `goto_system, reload, ...), or call update_todo if you meant to record the plan. ` +
+  `Do not describe it; call it.`
+
 const WRAPUP_NOTE_ACTION =
   `✅ ACTION DONE — this turn ends here; one action per turn. You have not updated your TODO ` +
   `this turn, so your remaining tool calls are restricted to update_todo and update_memory ` +
@@ -322,6 +328,8 @@ export async function runAgentTurn(
   let wroteTodo = false
   let wroteMemory = false
   let wrapUpInjected = false
+  // One retry per turn for a text-only first round — see the zero-tool-call branch.
+  let textOnlyRetried = false
   let wrapUpReason: 'cap' | 'action' = 'cap'
   // Round count at which the reserve is exhausted; set when the wrap-up is injected.
   let reserveEndsAt = 0
@@ -514,6 +522,18 @@ export async function runAgentTurn(
 
     if (toolCalls.length === 0) {
       if (reasoning) log('llm_thought', reasoning)
+      // A text-only FIRST round gets exactly one retry that says, in so many
+      // words, "call the tool". gpt-oss answered the wrap-up prompt in prose —
+      // "**TODO Updated** … single next action: reload(id=…)" — on three turns
+      // running (Morg'Thar, 2026-09-02 09:31 CT): the reload was never sent, the
+      // TODO was never written, and the idle backoff parked him for it. One
+      // retry costs a call; a parked hunter costs the next fifteen minutes.
+      if (rounds === 0 && !textOnlyRetried && textParts.length > 0) {
+        textOnlyRetried = true
+        context.messages.push({ role: 'user', content: TEXT_ONLY_RETRY_NOTE, timestamp: Date.now() })
+        log('system', 'Text-only response on round 0 — asking once for the tool call before scoring the turn idle')
+        continue
+      }
       // A first-round response with zero tool calls means the whole turn did
       // nothing — surface that so the agent loop can back off instead of
       // re-burning a full-context LLM call every TURN_INTERVAL (observed:
