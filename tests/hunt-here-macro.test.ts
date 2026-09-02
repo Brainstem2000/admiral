@@ -24,6 +24,7 @@ interface Scenario {
   battleTicks?: number      // how many reads report an active battle
   failAttack?: string
   failAttackTimes?: number
+  lootNeedsWreckId?: boolean
 }
 
 function harness(s: Scenario) {
@@ -67,7 +68,14 @@ function harness(s: Scenario) {
           return { error: { code: s.failAttack, message: 'nope' } }
         }
       }
-      if (cmd === 'wrecks') return { result: { wrecks: [{ wreck_id: 'wr_1', name: 'Grazer wreck' }] } }
+      if (cmd === 'wrecks') return { result: { wrecks: [
+        { id: 'wr_1', type: 'creature', victim_name: 'Belt-Grazer', killer_name: 'Test',
+          cargo: [{ item_id: 'creature_carapace', quantity: 2 }] },
+        { id: 'wr_other', type: 'creature', victim_name: 'Someone Else', killer_name: 'Rival Pilot', cargo: [] },
+      ] } }
+      if (cmd === 'loot' && s.lootNeedsWreckId && args && args.id !== undefined) {
+        return { error: { code: 'invalid_payload', message: 'Unknown parameter(s): id' } }
+      }
       return { result: 'ok' }
     },
   } as any
@@ -211,6 +219,31 @@ describe('hunt_here', () => {
     expect(calls.filter(c => c.cmd === 'attack').length).toBeGreaterThan(1)  // it retried
     expect(out).toContain('1 kill')
   }, 120_000)
+
+
+  test('loots its own wreck using the id the payload actually uses', async () => {
+    // The wrecks payload names it `id`, not `wreck_id`, and the wreck only
+    // appears a tick after the kill. Getting either wrong made three
+    // Belt-Grazer kills at Nekkar Belt report "No wrecks looted".
+    const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 1 })
+    const out = await executeTool('hunt_here', { max_kills: 1 }, ctx)
+    const loot = calls.find(c => c.cmd === 'loot')
+    expect(loot?.args?.id).toBe('wr_1')
+    expect(out).toContain('creature_carapace x2')
+  }, 90_000)
+
+  test('does not loot a wreck another pilot made', async () => {
+    const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 1 })
+    await executeTool('hunt_here', { max_kills: 1 }, ctx)
+    expect(calls.filter(c => c.cmd === 'loot').map(c => c.args?.id)).not.toContain('wr_other')
+  }, 90_000)
+
+  test('falls back to the other documented loot signature', async () => {
+    const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 1, lootNeedsWreckId: true })
+    const out = await executeTool('hunt_here', { max_kills: 1 }, ctx)
+    expect(calls.some(c => c.cmd === 'loot' && c.args?.wreck_id === 'wr_1')).toBe(true)
+    expect(out).toContain('creature_carapace')
+  }, 90_000)
 
   test('a failed attack stops the macro instead of spinning', async () => {
     const { ctx, calls } = harness({ targets: GRAZERS, failAttack: 'target_not_found' })

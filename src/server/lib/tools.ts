@@ -3202,16 +3202,38 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
     }
     kills.push(target.name)
 
-    // Loot whatever the kill left.
-    await macroSleep(macroStepDelayMs(conn))
+    // Loot whatever the kill left. The wreck does not exist the instant the
+    // target dies — it appears on the next game tick — and the payload names
+    // it `id`, not `wreck_id`:
+    //   wrecks: [{ id: cf5ce1df…, type: creature, victim_name: Belt-Grazer,
+    //              cargo: [{ item_id: creature_carapace, quantity: 1 }] }]
+    // Checking 500ms early with the wrong key is why three Belt-Grazer kills
+    // at Nekkar Belt on 2026-09-02 reported "No wrecks looted".
+    await macroSleep(HUNT_TICK_MS)
     const wr = await conn.execute('wrecks')
     if (!wr.error) {
       const wd = (wr.structuredContent ?? wr.result) as Record<string, unknown> | undefined
       const list = Array.isArray(wd?.wrecks) ? wd!.wrecks as Array<Record<string, unknown>> : []
-      for (const w of list.slice(0, 3)) {
-        const wid = String(w.wreck_id ?? w.id ?? '')
-        const lt = await macroAction(ctx, 'loot', wid ? { wreck_id: wid } : undefined, 2)
-        if (lt.ok) looted.push(String(w.name ?? (wid || 'wreck')))
+      // Only our own kills, and only ones still holding cargo.
+      const mine = list.filter((w) => {
+        const killer = String(w.killer_name ?? '')
+        return !killer || killer === ctx.profileName
+      })
+      for (const w of mine.slice(0, 4)) {
+        const wid = String(w.id ?? w.wreck_id ?? '')
+        if (!wid) continue
+        let lt = await macroAction(ctx, 'loot', { id: wid }, 2)
+        // Two signatures are documented for loot; try the other key before giving up.
+        if (!lt.ok && /invalid_payload|unknown parameter/i.test(`${lt.errorCode} ${lt.errorMessage ?? ''}`)) {
+          lt = await macroAction(ctx, 'loot', { wreck_id: wid }, 2)
+        }
+        if (lt.ok) {
+          const cargo = Array.isArray(w.cargo) ? w.cargo as Array<Record<string, unknown>> : []
+          const what = cargo.map((c) => `${c.item_id} x${c.quantity ?? 1}`).join(', ')
+          looted.push(what || String(w.victim_name ?? wid))
+        } else if (lt.errorCode) {
+          skipped.push(`wreck ${wid.slice(0, 8)} [${lt.errorCode}]`)
+        }
       }
     }
   }
@@ -3220,7 +3242,9 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
   return [
     prelude.join(' '),
     `hunt_here ${kills.length > 0 ? 'DONE' : 'NO KILLS'}: ${kills.length} kill(s)${kills.length ? ` (${kills.join(', ')})` : ''}.`,
-    looted.length ? `Looted ${looted.length} wreck(s).` : 'No wrecks looted.',
+    // Name the haul, not just a count — the agent has to decide whether it is
+    // worth a trip to a market, and the operator wants to see income happening.
+    looted.length ? `Looted ${looted.length} wreck(s): ${looted.join('; ')}.` : 'No wrecks looted.',
     `Stopped: ${stopReason}.`,
     `Hull ${end.hull ?? '?'}/${end.maxHull ?? '?'}.`,
     skipped.length ? `Skipped: ${[...new Set(skipped)].slice(0, 4).join('; ')}.` : '',
