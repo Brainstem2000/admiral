@@ -5,7 +5,7 @@ import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain,
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
-import { invalidateBriefingCache } from './briefing'
+import { invalidateBriefingCache, collectTargets } from './briefing'
 import { safeTruncate } from './text-safe'
 import { codexLookup, codexChain, priceAdvisory, codexGet } from './catalog'
 
@@ -106,6 +106,15 @@ export const allTools: Tool[] = [
     parameters: Type.Object({
       target_system: Type.String({ description: 'Destination system id (snake_case, e.g. "iron_reach")' }),
       dock_at_poi: Type.Optional(Type.String({ description: 'POI id to travel to and dock at after arriving (e.g. "war_citadel")' })),
+    }),
+  },
+  {
+    name: 'hunt_here',
+    description: 'MACRO: hunt everything beatable at your CURRENT POI in one bounded code loop — scan, pick a target, attack, close range, kill it, loot the wreck, repeat. Skips empire NPCs and police, skips anything tougher than your hull allows, and breaks off if your hull drops below the floor. Use this instead of attack/advance/loot by hand. Returns kills, loot and why it stopped.',
+    parameters: Type.Object({
+      max_kills: Type.Optional(Type.Number({ description: 'Stop after this many kills (default 3, max 8)' })),
+      hull_floor_pct: Type.Optional(Type.Number({ description: 'Break off and stop hunting below this hull percentage (default 60)' })),
+      species: Type.Optional(Type.String({ description: 'Only hunt this species/name (e.g. "belt_grazer" for a Grazer Cull contract). Omit to hunt anything beatable.' })),
     }),
   },
   {
@@ -269,7 +278,7 @@ export function captureSystemLinks(resultData: unknown, source: string): void {
 // dozens of per-step calls. They pace themselves (lib_v2 mutations await the
 // tick; other modes sleep between steps), so they bypass the single-action
 // cooldown gate and re-arm it when they finish.
-const MACRO_TOOLS = new Set(['mine_until_full', 'goto_system', 'sell_cargo'])
+const MACRO_TOOLS = new Set(['mine_until_full', 'goto_system', 'sell_cargo', 'hunt_here'])
 
 export function isMacroTool(name: string): boolean {
   return MACRO_TOOLS.has(name)
@@ -2972,12 +2981,164 @@ async function executeMacroTool(name: string, args: Record<string, unknown>, ctx
     switch (name) {
       case 'mine_until_full': return await macroMineUntilFull(args, ctx, reason)
       case 'goto_system': return await macroGotoSystem(args, ctx, reason)
+      case 'hunt_here': return await macroHuntHere(args, ctx, reason)
       case 'sell_cargo': return await macroSellCargo(args, ctx, reason)
       default: return `Error: unknown macro tool ${name}`
     }
   } catch (err) {
     return `MACRO ERROR (${name}): ${err instanceof Error ? err.message : String(err)}. State may have partially changed — verify with get_status.`
   }
+}
+
+/**
+ * HUNT THIS POI — scan, engage, kill, loot, repeat.
+ *
+ * Why this is a macro and not prose. gpt-oss-120b follows a single next action
+ * reliably and multi-step loops badly. Told in three separate directive
+ * rewrites to "arrive, get_nearby, attack, loot, move on", Morg'Thar instead
+ * commuted: on 2026-09-02 he crossed thirteen systems in 45 minutes with zero
+ * attacks, including a gas pocket holding four grazers. goto_system solved the
+ * same class of problem for travel — one call the model cannot half-execute.
+ *
+ * Safety is in code, not in the prompt: empire NPCs and police are never
+ * targeted, anything whose hull exceeds `MAX_TARGET_HULL_RATIO` of our own is
+ * skipped, and the loop breaks off the moment hull falls under the floor.
+ */
+const MAX_TARGET_HULL_RATIO = 0.5   // never pick a target tougher than half our hull
+const HUNT_TICK_MS = 10_000         // the game's combat tick
+const HUNT_BATTLE_MAX_TICKS = 45    // ~7.5 min per fight before we disengage
+
+async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
+  const conn = ctx.connection
+  const narrate = makeMacroNarrator(ctx, 'hunt_here', reason)
+  const maxKills = Math.min(Math.max(Number(args.max_kills) || 3, 1), 8)
+  const hullFloorPct = Math.min(Math.max(Number(args.hull_floor_pct) || 60, 10), 95)
+  const wantSpecies = String(args.species ?? '').toLowerCase().trim()
+
+  const readShip = async (): Promise<{ hull: number | null; maxHull: number | null; inBattle: boolean; zone: unknown; reach: unknown }> => {
+    let gs: Record<string, unknown> | null = null
+    try { gs = conn.getLocalState?.() ?? null } catch { gs = null }
+    if (!gs) {
+      const r = await conn.execute('get_status')
+      const d = r.structuredContent ?? r.result
+      if (d && typeof d === 'object') gs = d as Record<string, unknown>
+    }
+    const ship = (gs?.ship ?? {}) as Record<string, unknown>
+    const battle = (gs?.active_battle ?? null) as Record<string, unknown> | null
+    const combat = (gs?.combat_state ?? battle?.combat_state ?? null) as Record<string, unknown> | null
+    const n = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? x : null }
+    return {
+      hull: n(ship.hull), maxHull: n(ship.max_hull ?? ship.hull_max),
+      inBattle: !!battle && !!(battle.battle_id ?? battle.id),
+      zone: combat?.your_zone ?? battle?.your_zone ?? null,
+      reach: combat?.max_weapon_reach ?? null,
+    }
+  }
+  const hullPct = (s: { hull: number | null; maxHull: number | null }) =>
+    s.hull !== null && s.maxHull ? (s.hull / s.maxHull) * 100 : 100
+
+  const start = await readShip()
+  if (hullPct(start) < hullFloorPct) {
+    return `hunt_here ABORT: hull is ${start.hull}/${start.maxHull} (${hullPct(start).toFixed(0)}%), already under the ${hullFloorPct}% floor. Repair before hunting.`
+  }
+
+  const kills: string[] = []
+  const looted: string[] = []
+  const skipped: string[] = []
+  let stopReason = `reached max_kills (${maxKills})`
+
+  for (let k = 0; k < maxKills; k++) {
+    if (!conn.isConnected()) { stopReason = 'disconnected'; break }
+    const interrupt = ctx.interruptPending?.()
+    if (interrupt) { stopReason = `operator interrupt (${interrupt})`; break }
+
+    const scan = await conn.execute('get_nearby')
+    if (scan.error) { stopReason = `get_nearby failed [${scan.error.code}]`; break }
+    const data = scan.structuredContent ?? scan.result
+    observeTacticalResult(ctx.profileId, 'get_nearby', undefined, data, scan.notifications)
+    const targets = collectTargets(data)
+
+    const ship = await readShip()
+    const ourHull = ship.hull ?? 0
+    const beatable = targets.filter((t) => {
+      if (t.kind === 'npc') { skipped.push(`${t.name} (empire NPC — never attacked)`); return false }
+      if (wantSpecies && !`${t.species} ${t.name}`.toLowerCase().includes(wantSpecies)) return false
+      if (t.hull !== null && ourHull > 0 && t.hull > ourHull * MAX_TARGET_HULL_RATIO) {
+        skipped.push(`${t.name} (hull ${t.hull} — too tough)`); return false
+      }
+      return true
+    })
+    if (beatable.length === 0) {
+      stopReason = targets.length === 0
+        ? 'nothing at this POI'
+        : `nothing beatable here (${skipped.slice(0, 3).join('; ')})`
+      break
+    }
+
+    // Weakest first: fastest kill, least damage taken, most contract ticks per minute.
+    beatable.sort((a, b) => (a.hull ?? 1e9) - (b.hull ?? 1e9))
+    const target = beatable[0]
+    narrate(`engaging ${target.name} (${kills.length + 1}/${maxKills})`, true)
+
+    const atk = await macroAction(ctx, 'attack', { id: target.id }, 3)
+    if (!atk.ok) {
+      stopReason = `attack failed [${atk.errorCode}] ${atk.errorMessage ?? ''}`.trim()
+      break
+    }
+
+    // Fight it out. Close the range when out of reach, break off on the floor.
+    let ticks = 0
+    let broke = false
+    for (; ticks < HUNT_BATTLE_MAX_TICKS; ticks++) {
+      await macroSleep(HUNT_TICK_MS)
+      const s = await readShip()
+      if (hullPct(s) < hullFloorPct) {
+        narrate(`hull ${hullPct(s).toFixed(0)}% — breaking off`, true)
+        await macroAction(ctx, 'stance', { id: 'flee' }, 2)
+        for (let r = 0; r < 3; r++) await macroAction(ctx, 'retreat', undefined, 2)
+        stopReason = `hull fell to ${s.hull}/${s.maxHull} (${hullPct(s).toFixed(0)}%) — disengaged`
+        broke = true
+        break
+      }
+      if (!s.inBattle) break   // target dead, or the battle dropped us
+      // "Guns can't reach" until the range closes — advance while we are outside it.
+      if (typeof s.zone === 'string' && s.zone.toLowerCase() === 'outer') {
+        await macroAction(ctx, 'advance', undefined, 2)
+      }
+      if (ticks % 6 === 5) narrate(`fighting ${target.name}, hull ${hullPct(s).toFixed(0)}%`)
+    }
+    if (broke) break
+    if (ticks >= HUNT_BATTLE_MAX_TICKS) {
+      stopReason = `battle with ${target.name} ran past ${HUNT_BATTLE_MAX_TICKS} ticks — disengaged`
+      await macroAction(ctx, 'stance', { id: 'flee' }, 2)
+      await macroAction(ctx, 'retreat', undefined, 2)
+      break
+    }
+    kills.push(target.name)
+
+    // Loot whatever the kill left.
+    await macroSleep(macroStepDelayMs(conn))
+    const wr = await conn.execute('wrecks')
+    if (!wr.error) {
+      const wd = (wr.structuredContent ?? wr.result) as Record<string, unknown> | undefined
+      const list = Array.isArray(wd?.wrecks) ? wd!.wrecks as Array<Record<string, unknown>> : []
+      for (const w of list.slice(0, 3)) {
+        const wid = String(w.wreck_id ?? w.id ?? '')
+        const lt = await macroAction(ctx, 'loot', wid ? { wreck_id: wid } : undefined, 2)
+        if (lt.ok) looted.push(String(w.name ?? (wid || 'wreck')))
+      }
+    }
+  }
+
+  const end = await readShip()
+  return [
+    `hunt_here ${kills.length > 0 ? 'DONE' : 'NO KILLS'}: ${kills.length} kill(s)${kills.length ? ` (${kills.join(', ')})` : ''}.`,
+    looted.length ? `Looted ${looted.length} wreck(s).` : 'No wrecks looted.',
+    `Stopped: ${stopReason}.`,
+    `Hull ${end.hull ?? '?'}/${end.maxHull ?? '?'}.`,
+    skipped.length ? `Skipped: ${[...new Set(skipped)].slice(0, 4).join('; ')}.` : '',
+    kills.length === 0 && stopReason.startsWith('nothing') ? 'This POI is worked out — travel to another POI or jump to the next system.' : '',
+  ].filter(Boolean).join(' ')
 }
 
 async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
