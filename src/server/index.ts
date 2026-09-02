@@ -165,7 +165,7 @@ async function refreshOfflineWallets() {
   for (const p of lp()) {
     try {
       if (!p.username || !p.password) continue
-      if (agentManager.getAgent(p.id)?.isConnected) continue
+      if (agentManager.getAgent(p.id)?.isConnected || agentManager.getAgent(p.id)?.isLoopActive) continue
       await agentManager.connect(p.id)
       const gs = agentManager.getStatus(p.id).gameState as Record<string, unknown> | null
       const credits = Number(gs?.credits)
@@ -204,6 +204,14 @@ async function refreshOfflineWallets() {
           credits: Number.isFinite(credits) ? credits : 0,
         })
       } catch { /* state sheet is best-effort */ }
+      // A connect_llm that arrived during this profile's sweep now owns the
+      // connection: disconnecting here would tear the loop down one second after
+      // it started (Morg'Thar, 2026-09-02 02:33 CT — "empty LLM response", loop
+      // stopped, agent dark for seven hours).
+      if (agentManager.getAgent(p.id)?.isLoopActive) {
+        console.log(`[wallet-sweep] ${p.name}: LLM loop started mid-sweep — leaving the connection up`)
+        continue
+      }
       await agentManager.disconnect(p.id)
       await new Promise((r) => setTimeout(r, 2500))
     } catch { /* one profile failing must not stop the sweep */ }
