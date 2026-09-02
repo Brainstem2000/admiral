@@ -287,12 +287,53 @@ export function recoverToolCallFromText(response: AssistantMessage, log: LogFn):
   } else if (typeof obj.name === 'string' && obj.name.trim() && (obj.arguments === undefined || (typeof obj.arguments === 'object' && !Array.isArray(obj.arguments)))) {
     name = obj.name.trim()
     args = (obj.arguments ?? {}) as Record<string, unknown>
+  } else if (Object.keys(obj).length === 1 && typeof obj.content === 'string' && obj.content.trim()) {
+    // A BARE ARGUMENTS OBJECT — the model wrote update_todo's payload without
+    // naming the tool: {"content": "- Verified: … - Next action: …"}. Morg'Thar
+    // produced this shape repeatedly on 2026-09-02; each one cost a wasted
+    // retry call, lost the TODO write, and dumped raw JSON into the log.
+    //
+    // `content` is also update_memory's parameter, so this is ambiguous in
+    // principle. It resolves to update_todo because that is what both the
+    // execution prompt and the wrap-up note ask for, and the text is in the
+    // directive's TODO format. Writing the TODO when memory was meant is a
+    // mild, visible error; dropping the write entirely costs a whole turn.
+    name = 'update_todo'
+    args = { content: obj.content }
   }
   if (!name) return false
   const call: ToolCall = { type: 'toolCall', id: `recovered_${Date.now().toString(36)}`, name, arguments: args }
   response.content = response.content.map((c) => (c === texts[0] ? call : c)) as typeof response.content
   log('system', `Recovered a tool call the model emitted as text: ${name}(${JSON.stringify(args).slice(0, 140)})`)
   return true
+}
+
+/**
+ * What to show in the thought lane for a model reply.
+ *
+ * A local model that fumbles a tool call emits its ARGUMENTS as text — a raw
+ * JSON blob — and logging that verbatim put `{ "content": "- Verified: …" }`
+ * into the dashboard's log stream, where a human is trying to read what the
+ * agent is thinking. Unwrap the readable part; fall back to a short shape
+ * description rather than the blob.
+ */
+export function readableThought(text: string): string {
+  const raw = text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '').trim()
+  if (!raw.startsWith('{') || !raw.endsWith('}')) return text
+  let obj: any
+  try { obj = JSON.parse(raw) } catch { return text }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return text
+  // The payload of update_todo / update_memory / a chat message IS the prose.
+  for (const k of ['content', 'message', 'text', 'summary']) {
+    if (typeof obj[k] === 'string' && obj[k].trim()) return obj[k].trim()
+  }
+  if (typeof obj.command === 'string') {
+    const inner = obj.args && typeof obj.args === 'object' ? obj.args : {}
+    const argStr = Object.entries(inner).map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', ')
+    return `(intended tool call) ${obj.command}(${argStr})`
+  }
+  if (typeof obj.name === 'string') return `(intended tool call) ${obj.name}(...)`
+  return `(model emitted a JSON object with keys: ${Object.keys(obj).join(', ')})`
 }
 
 /** Result prefixes that mean "the game did NOT do it" — see executeTool.
@@ -564,7 +605,7 @@ export async function runAgentTurn(
     }
 
     if (toolCalls.length === 0) {
-      if (reasoning) log('llm_thought', reasoning)
+      if (reasoning) log('llm_thought', readableThought(reasoning))
       // A text-only FIRST round gets exactly one retry that says, in so many
       // words, "call the tool". gpt-oss answered the wrap-up prompt in prose —
       // "**TODO Updated** … single next action: reload(id=…)" — on three turns
@@ -588,7 +629,7 @@ export async function runAgentTurn(
       ? reasoning.length > 180 ? reasoning.slice(0, 177) + '...' : reasoning
       : undefined
 
-    if (reasoning) log('llm_thought', reasoning)
+    if (reasoning) log('llm_thought', readableThought(reasoning))
 
     const toolCtx = { connection, profileId, profileName, log, todo: todo.value, memory: memory.value, interruptPending: options?.interruptPending }
 

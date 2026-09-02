@@ -132,7 +132,31 @@ describe('briefing weapon loadout', () => {
     // A blank-id line is exactly the regression this guards against.
     expect(b).not.toMatch(/ids:\s*$/m)
     expect(b).not.toContain('crimson_berserker_plating')
-    expect(b).toContain('1/3 weapon(s) need reload')
+    // A partly-loaded ship must read as "you can fight", naming the guns that
+    // are ready. "1/3 need reload" was read by gpt-oss as "I am unarmed":
+    // Morg'Thar crossed six systems on 2026-09-02 reporting "all 7 weapons need
+    // reload" while his Fury Cannon held 996 of 1,000 rounds, and engaged nothing.
+    expect(b).toContain('WEAPON READINESS: YOU CAN FIGHT')
+    expect(b).toContain('2/3 weapon(s) LOADED')
+    expect(b).toContain('NOT a reason to skip a target')
+    expect(b).toMatch(/ready: .*(fury_cannon|mass_driver)/)
+  })
+
+  test('a ship with every magazine empty is told plainly not to attack', async () => {
+    const pid = `p-brief-dry-${Math.random()}`
+    clearBriefingCache(pid)
+    await refreshBriefingData(pid, stubConnection({
+      ship: {
+        modules: [
+          { module_id: 'a1', type: 'weapon', type_id: 'mass_driver', current_ammo: 0, magazine_size: 10 },
+          { module_id: 'a2', type: 'weapon', type_id: 'railgun_ii', current_ammo: 0, magazine_size: 7 },
+        ],
+      },
+    }))
+    const b = buildSituationalBriefing(pid)
+    expect(b).toContain('ALL 2 MAGAZINES EMPTY')
+    expect(b).toContain('Do not attack')
+    expect(b).not.toContain('YOU CAN FIGHT')
   })
 
   test('identical guns are grouped rather than listed seven times', async () => {

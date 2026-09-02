@@ -513,8 +513,27 @@ export function buildSituationalBriefing(profileId: string): string {
         if (knownWeapons === weapons.length) {
           if (readyWeapons === weapons.length) {
             lines.push('WEAPON READINESS: COMBAT READY — every fitted weapon is full or effectively full. Do not reload or shop for ammo before acting; cargo ammo is spare stock.')
+          } else if (readyWeapons > 0) {
+            // Name the guns that CAN fire and say combat is on. "6/7 need
+            // reload" was read as "I am unarmed": Morg'Thar crossed six
+            // corridor systems on 2026-09-02 writing "all 7 weapons need
+            // reload" while his Fury Cannon held 996 of 1,000 rounds, and
+            // engaged nothing. A readiness line has to answer "can I fight
+            // right now", not just count empty magazines.
+            const readyNames = [...byKind.entries()]
+              .filter(([, e]) => e.ready > 0)
+              .map(([key, e]) => `${key.split('|')[0]}${e.ready > 1 ? ` x${e.ready}` : ''}`)
+            lines.push(
+              `WEAPON READINESS: YOU CAN FIGHT — ${readyWeapons}/${weapons.length} weapon(s) LOADED and ready: ${readyNames.join(', ')}. ` +
+              `The other ${weapons.length - readyWeapons} ${weapons.length - readyWeapons === 1 ? 'is' : 'are'} empty and ` +
+              `stay${weapons.length - readyWeapons === 1 ? 's' : ''} empty until you reach ammo — that is NOT a reason to skip a target. ` +
+              `Engage what your loaded guns can beat; reload the rest only when you actually hold their ammo.`,
+            )
           } else {
-            lines.push(`WEAPON READINESS: ${weapons.length - readyWeapons}/${weapons.length} weapon(s) need reload. Reload only those weapon ids; full weapons are already ready.`)
+            lines.push(
+              `WEAPON READINESS: ALL ${weapons.length} MAGAZINES EMPTY — you cannot win a fight. Do not attack. ` +
+              `Travel to ammo, buy it, reload, then hunt.`,
+            )
           }
         }
       }
