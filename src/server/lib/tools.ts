@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, FORBIDDEN_SYSTEMS } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, FORBIDDEN_SYSTEMS } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -86,7 +86,7 @@ export function fullWeaponReloadVerdict(
 export const allTools: Tool[] = [
   {
     name: 'game',
-    description: 'Execute a SpaceMolt game command. See the system prompt for available commands.',
+    description: 'Execute a SpaceMolt game command. See the system prompt for available commands. Queries read only your current location; get_system/get_poi/view_market/get_missions take no system or station argument.',
     parameters: Type.Object({
       command: Type.String({ description: 'The game command name (e.g. mine, travel, get_status)' }),
       args: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: 'Command arguments as key-value pairs' })),
@@ -310,17 +310,42 @@ function actionCooldownRemaining(profileId: string): number | null {
 const recentFailures = new Map<string, Array<{ key: string; timestamp: number }>>()
 // Fuel-floor checkpoint state: last blocked jump per profile (see fuel floor guard).
 const fuelFloorBlocks = new Map<string, { dest: string; at: number }>()
-/** Stations/factions that refused docking on reputation, per profile. Reputation
+/** Stations that refused docking on reputation, per profile. Reputation
  *  recovers slowly if at all, so a refusal is treated as sticky for a while
- *  rather than re-tested every few minutes. */
-const reputationLockouts = new Map<string, { where: string; rep: string | null; at: number }>()
+ *  rather than re-tested every few minutes.
+ *
+ *  SCOPED to the refusing system (keyed on location.system_id, never the
+ *  display name). The first version of this gate was one flag per profile and
+ *  blocked docking EVERYWHERE for an hour after a single refusal — a hunter
+ *  refused at Voss Redoubt could not dock at his own home citadel either. A
+ *  refusal is evidence about one station's faction, not about the galaxy. */
+interface ReputationLockout { systemId: string | null; label: string; rep: string | null; at: number }
+const reputationLockouts = new Map<string, ReputationLockout[]>()
 const REPUTATION_LOCKOUT_MS = 60 * 60_000
 
-/** Record a docking refusal so the gate above can stop the repeat trip. */
-export function noteReputationRefusal(profileId: string, resultText: string, where: string): void {
+/** Record a docking refusal so the dock gate can stop the repeat trip to THAT system. */
+export function noteReputationRefusal(
+  profileId: string,
+  resultText: string,
+  where: { systemId: string | null; label: string },
+): void {
   if (!/insufficient_reputation/i.test(resultText)) return
   const m = /current:\s*(-?\d+)/i.exec(resultText)
-  reputationLockouts.set(profileId, { where, rep: m ? m[1] : null, at: Date.now() })
+  const systemId = where.systemId ? normalizeSystemId(where.systemId) : null
+  const now = Date.now()
+  const list = (reputationLockouts.get(profileId) ?? [])
+    .filter((l) => now - l.at < REPUTATION_LOCKOUT_MS && !(systemId && l.systemId === systemId))
+  list.push({ systemId, label: where.label, rep: m ? m[1] : null, at: now })
+  reputationLockouts.set(profileId, list)
+}
+
+/** The live lockout for one system, if the station there refused this profile recently. */
+function reputationLockoutFor(profileId: string, systemId: string | null): ReputationLockout | null {
+  if (!systemId) return null
+  const id = normalizeSystemId(systemId)
+  const now = Date.now()
+  return (reputationLockouts.get(profileId) ?? [])
+    .find((l) => l.systemId === id && now - l.at < REPUTATION_LOCKOUT_MS) ?? null
 }
 const FAILURE_LOOP_WINDOW_MS = 5 * 60_000
 const FAILURE_LOOP_THRESHOLD = 3   // fire on the 3rd identical failure
@@ -418,10 +443,454 @@ export function cleanupProfileToolState(profileId: string): void {
   fuelFloorBlocks.delete(profileId)
   reputationLockouts.delete(profileId)
   lastDestinations.delete(profileId)
+  tactical.delete(profileId)
   const prefix = `${profileId}:`
   for (const key of queryCache.keys()) {
     if (key.startsWith(prefix)) queryCache.delete(key)
   }
+}
+
+// ─── Tactical state: what the tool layer itself has observed ──────────────
+//
+// Several gates below need to know where the agent is standing, whether it is
+// docked, what threatens it and what the local order book looked like a
+// minute ago. lib_v2 keeps an authoritative state cache (getLocalState) for
+// the first two; the rest is only ever visible as results pass through this
+// file. This is the per-profile scratch memory those gates read. It is
+// observation, never a source of truth over a live answer from the game.
+
+const GROUP_PREFIX_RX = /^(?:market|storage|social|intel|faction|faction_admin|faction_commerce|salvage|catalog|ship|battle|transfer|facility|auth|shipping|fleet|drone|citizenship)_/
+
+/** v2 tool groups whose group form (`facility` + {action}) has no lib_v2 route. */
+const V2_GROUPS = new Set(['market', 'storage', 'social', 'intel', 'faction', 'faction_admin', 'faction_commerce', 'salvage', 'catalog', 'ship', 'battle', 'transfer', 'facility', 'shipping', 'fleet', 'drone', 'citizenship'])
+
+function normalizeSystemId(s: string): string {
+  return s.toLowerCase().trim().replace(/\s+/g, '_')
+}
+
+interface MarketSnapshot {
+  stationId: string
+  /** true when the read was the whole board (no item/category filter), so an absent item means "no order". */
+  full: boolean
+  at: number
+  items: Map<string, { ask: number | null; askQty: number | null; bid: number | null; bidQty: number | null }>
+}
+
+interface SystemSnapshot {
+  systemId: string
+  systemName: string
+  at: number
+  pois: Array<{ id: string; name: string; type: string; has_base: boolean; base_id?: string; base_name?: string }>
+}
+
+interface TacticalState {
+  systemId: string | null
+  systemName: string | null
+  poiId: string | null
+  /** undefined = never observed; null = observed undocked. */
+  dockedAt: string | null | undefined
+  /** When a result last carried a location block — freshness relative to lastMovementAt. */
+  locationAt: number
+  /** Last movement command this profile dispatched through the tool layer. */
+  lastMovementAt: number
+  hull: number | null
+  hullDropAt: number
+  pirates: number
+  piratesAt: number
+  lastBattleAt: number
+  repByEmpire: Record<string, number> | null
+  localEmpire: string | null
+  system: SystemSnapshot | null
+  market: MarketSnapshot | null
+}
+
+const tactical = new Map<string, TacticalState>()
+
+function tacticalFor(profileId: string): TacticalState {
+  let t = tactical.get(profileId)
+  if (!t) {
+    t = {
+      systemId: null, systemName: null, poiId: null, dockedAt: undefined, locationAt: 0, lastMovementAt: 0,
+      hull: null, hullDropAt: 0, pirates: 0, piratesAt: 0, lastBattleAt: 0, repByEmpire: null, localEmpire: null,
+      system: null, market: null,
+    }
+    tactical.set(profileId, t)
+  }
+  return t
+}
+
+const MOVEMENT_COMMANDS = new Set(['jump', 'travel', 'dock', 'undock'])
+const THREAT_MEMORY_MS = 10 * 60_000
+const BATTLE_RECENT_MS = 2 * 60_000
+const MARKET_SNAPSHOT_MAX_AGE_MS = 10 * 60_000
+
+function noteHull(t: TacticalState, hull: number, now: number): void {
+  if (t.hull !== null && hull < t.hull) t.hullDropAt = now
+  t.hull = hull
+}
+
+function numOrNull(v: unknown): number | null {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN
+  return Number.isFinite(n) ? n : null
+}
+
+/** Note that a movement command went out, so a cached location older than it is suspect. */
+function noteMovement(profileId: string, command: string): void {
+  const deep = command.replace(/^spacemolt_/, '').replace(GROUP_PREFIX_RX, '')
+  if (MOVEMENT_COMMANDS.has(deep)) tacticalFor(profileId).lastMovementAt = Date.now()
+}
+
+/**
+ * Bank whatever a game result reveals about position, docking, threats and the
+ * local market. Called on every successful result through executeTool AND on
+ * every macro step (macros bypass executeTool entirely). Must never throw.
+ */
+export function observeTacticalResult(
+  profileId: string,
+  command: string,
+  commandArgs: Record<string, unknown> | undefined,
+  data: unknown,
+  notifications?: unknown[],
+): void {
+  try {
+    const t = tacticalFor(profileId)
+    const now = Date.now()
+    const bare = command.replace(/^spacemolt_/, '')
+    const deep = bare.replace(GROUP_PREFIX_RX, '')
+    if (bare === 'attack' || bare === 'battle' || bare.startsWith('battle_')) t.lastBattleAt = now
+    if (Array.isArray(notifications)) {
+      for (const n of notifications) {
+        let s = ''
+        try { s = JSON.stringify(n).toLowerCase() } catch { s = '' }
+        if (/battle|combat|under_attack|attacked/.test(s)) { t.lastBattleAt = now; break }
+      }
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return
+    const d = data as Record<string, unknown>
+
+    // Location block: get_status / get_location / every lib_v2 mutation delta.
+    const loc = d.location as Record<string, unknown> | undefined
+    if (loc && typeof loc === 'object' && !Array.isArray(loc)) {
+      if (typeof loc.system_id === 'string' && loc.system_id) t.systemId = normalizeSystemId(loc.system_id)
+      else if (typeof loc.system_name === 'string' && loc.system_name) t.systemId = normalizeSystemId(loc.system_name)
+      if (typeof loc.system_name === 'string' && loc.system_name) t.systemName = loc.system_name
+      if (typeof loc.poi_id === 'string' && loc.poi_id) t.poiId = loc.poi_id
+      if ('docked_at' in loc) t.dockedAt = typeof loc.docked_at === 'string' && loc.docked_at ? loc.docked_at : null
+      if (typeof loc.empire === 'string' && loc.empire) t.localEmpire = loc.empire
+      const pc = typeof loc.nearby_pirate_count === 'number' ? loc.nearby_pirate_count
+        : Array.isArray(loc.nearby_pirates) ? loc.nearby_pirates.length : null
+      if (pc !== null) { t.pirates = pc; t.piratesAt = now }
+      if (typeof loc.system_id === 'string' || 'docked_at' in loc) t.locationAt = now
+    }
+
+    const player = d.player as Record<string, unknown> | undefined
+    if (player && typeof player === 'object') {
+      const rep = player.reputation
+      if (rep && typeof rep === 'object' && !Array.isArray(rep)) t.repByEmpire = rep as Record<string, number>
+    }
+
+    // Hull: get_status nests it under ship; get_ship may be flat or nested.
+    const ship = (d.ship && typeof d.ship === 'object' ? d.ship : deep === 'get_ship' ? d : undefined) as Record<string, unknown> | undefined
+    const hull = ship ? numOrNull(ship.hull) : null
+    if (hull !== null) noteHull(t, hull, now)
+
+    // get_nearby: the only call that sees named pirates on-site.
+    if (deep === 'get_nearby' || typeof d.pirate_count === 'number' || Array.isArray(d.pirates)) {
+      const pc = typeof d.pirate_count === 'number' ? d.pirate_count : Array.isArray(d.pirates) ? d.pirates.length : null
+      if (pc !== null) { t.pirates = pc; t.piratesAt = now }
+    }
+
+    // get_system: the POI list with has_base is what the docked-state refusal
+    // needs to name the station instead of just saying "go dock".
+    const sys = d.system as Record<string, unknown> | undefined
+    if (sys && typeof sys === 'object' && typeof sys.id === 'string' && Array.isArray(sys.pois)) {
+      const systemId = normalizeSystemId(sys.id)
+      t.system = {
+        systemId,
+        systemName: String(sys.name ?? sys.id),
+        at: now,
+        pois: (sys.pois as Array<Record<string, unknown>>)
+          .filter((p) => p && typeof p === 'object' && typeof p.id === 'string')
+          .map((p) => ({
+            id: String(p.id),
+            name: String(p.name ?? p.id),
+            type: String(p.type ?? ''),
+            has_base: p.has_base === true || (typeof p.base_id === 'string' && p.base_id.length > 0),
+            ...(typeof p.base_id === 'string' && p.base_id ? { base_id: p.base_id } : {}),
+            ...(typeof p.base_name === 'string' && p.base_name ? { base_name: p.base_name } : {}),
+          })),
+      }
+      // get_system always describes the system the agent is standing in.
+      if (!loc) { t.systemId = systemId; t.systemName = t.system.systemName }
+      if (typeof sys.empire === 'string' && sys.empire) t.localEmpire = sys.empire
+      const poi = d.poi as Record<string, unknown> | undefined
+      if (poi && typeof poi === 'object' && typeof poi.id === 'string') t.poiId = poi.id
+    }
+
+    // A battle at this POI (ours or not) — get_system/get_poi carry active_battle;
+    // get_battle_status carries battle_id + is_participant.
+    if (d.active_battle && typeof d.active_battle === 'object') t.lastBattleAt = now
+    if (typeof d.battle_id === 'string' && d.battle_id && (d.is_participant === true || d.combat_state)) t.lastBattleAt = now
+
+    // view_market: keep the station's order book so a buy with no ask can be
+    // refused locally, with the depth, instead of round-tripping to fail.
+    if (deep === 'view_market' || d.action === 'view_market') {
+      const items = Array.isArray(d.items) ? d.items : Array.isArray(d.market) ? d.market : null
+      const stationId = String(d.base_id ?? d.station_id ?? t.dockedAt ?? '')
+      if (items && stationId) {
+        const filtered = !!(commandArgs?.item_id || commandArgs?.item || commandArgs?.category || commandArgs?.search)
+        const map = new Map<string, { ask: number | null; askQty: number | null; bid: number | null; bidQty: number | null }>()
+        for (const raw of items as Array<Record<string, unknown>>) {
+          if (!raw || typeof raw !== 'object') continue
+          const id = String(raw.item_id ?? raw.id ?? '').toLowerCase()
+          if (!id) continue
+          map.set(id, {
+            ask: numOrNull(raw.best_sell_price ?? raw.best_sell ?? raw.best_ask ?? raw.sell_price),
+            askQty: numOrNull(raw.best_sell_qty ?? raw.ask_quantity_at_best),
+            bid: numOrNull(raw.best_buy_price ?? raw.best_buy ?? raw.best_bid ?? raw.buy_price),
+            bidQty: numOrNull(raw.best_buy_qty ?? raw.bid_quantity_at_best),
+          })
+        }
+        t.market = { stationId, full: !filtered, at: now, items: map }
+      }
+    }
+  } catch { /* observation must never break execution */ }
+}
+
+interface CurrentLocation {
+  systemId: string | null
+  systemName: string | null
+  poiId: string | null
+  poiName: string | null
+  /** undefined = no authoritative docked_at key available. */
+  dockedAt: string | null | undefined
+  inTransit: boolean
+  pirates: number | null
+  empire: string | null
+  hull: number | null
+  repByEmpire: Record<string, number> | null
+  /** true when the answer came from the connection's live state cache. */
+  live: boolean
+}
+
+/** Where the agent is, from the connection's own state cache first and the tool layer's observations second. */
+function currentLocation(ctx: ToolContext): CurrentLocation {
+  const t = tacticalFor(ctx.profileId)
+  let gs: Record<string, unknown> | null = null
+  try { gs = ctx.connection.getLocalState?.() ?? null } catch { gs = null }
+  const loc = gs?.location as Record<string, unknown> | undefined
+  const player = gs?.player as Record<string, unknown> | undefined
+  const ship = gs?.ship as Record<string, unknown> | undefined
+  const rep = player?.reputation
+  if (loc && typeof loc === 'object' && !Array.isArray(loc)) {
+    // Some state shapes carry only the display name; ids are its snake_case.
+    const nameAsId = typeof loc.system_name === 'string' && loc.system_name ? normalizeSystemId(loc.system_name) : null
+    return {
+      systemId: typeof loc.system_id === 'string' && loc.system_id ? normalizeSystemId(loc.system_id) : (nameAsId ?? t.systemId),
+      systemName: typeof loc.system_name === 'string' && loc.system_name ? loc.system_name : t.systemName,
+      poiId: typeof loc.poi_id === 'string' && loc.poi_id ? loc.poi_id : t.poiId,
+      poiName: typeof loc.poi_name === 'string' && loc.poi_name ? loc.poi_name : null,
+      dockedAt: 'docked_at' in loc ? (typeof loc.docked_at === 'string' && loc.docked_at ? loc.docked_at : null) : t.dockedAt,
+      inTransit: loc.in_transit === true,
+      pirates: typeof loc.nearby_pirate_count === 'number' ? loc.nearby_pirate_count
+        : Array.isArray(loc.nearby_pirates) ? loc.nearby_pirates.length : null,
+      empire: typeof loc.empire === 'string' && loc.empire ? loc.empire : t.localEmpire,
+      hull: numOrNull(ship?.hull),
+      repByEmpire: rep && typeof rep === 'object' && !Array.isArray(rep) ? rep as Record<string, number> : t.repByEmpire,
+      live: true,
+    }
+  }
+  return {
+    systemId: t.systemId, systemName: t.systemName, poiId: t.poiId, poiName: null, dockedAt: t.dockedAt,
+    inTransit: false, pirates: null, empire: t.localEmpire, hull: numOrNull(ship?.hull),
+    repByEmpire: t.repByEmpire, live: false,
+  }
+}
+
+/** Parse SQLite's `datetime('now')` text (UTC, no zone marker) to epoch ms. */
+function parseSqliteUtc(s: string): number {
+  if (!s) return NaN
+  const iso = /Z$|[+-]\d\d:?\d\d$/.test(s) ? s : `${s.replace(' ', 'T')}Z`
+  return new Date(iso).getTime()
+}
+
+/**
+ * One labelled line from fleet_intel_systems for a system the agent asked about
+ * but is not standing in. LABELLED because it is a record, not a reading: the
+ * station flag in particular can only ever latch on, so a phantom survives.
+ */
+function fleetRecordLine(systemId: string): string {
+  const id = normalizeSystemId(systemId)
+  try {
+    const row = getDb().query(
+      `SELECT system_id, system_name, has_station, station_services, police_level, updated_at
+       FROM fleet_intel_systems WHERE system_id = ?`,
+    ).get(id) as { system_id: string; system_name: string; has_station: number; station_services: string | null; police_level: number | null; updated_at: string } | null
+    if (!row) return `Fleet record for ${id}: none — no fleet agent has surveyed this system.`
+    const ageMs = Date.now() - parseSqliteUtc(row.updated_at)
+    const age = Number.isFinite(ageMs) ? `${Math.max(0, Math.round(ageMs / 3_600_000))}h` : '?'
+    const danger = assessSystemDanger(id).grade
+    const name = row.system_name && normalizeSystemId(row.system_name) !== id ? ` (${row.system_name})` : ''
+    return (
+      `Fleet record for ${id}${name} (age ${age}): station ${row.has_station ? 'yes' : 'no'}, ` +
+      `services ${row.station_services || 'unknown'}, police ${row.police_level ?? 'unknown'}, danger ${danger}. ` +
+      `This is the fleet's RECORD, not a live reading.`
+    )
+  } catch {
+    return `Fleet record for ${id}: unavailable.`
+  }
+}
+
+/** Commands that only work while docked. `view` is the storage group's read. */
+const DOCKED_ONLY_COMMANDS = new Set([
+  'view_market', 'buy', 'sell', 'create_sell_order', 'create_buy_order',
+  'get_missions', 'accept_mission', 'get_base', 'view_storage', 'view', 'deposit', 'withdraw',
+])
+
+function isDockedOnly(deep: string, args: Record<string, unknown> | undefined): boolean {
+  if (DOCKED_ONLY_COMMANDS.has(deep)) return true
+  // Bare repair/refuel draw on the station; with an item they consume cargo
+  // (fuel cells, repair kits) and work in space — never refuse those.
+  if ((deep === 'repair' || deep === 'refuel') && !args?.id && !args?.item_id && !args?.target) return true
+  return false
+}
+
+/**
+ * Local refusal for a docked-only command issued while the connection's own
+ * state says docked_at is null. Names the dockable POI and the exact commands
+ * to get there, so the refusal replaces the not_docked/no_base round trip AND
+ * the get_system/get_poi the agent would run next (34 not_docked + 19 no_base
+ * in one day on one agent). docked_at is authoritative; when the state has no
+ * such key, or a movement is more recent than the last confirmed location,
+ * the game answers instead.
+ */
+async function checkDockedState(
+  ctx: ToolContext,
+  deep: string,
+  commandArgs: Record<string, unknown> | undefined,
+): Promise<string | null> {
+  if (!isDockedOnly(deep, commandArgs) || getPreference('docked_gate') === 'off') return null
+  const t = tacticalFor(ctx.profileId)
+  let gs: Record<string, unknown> | null = null
+  try { gs = ctx.connection.getLocalState?.() ?? null } catch { gs = null }
+  const loc = gs?.location as Record<string, unknown> | undefined
+  if (!loc || typeof loc !== 'object' || Array.isArray(loc) || !('docked_at' in loc)) return null
+  if (loc.docked_at) return null
+  // A movement issued after the cache last confirmed a location (travel's
+  // auto-undock, a dock still resolving) makes the snapshot suspect.
+  if (t.lastMovementAt > t.locationAt) return null
+
+  const cur = currentLocation(ctx)
+  const systemId = cur.systemId
+  const systemName = cur.systemName ?? systemId ?? 'this system'
+  const poiId = cur.poiId
+  const poiLabel = cur.poiName ?? poiId ?? 'deep space'
+
+  let pois = t.system && (!systemId || t.system.systemId === systemId) ? t.system.pois : null
+  if (!pois) {
+    try {
+      const r = await ctx.connection.execute('get_system')
+      if (!r.error) {
+        observeTacticalResult(ctx.profileId, 'get_system', undefined, r.structuredContent ?? r.result)
+        const s = tacticalFor(ctx.profileId).system
+        if (s && (!systemId || s.systemId === systemId)) pois = s.pois
+      }
+    } catch { /* fall through to the generic hint */ }
+  }
+
+  let where: string
+  if (!pois) {
+    where = 'Run get_system (free) and look for a POI with has_base: true, then travel(target_poi="<poi id>") and dock().'
+  } else {
+    const bases = pois.filter((p) => p.has_base)
+    if (bases.length === 0) {
+      let nearest = ''
+      try {
+        const nb = systemId ? getNavIntel(systemId).neighbours.filter((n) => n.has_station).slice(0, 3) : []
+        nearest = nb.length
+          ? ` Nearest stations on the fleet map (one jump each): ${nb.map((n) => n.system_id + (n.station_services ? ` [${n.station_services}]` : '')).join(', ')}.`
+          : ' Use fleet_route or find_route to reach a station system.'
+      } catch { /* nav intel is a bonus */ }
+      where = `There is NO station in ${systemName} — nothing here to dock at.${nearest}`
+    } else {
+      const here = poiId ? bases.find((b) => b.id === poiId) : undefined
+      if (here) {
+        where = `You are AT ${here.base_name ?? here.name} (POI ${here.id}) but not docked — run dock() first, then ${deep}.`
+      } else {
+        const b = bases[0]
+        const others = bases.slice(1).map((x) => `${x.base_name ?? x.name} (${x.id})`)
+        where =
+          `The station here is ${b.base_name ?? b.name} at POI "${b.id}" — run travel(target_poi="${b.id}"), then dock(), then ${deep}.` +
+          (others.length ? ` Other stations in this system: ${others.join(', ')}.` : '')
+      }
+    }
+  }
+  return (
+    `NOT DOCKED: ${deep} needs a station and you are ${cur.inTransit ? 'in transit' : 'in space'} at ${poiLabel} ` +
+    `in ${systemName} (docked_at is null). ${where}`
+  )
+}
+
+/**
+ * A buy against a board with no ask fills nothing and costs a tick. The
+ * station's last view_market (this process) or the fleet's station-scoped
+ * market table says so before the round trip — and says how deep the ask is.
+ */
+function checkBuyAsk(ctx: ToolContext, deep: string, commandArgs: Record<string, unknown> | undefined): string | null {
+  if (deep !== 'buy' || getPreference('buy_ask_gate') === 'off') return null
+  const itemId = String(commandArgs?.id ?? commandArgs?.item_id ?? '').toLowerCase()
+  const qty = Number(commandArgs?.quantity ?? 0) || 0
+  if (!itemId) return null
+  const station = currentLocation(ctx).dockedAt
+  if (!station) return null
+  const t = tacticalFor(ctx.profileId)
+  const snap = t.market
+  const now = Date.now()
+  if (snap && snap.stationId === station && now - snap.at < MARKET_SNAPSHOT_MAX_AGE_MS) {
+    const ageS = Math.round((now - snap.at) / 1000)
+    const e = snap.items.get(itemId)
+    if (!e) {
+      if (!snap.full) return null // filtered read — absence proves nothing
+      return (
+        `BLOCKED: ${itemId} is not on the ${station} board at all — your view_market ${ageS}s ago listed no order ` +
+        `for it (ask depth 0). Nobody here sells it. Buy it where you have SEEN an ask, or create_buy_order here and wait.`
+      )
+    }
+    if (e.ask === null || e.ask <= 0 || e.askQty === 0) {
+      return (
+        `BLOCKED: no ask for ${itemId} at ${station} (view_market ${ageS}s ago: bid ${e.bid ?? 0}cr x${e.bidQty ?? '?'}, ` +
+        `ASK none — depth 0). A buy with no ask fills nothing. Buy where an ask exists, or create_buy_order.`
+      )
+    }
+    if (e.askQty !== null && qty > e.askQty) {
+      return (
+        `BLOCKED: the ${itemId} ask at ${station} is only ${e.askQty} deep at ${e.ask}cr (view_market ${ageS}s ago) ` +
+        `and you asked for ${qty}. Buy at most ${e.askQty} now; past the depth the fill walks up the book or fails.`
+      )
+    }
+    return null
+  }
+  try {
+    const row = getDb().query(
+      `SELECT best_sell, best_sell_qty, updated_at FROM fleet_intel_market
+       WHERE station_id = ? AND item_id = ? AND updated_at > datetime('now', '-30 minutes')`,
+    ).get(station, itemId) as { best_sell: number | null; best_sell_qty: number | null; updated_at: string } | null
+    if (!row) return null
+    if (row.best_sell === null || row.best_sell <= 0 || row.best_sell_qty === 0) {
+      return (
+        `BLOCKED: the fleet's market record for ${station} (under 30 minutes old) shows NO ask for ${itemId} ` +
+        `(depth 0). A buy with no ask fills nothing. Run view_market if you believe the board changed, ` +
+        `otherwise buy elsewhere or create_buy_order.`
+      )
+    }
+    if (row.best_sell_qty !== null && qty > row.best_sell_qty) {
+      return (
+        `BLOCKED: the fleet's market record for ${station} shows the ${itemId} ask only ${row.best_sell_qty} deep ` +
+        `at ${row.best_sell}cr; you asked for ${qty}. Buy at most ${row.best_sell_qty}, or view_market first if the board moved.`
+      )
+    }
+  } catch { /* no record — the game answers */ }
+  return null
 }
 
 // Sentinel prefix for action pending results — loop.ts detects this to exit the turn early
@@ -604,6 +1073,9 @@ export function checkDoctrineGuards(
   command: string,
   commandArgs: Record<string, unknown> | undefined,
   profileId: string,
+  /** Where the caller believes the agent is (location.system_id). Falls back to
+   *  what the tool layer last observed; unknown means location-scoped gates stand down. */
+  currentSystemId?: string | null,
 ): string | null {
   // Wildlife hunts: LIFTED 2026-08-06. The original ban assumed targets did not
   // reliably spawn. The changelog says otherwise — herds gather where the ore or
@@ -624,19 +1096,24 @@ export function checkDoctrineGuards(
   // refused docking, left — then returned to Alhena twice more and was refused
   // again at -10, each trip costing fuel and turns for a guaranteed rejection.
   // The refusal names the alternative rather than just blocking.
+  //
+  // Scoped to the refusing SYSTEM: the gate fires only when the agent is back
+  // in the system that refused it. Anywhere else — including home — docking
+  // goes to the game. Unknown position means the game answers.
   {
     const bareRep = command.replace(/^spacemolt_/, '').replace(/^ship_/, '')
     if (bareRep === 'dock' && getPreference('reputation_gate') !== 'off') {
-      const locked = reputationLockouts.get(profileId)
-      if (locked && Date.now() - locked.at < REPUTATION_LOCKOUT_MS) {
+      const here = currentSystemId ?? tacticalFor(profileId).systemId
+      const locked = reputationLockoutFor(profileId, here)
+      if (locked) {
         return (
-          `BLOCKED by Admiral doctrine: ${locked.where} refused you docking ` +
+          `BLOCKED by Admiral doctrine: ${locked.label} in ${locked.systemId} refused you docking ` +
           `${Math.round((Date.now() - locked.at) / 60_000)} minute(s) ago for insufficient reputation ` +
-          `(${locked.rep ?? 'negative'}). Reputation does not recover by flying back — this trip is a ` +
-          `guaranteed rejection and you have already made it more than once.\n\n` +
+          `(${locked.rep ?? 'negative'}), and you are back in ${locked.systemId}. Reputation does not recover by ` +
+          `flying back — this dock is a guaranteed rejection.\n\n` +
           `Go somewhere you are WELCOME instead: your home space (crimson_war_citadel at Krynn) or any ` +
-          `station of a faction you have not attacked. Record in your TODO that this station is closed ` +
-          `to you, so you stop routing here.`
+          `station of a faction you have not attacked — docking anywhere OUTSIDE ${locked.systemId} is not ` +
+          `blocked. Record in your TODO that this station is closed to you, so you stop routing here.`
         )
       }
     }
@@ -1146,9 +1623,46 @@ export async function executeTool(
     break
   }
 
+  // The model sometimes names a LOCAL tool inside game(): sell_cargo, codex,
+  // goto_system... Sent to the server those are unknown_command and the round
+  // is gone. Run the tool it meant and say so, so the next call is the right shape.
+  if (name === 'game' && (LOCAL_TOOLS.has(command) || MACRO_TOOLS.has(command))) {
+    ctx.log('system', `Dispatched game(${command}) to the local tool ${command} — game() is for server commands only`)
+    const out = await executeTool(command, commandArgs ?? {}, ctx, reason)
+    return (
+      `${out}\n\n(Dispatched: "${command}" is a LOCAL tool, not a game command — the harness ran ` +
+      `${command}(${formatArgs(commandArgs ?? {})}) for you. Call the ${command} tool directly next time.)`
+    )
+  }
+
+  // lib_v2 has no route for the v2 GROUP form (`facility` + {action:'list'}):
+  // those fell through to REST v1 and failed there. Rewrite to the flat name
+  // the route index knows. battle(action=reload) is the plain `reload` command.
+  if (ctx.connection.mode === 'lib_v2' && commandArgs && typeof commandArgs.action === 'string') {
+    const group = command.replace(/^spacemolt_/, '')
+    if (V2_GROUPS.has(group)) {
+      const action = (commandArgs.action as string).trim().toLowerCase()
+      const flat = group === 'battle' && action === 'reload' ? 'reload' : `${group}_${action}`
+      ctx.log('system', `Rewrote group form ${group}(action=${action}) -> ${flat} (no lib_v2 route for the group form)`)
+      command = flat
+      delete commandArgs.action
+    }
+  }
+
   // Auto-correct common parameter mistakes to reduce wasted API calls
   if (commandArgs) {
     const bare = command.replace(/^spacemolt_/, '')
+    // reload: the real signature is reload(id=<weapon instance id>, target=<ammo
+    // item id>). Agents write the v1 doc names (weapon_instance_id / ammo_item_id)
+    // and burn the round on invalid_payload.
+    if ((bare === 'reload' || bare.endsWith('_reload')) && ctx.connection.mode === 'lib_v2') {
+      for (const k of ['weapon_instance_id', 'weapon_id', 'module_id', 'instance_id', 'weapon']) {
+        if (!commandArgs.id && commandArgs[k]) { commandArgs.id = commandArgs[k]; delete commandArgs[k] }
+      }
+      for (const k of ['ammo_item_id', 'ammo_id', 'ammo', 'item_id']) {
+        if (!commandArgs.target && commandArgs[k]) { commandArgs.target = commandArgs[k]; delete commandArgs[k] }
+      }
+    }
     // travel uses target_poi, not destination/target_system/target
     if ((bare === 'travel' || bare.endsWith('_travel')) && !commandArgs.target_poi) {
       if (commandArgs.destination) { commandArgs.target_poi = commandArgs.destination; delete commandArgs.destination }
@@ -1262,10 +1776,107 @@ export async function executeTool(
     command = command.replace('get_ships', 'browse_ships')
   }
 
+  // Strip MCP v2 prefix (e.g. "spacemolt_get_system" → "get_system") for lookup,
+  // then the v2 tool group prefix (e.g. "market_view_market" → "view_market").
+  let bareCommand = command.replace(/^spacemolt_/, '')
+  let deepBare = bareCommand.replace(GROUP_PREFIX_RX, '')
+
+  // get_system / get_poi with a system argument. The game ignores the argument
+  // and answers for the CURRENT system — 84 times in one day on one agent,
+  // each silently wrong. get_map(system_id) IS honored, so a request for
+  // another system is remapped to it and the fleet's own record for that
+  // system is appended, labelled. A request for the current system (or no
+  // argument) goes out live, untouched.
+  let remapNote = ''
+  let fleetRecord = ''
+  if ((deepBare === 'get_system' || deepBare === 'get_poi') && commandArgs) {
+    const keys = deepBare === 'get_system'
+      ? ['system_id', 'id', 'system', 'system_name', 'target_system', 'name']
+      : ['system_id', 'system', 'system_name', 'target_system']
+    const key = keys.find((k) => typeof commandArgs![k] === 'string' && (commandArgs![k] as string).trim())
+    if (key) {
+      const requested = normalizeSystemId(String(commandArgs[key]))
+      let cur = currentLocation(ctx)
+      if (!cur.systemId) {
+        // No cached position at all: one free get_status settles it rather than guessing.
+        try {
+          const r = await ctx.connection.execute('get_status')
+          if (!r.error) observeTacticalResult(ctx.profileId, 'get_status', undefined, r.structuredContent ?? r.result)
+        } catch { /* stay unknown */ }
+        cur = currentLocation(ctx)
+      }
+      const isCurrent = !!cur.systemId &&
+        (requested === cur.systemId || (!!cur.systemName && requested === normalizeSystemId(cur.systemName)))
+      if (isCurrent || !cur.systemId) {
+        // Live call for where you are; the argument is not a parameter the game knows.
+        delete commandArgs[key]
+        if (!cur.systemId) remapNote = `NOTE: ${deepBare} takes no system argument and reads only your current location; "${requested}" was ignored.\n`
+      } else {
+        remapNote =
+          `NOTE: you are in ${cur.systemId}. ${deepBare} reads only your CURRENT system and cannot see "${requested}" — ` +
+          `the game would have silently answered for ${cur.systemId}. Remapped to get_map(system_id="${requested}"), which the game honors.\n`
+        fleetRecord = fleetRecordLine(requested)
+        ctx.log('system', `Remapped ${deepBare}(${key}=${requested}) -> get_map(system_id=${requested}); agent is in ${cur.systemId}`)
+        command = 'get_map'
+        commandArgs = { system_id: requested }
+      }
+    }
+    // get_poi with a POI argument naming somewhere else: same story, one level down.
+    if (deepBare === 'get_poi' && command !== 'get_map') {
+      const pk = ['poi_id', 'id', 'poi', 'target_poi'].find((k) => typeof commandArgs![k] === 'string' && (commandArgs![k] as string).trim())
+      if (pk) {
+        const want = String(commandArgs[pk]).toLowerCase().trim().replace(/\s+/g, '_')
+        const cur = currentLocation(ctx)
+        if (cur.poiId && want !== cur.poiId.toLowerCase()) {
+          remapNote += `NOTE: get_poi reads only the POI you are AT (${cur.poiId}); it cannot describe "${want}". travel(target_poi="${want}") first if you need it.\n`
+        }
+        delete commandArgs[pk]
+      }
+    }
+    bareCommand = command.replace(/^spacemolt_/, '')
+    deepBare = bareCommand.replace(GROUP_PREFIX_RX, '')
+  }
+
   // Admiral doctrine guards — shared with the manual/API path so a rule cannot
   // be enforced on one entry point and silently skipped on the other.
   {
-    const refusal = checkDoctrineGuards(command, commandArgs, ctx.profileId)
+    const refusal = checkDoctrineGuards(command, commandArgs, ctx.profileId, currentLocation(ctx).systemId)
+    if (refusal) {
+      ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
+      ctx.log('tool_result', refusal)
+      return refusal
+    }
+  }
+
+  // Docked-only command while the connection says docked_at is null: refuse
+  // here, naming the station and the way to it. Repeats escalate like any
+  // other identical failure — a refusal the model ignores is still a loop.
+  {
+    const refusal = await checkDockedState(ctx, deepBare, commandArgs)
+    if (refusal) {
+      ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
+      const esc = localRefusalRepeat(ctx, command, commandArgs, 'not_docked_local')
+      const out = esc.flush ?? refusal + esc.note
+      ctx.log('tool_result', out)
+      return out
+    }
+  }
+
+  // Buy with no ask at this station: the depth is known before the round trip.
+  {
+    const refusal = checkBuyAsk(ctx, deepBare, commandArgs)
+    if (refusal) {
+      ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
+      ctx.log('tool_result', refusal)
+      return refusal
+    }
+  }
+
+  // A raw jump departs exactly like goto_system does — same commitment gate,
+  // same safety exemptions — so the macro cannot be bypassed by hand-flying.
+  if (deepBare === 'jump') {
+    const target = normalizeSystemId(String(commandArgs?.target_system ?? commandArgs?.id ?? ''))
+    const refusal = checkRawJumpCommit(ctx, target)
     if (refusal) {
       ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
       ctx.log('tool_result', refusal)
@@ -1274,16 +1885,9 @@ export async function executeTool(
   }
 
   const fmtArgs = commandArgs ? formatArgs(commandArgs) : ''
-  // Credit any real work against the current destination, so the commit gate
-  // can tell "arrived and re-routed immediately" from "worked it, now moving on".
-  noteDestinationWork(ctx.profileId, command)
   ctx.log('tool_call', `game(${command}${fmtArgs ? ', ' + fmtArgs : ''})`)
 
   // Cooldown check for action commands to prevent spam loops
-  // Strip MCP v2 prefix (e.g. "spacemolt_get_system" → "get_system") for lookup
-  const bareCommand = command.replace(/^spacemolt_/, '')
-  // Also strip v2 tool group prefix (e.g. "market_view_market" → "view_market")
-  const deepBare = bareCommand.replace(/^(?:market|storage|social|intel|faction|faction_admin|salvage|catalog|ship|battle|transfer|facility|auth)_/, '')
   const isQuery = isQueryCommand(command, commandArgs)
 
   // Reload is a mutation that consumes one cargo ammo item. Verify the target
@@ -1340,12 +1944,15 @@ export async function executeTool(
       if (Date.now() - cached.timestamp < ttl) {
         const hint = `[Cached ${isCatalog ? 'catalog' : 'market'} data, ${Math.round((Date.now() - cached.timestamp) / 1000)}s old]\n${cached.result}`
         ctx.log('tool_result', `(cached) ${truncate(cached.result, 150)}`)
+        noteDestinationWork(ctx.profileId, command)
         return hint
       }
     }
   }
 
   try {
+    // A movement going out makes any cached location older than it suspect.
+    noteMovement(ctx.profileId, command)
     const resp = await ctx.connection.execute(command, commandArgs && Object.keys(commandArgs).length > 0 ? commandArgs : undefined)
 
     if (resp.error) {
@@ -1354,13 +1961,21 @@ export async function executeTool(
       // Augment common errors with actionable hints to reduce wasted turns
       const errCode = resp.error.code
 
-      // Remember a reputation refusal so the dock gate can stop the repeat trip.
+      // Remember a reputation refusal so the dock gate can stop the repeat trip
+      // to THIS system — keyed on location.system_id, labelled with the station.
       if (errCode === 'insufficient_reputation') {
-        const gs = ctx.connection.getLocalState?.() ?? null
-        const loc = (gs?.location ?? {}) as Record<string, unknown>
-        const where = String(loc.system_name ?? loc.system ?? gs?.system ?? 'that station')
-        noteReputationRefusal(ctx.profileId, errMsg, where)
-        errMsg += `\n\nReputation does not recover by returning. Do NOT route back here — go to a station of a faction you have not attacked (your home space is crimson_war_citadel at Krynn), and record in your TODO that this one is closed to you.`
+        const cur = currentLocation(ctx)
+        const label = String(cur.dockedAt ?? cur.poiName ?? cur.poiId ?? cur.systemName ?? cur.systemId ?? 'that station')
+        noteReputationRefusal(ctx.profileId, errMsg, { systemId: cur.systemId, label })
+        const here = cur.systemName ?? cur.systemId ?? 'this system'
+        errMsg += `\n\nReputation does not recover by returning. Do NOT route back to ${here} — go to a station of a faction you have not attacked (your home space is crimson_war_citadel at Krynn), and record in your TODO that this one is closed to you.`
+      }
+
+      // The battle has already dropped you. Re-issuing battle commands here is
+      // the loop that kept a hunter parked next to the thing he escaped from.
+      if (errCode === 'not_in_battle') {
+        tacticalFor(ctx.profileId).lastBattleAt = Date.now()
+        errMsg += `\n\n💡 HINT: not_in_battle right after an escape/retreat means the battle has already DROPPED you — you are out and free to move. Do not re-issue battle commands; jump away now (jump(target_system="<adjacent system>")) before anything re-engages.`
       }
 
       // A `no_facility` refusal names the nearest public site for the recipe. That sentence
@@ -1391,8 +2006,13 @@ export async function executeTool(
       if (errCode === 'connection_failed') {
         errMsg += `\n\n💡 HINT: The game connection is down. You CANNOT fix this — login and reconnection are managed by the harness, not by game commands, so do NOT call login or keep retrying. Stop issuing commands and end your turn; the connection will be restored automatically.`
       }
-      if (errCode === 'not_docked') {
-        errMsg += `\n\n💡 HINT: You must be docked at a station for this action. Use get_poi() to check if your current location has a base, then dock() to dock. If there's no base here, travel(target_poi="...") to a station POI first.`
+      if (errCode === 'not_docked' || errCode === 'no_base') {
+        // Name the station and the way to it when the tool layer knows them,
+        // so the agent is not sent off to get_poi/get_system for the answer.
+        const route = describeDockRoute(ctx, deepBare)
+        errMsg += route
+          ? `\n\n💡 HINT: You must be docked at a station for this. ${route}`
+          : `\n\n💡 HINT: You must be docked at a station for this action. Use get_poi() to check if your current location has a base, then dock() to dock. If there's no base here, travel(target_poi="...") to a station POI first.`
       }
       if (errCode === 'invalid_channel') {
         errMsg += `\n\n💡 HINT: Valid chat channels are: "system" (all players in system), "local" (players at your POI), "faction" (faction members), "private" (DM — requires target_id). There is no "global", "general", or "trade" channel.`
@@ -1458,6 +2078,20 @@ export async function executeTool(
     // Prefer structuredContent for the LLM — it has the actual data.
     const resultData = resp.structuredContent ?? resp.result
     let result = formatToolResult(command, resultData, resp.notifications)
+
+    // Field-first rendering for the reads whose tails were getting cut: fuel,
+    // hull and mission counters go at the top so no cap can drop them.
+    {
+      const prelude = keyFieldsPrelude(deepBare, resultData)
+      if (prelude) result = `${prelude}\n${result}`
+    }
+    if (remapNote) result = remapNote + result
+
+    // Bank position / docking / threat / market observations for the gates,
+    // and credit real work against the current destination — on SUCCESS only,
+    // so a failed dock cannot clear the destination commitment.
+    observeTacticalResult(ctx.profileId, command, commandArgs, resultData, resp.notifications)
+    noteDestinationWork(ctx.profileId, command)
 
     // A specific-item market read should answer the question the agent is
     // actually asking: "can I buy this here?" Raw best_buy/best_sell fields
@@ -1611,7 +2245,7 @@ export async function executeTool(
       } catch { /* never break game execution */ }
       // Invalidate briefing cache — action changed game state; trigger async refresh
       invalidateBriefingCache(ctx.profileId, ctx.connection)
-      return truncateResult(pendingResult)
+      return truncateResult(pendingResult, deepBare) + (fleetRecord ? `\n\n${fleetRecord}` : '')
     }
 
     // Passively collect fleet intel from game results (resultData: see note above —
@@ -1697,13 +2331,129 @@ export async function executeTool(
       }
     }
 
-    return truncateResult(result)
+    // The fleet record rides OUTSIDE the cap so a long map cannot cut it.
+    return truncateResult(result, deepBare) + (fleetRecord ? `\n\n${fleetRecord}` : '')
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     const errMsg = `Error executing ${command}: ${msg}`
     ctx.log('error', errMsg)
     return errMsg
   }
+}
+
+/**
+ * Identical local refusals escalate like identical game errors: a LOOP BREAK
+ * note on the third, an automatic context flush past the sixth. A refusal the
+ * model keeps walking into is the same deterministic replay the game-error
+ * breaker exists for.
+ */
+function localRefusalRepeat(
+  ctx: ToolContext,
+  command: string,
+  args: Record<string, unknown> | undefined,
+  code: string,
+): { flush: string | null; note: string } {
+  const repeats = recordFailureAndCountRepeats(ctx.profileId, command, args, code)
+  if (repeats >= FAILURE_LOOP_FLUSH_THRESHOLD) {
+    contextFlushRequests.add(ctx.profileId)
+    recentFailures.delete(ctx.profileId)
+    ctx.log('system', `[loop-break] ESCALATION: ${command} refused locally ${repeats}x through the injected note — automatic context flush requested`)
+    return {
+      flush:
+        `${LOOP_FLUSH_SENTINEL}this call has now been refused identically ${repeats} times, straight through ` +
+        `the LOOP BREAK warning. Your turn is ending and your conversation context will be reset — you will ` +
+        `restart fresh from your directive.`,
+      note: '',
+    }
+  }
+  if (repeats >= FAILURE_LOOP_THRESHOLD) {
+    ctx.log('system', `[loop-break] ${command} refused locally ${repeats}x within ${FAILURE_LOOP_WINDOW_MS / 60_000}min (${code}) — injected LOOP BREAK`)
+    return {
+      flush: null,
+      note:
+        `\n\n🔁 LOOP BREAK — you have issued this exact call ${repeats} times and it is refused for the same ` +
+        `reason every time. Nothing changes until you act on the instruction above.`,
+    }
+  }
+  return { flush: null, note: '' }
+}
+
+/**
+ * "The station here is X at POI Y — travel there, then dock" from what the
+ * tool layer already knows about the current system. Empty when it knows
+ * nothing (the caller falls back to the generic get_poi/get_system advice).
+ */
+function describeDockRoute(ctx: ToolContext, deep: string): string {
+  try {
+    const t = tacticalFor(ctx.profileId)
+    const cur = currentLocation(ctx)
+    if (!t.system || (cur.systemId && t.system.systemId !== cur.systemId)) return ''
+    const bases = t.system.pois.filter((p) => p.has_base)
+    if (bases.length === 0) return `There is NO station in ${cur.systemName ?? t.system.systemName} — nothing here to dock at; move to a system with one.`
+    const here = cur.poiId ? bases.find((b) => b.id === cur.poiId) : undefined
+    if (here) return `You are AT ${here.base_name ?? here.name} (POI ${here.id}) but not docked — run dock() first, then ${deep}.`
+    const b = bases[0]
+    return `The station here is ${b.base_name ?? b.name} at POI "${b.id}" — run travel(target_poi="${b.id}"), then dock(), then ${deep}.`
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * The fields that must never fall off a truncated read. get_status/get_ship
+ * lose fuel and hull past the cap; the mission boards lose their counters.
+ * Rendered first, in one line (or one line per mission), before the YAML.
+ */
+function keyFieldsPrelude(deep: string, data: unknown): string {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return ''
+  const d = data as Record<string, unknown>
+  const str = (v: unknown): string | null => v === undefined || v === null || v === '' ? null : String(v)
+  const pair = (a: unknown, b: unknown): string | null => {
+    const x = str(a); const y = str(b)
+    return x === null ? null : y === null ? x : `${x}/${y}`
+  }
+  try {
+    if (deep === 'get_status' || deep === 'get_ship') {
+      const ship = (d.ship && typeof d.ship === 'object' ? d.ship : deep === 'get_ship' ? d : {}) as Record<string, unknown>
+      const loc = (d.location && typeof d.location === 'object' ? d.location : {}) as Record<string, unknown>
+      const player = (d.player && typeof d.player === 'object' ? d.player : {}) as Record<string, unknown>
+      const bits: string[] = []
+      const cls = str(ship.class_id ?? ship.class)
+      if (deep === 'get_ship' && cls) bits.push(`ship ${cls}`)
+      const sys = str(loc.system_id ?? loc.system_name ?? player.current_system); if (sys) bits.push(`system ${sys}`)
+      const poi = str(loc.poi_id ?? loc.poi_name ?? player.current_poi); if (poi) bits.push(`poi ${poi}`)
+      if ('docked_at' in loc) bits.push(`docked_at ${loc.docked_at ? String(loc.docked_at) : 'null (IN SPACE)'}`)
+      if (loc.in_transit === true) bits.push('IN TRANSIT')
+      const fuel = pair(ship.fuel, ship.max_fuel ?? ship.fuel_capacity); if (fuel) bits.push(`fuel ${fuel}`)
+      const hull = pair(ship.hull, ship.max_hull); if (hull) bits.push(`hull ${hull}`)
+      const shield = pair(ship.shield, ship.max_shield); if (shield) bits.push(`shield ${shield}`)
+      const cargo = pair(ship.cargo_used, ship.cargo_capacity ?? ship.max_cargo); if (cargo) bits.push(`cargo ${cargo}`)
+      const credits = str(player.credits ?? d.credits); if (credits) bits.push(`credits ${credits}`)
+      const pirates = typeof loc.nearby_pirate_count === 'number' ? loc.nearby_pirate_count
+        : Array.isArray(loc.nearby_pirates) ? loc.nearby_pirates.length : null
+      if (pirates !== null && pirates > 0) bits.push(`PIRATES HERE ${pirates}`)
+      return bits.length ? `KEY FIELDS: ${bits.join(' | ')}` : ''
+    }
+    if (deep === 'get_missions' || deep === 'get_active_missions') {
+      const ms = d.missions
+      const list = Array.isArray(ms) ? ms
+        : ms && typeof ms === 'object' && Array.isArray((ms as Record<string, unknown>).active) ? (ms as Record<string, unknown>).active as unknown[]
+        : null
+      if (!list) return ''
+      const lines = list.slice(0, 20).map((m) => {
+        const x = (m && typeof m === 'object' ? m : {}) as Record<string, unknown>
+        const rewards = (x.rewards && typeof x.rewards === 'object' ? x.rewards : {}) as Record<string, unknown>
+        const objs = Array.isArray(x.objectives) ? x.objectives as Array<Record<string, unknown>> : []
+        const counter = objs
+          .filter((o) => o && typeof o.current === 'number' && typeof o.required === 'number')
+          .map((o) => `${o.current}/${o.required}`).join(',')
+        const exp = str(x.expires_in_ticks)
+        return `  - ${str(x.title ?? x.mission_id) ?? '?'}${x.type ? ` [${x.type}]` : ''}${counter ? ` ${counter}` : ''} reward ${str(rewards.credits) ?? '?'}cr${exp ? ` expires ${exp}t` : ''}`
+      })
+      return `KEY FIELDS: ${list.length} mission(s)${list.length > 20 ? ' (first 20 listed)' : ''}\n${lines.join('\n')}`
+    }
+  } catch { /* the prelude is a bonus */ }
+  return ''
 }
 
 function executeLocalTool(name: string, args: Record<string, unknown>, ctx: ToolContext): string {
@@ -1986,19 +2736,23 @@ async function macroReadState(conn: GameConnection): Promise<{
 
 /** Execute one game action inside a macro, retrying transient pacing errors a bounded number of times. */
 async function macroAction(
-  conn: GameConnection,
+  ctx: ToolContext,
   command: string,
   args: Record<string, unknown> | undefined,
   maxRetries = 6,
 ): Promise<{ ok: boolean; errorCode?: string; errorMessage?: string }> {
+  const conn = ctx.connection
   for (let attempt = 0; ; attempt++) {
+    noteMovement(ctx.profileId, command)
     const resp = await conn.execute(command, args)
     if (!resp.error) {
       // Macros bypass executeTool's capture path entirely (this was why zero links were
       // learned while agents flew all day on goto_system) — sniff hop results here too.
       captureSystemLinks(resp.structuredContent ?? resp.result, `macro_${command}`)
+      observeTacticalResult(ctx.profileId, command, args, resp.structuredContent ?? resp.result, resp.notifications)
       return { ok: true }
     }
+    if (resp.error.code === 'not_in_battle') tacticalFor(ctx.profileId).lastBattleAt = Date.now()
     if (MACRO_RETRYABLE.has(resp.error.code) && attempt < maxRetries) {
       await macroSleep(Math.max((resp.error.retry_after ?? 10) * 1000, 5000))
       continue
@@ -2064,24 +2818,54 @@ function noteDestinationWork(profileId: string, command: string): void {
   if (cur) cur.workedSince = true
 }
 
+function destinationRefusal(prevSystem: string, target: string, elapsedMs: number): string {
+  const secs = Math.round(elapsedMs / 1000)
+  return (
+    `BLOCKED by Admiral doctrine: you set course for "${prevSystem}" ${secs}s ago and are already ` +
+    `re-routing to "${target}" without having done anything there. Changing destination mid-plan is ` +
+    `the single biggest waste of your turns — you arrive nowhere.\n\n` +
+    `WORK THE SYSTEM YOU ARE IN FIRST: scan it, check its belts and POIs, read the mission board, ` +
+    `look at the market, engage something you can safely beat. Once you have actually done one of ` +
+    `those, you may pick a new destination. If "${prevSystem}" is genuinely worthless, say so in ` +
+    `your TODO with the reason, then move on.`
+  )
+}
+
+/**
+ * Safety exemptions: the gate must NEVER hold a ship in a system that is
+ * trying to kill it. It did exactly that on 2026-09-01 — Morg'Thar's escape
+ * from Alhena was refused with 14 pirates and a hostile station present.
+ * Returns the reason a departure is waived, or null when it is not.
+ */
+function departureWaiver(ctx: ToolContext): string | null {
+  const t = tacticalFor(ctx.profileId)
+  const now = Date.now()
+  const cur = currentLocation(ctx)
+  const pirates = cur.pirates ?? (now - t.piratesAt < THREAT_MEMORY_MS ? t.pirates : 0)
+  if (pirates > 0) return `${pirates} pirate(s) at your position`
+  if (cur.hull !== null) noteHull(t, cur.hull, now)
+  if (t.hullDropAt && now - t.hullDropAt < THREAT_MEMORY_MS) return `hull dropped to ${t.hull} — you are taking damage`
+  if (t.lastBattleAt && now - t.lastBattleAt < BATTLE_RECENT_MS) return 'a battle was active or ended within the last 2 minutes'
+  const locked = reputationLockoutFor(ctx.profileId, cur.systemId)
+  if (locked) return `a hostile station here (${locked.label}) refused you on reputation`
+  const empire = cur.empire
+  const rep = empire && cur.repByEmpire ? cur.repByEmpire[empire] : undefined
+  if (typeof rep === 'number' && rep < 0) return `reputation ${rep} with the local empire (${empire})`
+  return null
+}
+
 /** Returns a refusal string when the agent is re-routing without having worked
  *  the system it just travelled to, or null to allow. */
-function checkDestinationCommit(profileId: string, target: string): string | null {
+function checkDestinationCommit(ctx: ToolContext, target: string): string | null {
+  const profileId = ctx.profileId
   if (!target || getPreference('destination_gate') === 'off') return null
   const now = Date.now()
   const prev = lastDestinations.get(profileId)
 
   if (prev && prev.system !== target && !prev.workedSince && now - prev.at < DESTINATION_COMMIT_MS) {
-    const secs = Math.round((now - prev.at) / 1000)
-    return (
-      `BLOCKED by Admiral doctrine: you set course for "${prev.system}" ${secs}s ago and are already ` +
-      `re-routing to "${target}" without having done anything there. Changing destination mid-plan is ` +
-      `the single biggest waste of your turns — you arrive nowhere.\n\n` +
-      `WORK THE SYSTEM YOU ARE IN FIRST: scan it, check its belts and POIs, read the mission board, ` +
-      `look at the market, engage something you can safely beat. Once you have actually done one of ` +
-      `those, you may pick a new destination. If "${prev.system}" is genuinely worthless, say so in ` +
-      `your TODO with the reason, then move on.`
-    )
+    const waiver = departureWaiver(ctx)
+    if (!waiver) return destinationRefusal(prev.system, target, now - prev.at)
+    ctx.log('system', `Destination gate waived (${waiver}) — leaving ${prev.system} for ${target}`)
   }
 
   if (!prev || prev.system !== target) {
@@ -2090,10 +2874,34 @@ function checkDestinationCommit(profileId: string, target: string): string | nul
   return null
 }
 
+/**
+ * The same commitment applied to a raw `jump`. Raw hops never OPEN a
+ * commitment (hand-flying a route leg by leg must stay legal), and hops made
+ * while still en route to the committed system pass; only jumping OUT of the
+ * committed system without having worked it is refused — and never past a
+ * safety waiver.
+ */
+function checkRawJumpCommit(ctx: ToolContext, target: string): string | null {
+  if (!target || getPreference('destination_gate') === 'off') return null
+  const prev = lastDestinations.get(ctx.profileId)
+  if (!prev) return null
+  const now = Date.now()
+  if (prev.system === target || prev.workedSince || now - prev.at >= DESTINATION_COMMIT_MS) return null
+  const cur = currentLocation(ctx)
+  if (!cur.systemId || cur.systemId !== prev.system) return null
+  const waiver = departureWaiver(ctx)
+  if (waiver) {
+    ctx.log('system', `Destination gate waived (${waiver}) — jumping ${prev.system} -> ${target}`)
+    lastDestinations.set(ctx.profileId, { system: target, at: now, workedSince: false })
+    return null
+  }
+  return destinationRefusal(prev.system, target, now - prev.at)
+}
+
 async function executeMacroTool(name: string, args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
   if (name === 'goto_system') {
     const target = String(args.target_system ?? args.system ?? '')
-    const refusal = checkDestinationCommit(ctx.profileId, target)
+    const refusal = checkDestinationCommit(ctx, target)
     if (refusal) {
       ctx.log('tool_result', refusal)
       return refusal
@@ -2134,7 +2942,7 @@ async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContex
     const used = st.cargoUsed ?? lastUsed
     if (st.cargoCapacity && used >= (st.cargoCapacity * stopPct) / 100) { stopReason = used >= st.cargoCapacity ? 'full' : `reached ${stopPct}%`; break }
 
-    const act = await macroAction(conn, 'mine', undefined)
+    const act = await macroAction(ctx,'mine', undefined)
     mines++
     if (!act.ok) {
       stopReason = `error [${act.errorCode}] ${act.errorMessage ?? ''}`.trim()
@@ -2268,7 +3076,7 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
     }
 
     // Undock if needed, then jump each hop
-    if (start.docked) await macroAction(conn, 'undock', undefined)
+    if (start.docked) await macroAction(ctx,'undock', undefined)
     let hops = 0
     for (const hop of hopIds) {
       if (!conn.isConnected()) return `goto_system PARTIAL: disconnected after ${hops}/${hopIds.length} hops. Verify position with get_status.`
@@ -2279,7 +3087,7 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
           `You are mid-route to ${target} — read the new guidance FIRST, then either ` +
           `re-run goto_system(target_system="${target}") to continue or follow the new orders.`
       }
-      const act = await macroAction(conn, 'jump', { target_system: hop }, 12)
+      const act = await macroAction(ctx,'jump', { target_system: hop }, 12)
       if (!act.ok) {
         return `goto_system PARTIAL: jump to ${hop} failed [${act.errorCode}] ${act.errorMessage ?? ''} after ${hops}/${hopIds.length} hops. Verify position with get_status.`
       }
@@ -2292,7 +3100,7 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
 
   let dockNote = ''
   if (dockPoi) {
-    let t = await macroAction(conn, 'travel', { target_poi: dockPoi }, 12)
+    let t = await macroAction(ctx,'travel', { target_poi: dockPoi }, 12)
     // Agents routinely pass the STATION/base id where a POI id is wanted — the
     // citadel is base `crimson_war_citadel` but POI `war_citadel`, and two agents
     // burned round trips on it in one session. The empire prefix is the whole
@@ -2301,7 +3109,7 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
     if (!t.ok && /not_found|no_poi|invalid/i.test(`${t.errorCode ?? ''}`)) {
       const stripped = dockPoi.replace(/^(crimson|nebula|solarian|voidborn|outerrim)_/, '')
       if (stripped !== dockPoi) {
-        const retry = await macroAction(conn, 'travel', { target_poi: stripped }, 12)
+        const retry = await macroAction(ctx,'travel', { target_poi: stripped }, 12)
         if (retry.ok) {
           dockPoi = stripped
           t = retry
@@ -2310,7 +3118,7 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
     }
     if (t.ok) {
       await macroSleep(macroStepDelayMs(conn))
-      const d = await macroAction(conn, 'dock', undefined, 6)
+      const d = await macroAction(ctx,'dock', undefined, 6)
       dockNote = d.ok
         ? ` Docked at ${dockPoi}.`
         : ` You are AT ${dockPoi} (travel complete — no further travel needed); dock skipped [${d.errorCode}]${d.errorCode === 'no_base' ? ' — this POI has no station, e.g. a belt: just start working it' : ''}.`
@@ -2320,7 +3128,7 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
       // and a dry tank gets surfaced to the agent instead of discovered later.
       if (d.ok) {
         await macroSleep(macroStepDelayMs(conn))
-        const rf = await macroAction(conn, 'refuel', undefined, 3)
+        const rf = await macroAction(ctx,'refuel', undefined, 3)
         if (rf.ok) dockNote += ' Tank auto-topped from the station pump.'
         else if (rf.errorCode === 'station_fuel_empty') dockNote += ' NOTE: this station\'s fuel tank is EMPTY — plan your departure fuel from cargo cells or another stop.'
         else if (rf.errorCode) dockNote += ` (auto-refuel skipped [${rf.errorCode}])`
@@ -2430,7 +3238,7 @@ async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, r
         if (sellQty <= 0) { skipped.push(`${item.item_id} x${item.quantity} (bid depth 0)`); continue }
       }
     }
-    const act = await macroAction(conn, 'sell', { item_id: item.item_id, quantity: sellQty }, 3)
+    const act = await macroAction(ctx,'sell', { item_id: item.item_id, quantity: sellQty }, 3)
     if (!act.ok) {
       failed.push(`${item.item_id} x${item.quantity} [${act.errorCode}]`)
     } else {
@@ -2472,8 +3280,17 @@ async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, r
   ].filter(Boolean).join('\n')
 }
 
-function truncateResult(text: string): string {
-  return safeTruncate(text, MAX_RESULT_CHARS, '\n\n... (truncated)')
+// Reads whose tails carry what the agent needs (fuel, hull, mission counters)
+// get a taller cap; keyFieldsPrelude guards those fields even past it. The
+// 4,000-char default cut get_status at the ship block on lib_v2, so the model
+// re-queried for fuel it had just been sent.
+const RESULT_CHAR_CAPS: Record<string, number> = {
+  get_status: 12_000, get_ship: 12_000, get_missions: 12_000, get_active_missions: 12_000,
+}
+
+function truncateResult(text: string, deepCommand?: string): string {
+  const cap = (deepCommand && RESULT_CHAR_CAPS[deepCommand]) || MAX_RESULT_CHARS
+  return safeTruncate(text, cap, '\n\n... (truncated)')
 }
 
 function truncate(text: string, max: number): string {
