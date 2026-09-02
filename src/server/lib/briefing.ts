@@ -7,10 +7,41 @@
  * Kill switch: preference "situational_briefing" = "off" disables injection.
  */
 import type { GameConnection, CommandResult } from './connections/interface'
-import { listObligations, getProfile, listPlaybook, getStorageSummaryForProfile, getNavIntel, getHuntIntel } from './db'
+import type { Profile } from '../../shared/types'
+import * as dbModule from './db'
+import { listObligations, getProfile, listPlaybook, getStorageSummaryForProfile, getNavIntel, getHuntIntel, getDb, getKnownLinks } from './db'
+import type { ObligationRow } from './db'
 import { galaxyMarketLines, directiveMarketLines } from './galaxy-market'
 
 const REFRESH_INTERVAL = 60_000 // 60 seconds
+
+// ─── Agent role ───────────────────────────────────────────────────
+//
+// The prompt diet is role-scoped: a hunter carries no mining, crafting, trading
+// or bill-of-materials doctrine, and its command list drops the commands those
+// doctrines govern. Everything keys off ONE resolver so prompt.md, the command
+// list, the volatile block and the briefing agree on who the agent is. Only
+// `hunter` is distinguished today; every other agent is `default` and renders
+// exactly what it rendered before the diet.
+//
+// Detection reads the TOP of the directive (the current-objective block) plus
+// the profile name and group. Matching the whole directive misfired once: rules
+// text like "no pirate hunting" classified every agent as combat.
+export type AgentRole = 'hunter' | 'default'
+
+const NON_COMBAT_HEAD_RX = /standby|stay docked|crafter|coordinator|verify-only|miner|no (pirate )?hunt/i
+const COMBAT_HEAD_RX = /combat specialist|bounty.?hunt|\bhunter\b|warrior/i
+const COMBAT_NAME_RX = /warrior|hunter/i
+const COMBAT_GROUP_RX = /combat|hunt(er|ing)?|warrior/i
+
+export function resolveAgentRole(profile: Pick<Profile, 'name' | 'directive'> & { group_name?: string | null }): AgentRole {
+  const head = (profile.directive || '').slice(0, 600)
+  if (NON_COMBAT_HEAD_RX.test(head)) return 'default'
+  if (COMBAT_HEAD_RX.test(head) || COMBAT_NAME_RX.test(profile.name || '') || COMBAT_GROUP_RX.test(profile.group_name || '')) {
+    return 'hunter'
+  }
+  return 'default'
+}
 
 interface CachedData {
   status: Record<string, unknown> | null
@@ -169,6 +200,167 @@ export function invalidateBriefingCache(profileId: string, conn?: GameConnection
   }
 }
 
+/**
+ * Make sure the cache holds SOMETHING before the first turn is assembled.
+ *
+ * The collector's first refresh runs 5s after connect, and connect_llm usually
+ * follows connect within that window — so turn 1 of every session (and of
+ * every context flush) rendered with an empty briefing, and under the
+ * volatile split the agent booted with no memory, TODO or situation at all.
+ * Bounded by `timeoutMs` so a slow game server delays the first turn by at
+ * most that; a miss just means turn 1 runs the way it used to.
+ */
+export async function ensureBriefingWarm(profileId: string, conn: GameConnection, timeoutMs = 12_000): Promise<boolean> {
+  const warm = () => {
+    const c = agentCaches.get(profileId)
+    return !!(c && c.status && c.updatedAt > 0)
+  }
+  if (warm()) return true
+  let timer: ReturnType<typeof setTimeout> | undefined
+  await Promise.race([
+    refreshBriefingData(profileId, conn).catch(() => {}),
+    new Promise<void>(resolve => { timer = setTimeout(resolve, timeoutMs) }),
+  ])
+  if (timer) clearTimeout(timer)
+  return warm()
+}
+
+// ─── Lookups the briefing renders with ───────────────────────────
+
+/** Station ids in storage rows are frequently 32-hex opaque ids; the fleet's
+ *  market and facility captures carry the display name for most of them. */
+const stationNameCache = new Map<string, string>()
+function stationDisplayName(stationId: string): string {
+  const cached = stationNameCache.get(stationId)
+  if (cached !== undefined) return cached
+  let out = stationId
+  try {
+    const d = getDb()
+    const m = d.query(`SELECT station_name FROM fleet_intel_market WHERE station_id = ? AND station_name <> '' LIMIT 1`)
+      .get(stationId) as { station_name?: string } | null
+    const f = d.query(`SELECT station_name, system_name FROM fleet_intel_facilities WHERE station_id = ? AND station_name <> '' LIMIT 1`)
+      .get(stationId) as { station_name?: string; system_name?: string | null } | null
+    const name = m?.station_name || f?.station_name || ''
+    if (name) out = f?.system_name ? `${name} @${f.system_name}` : name
+  } catch { /* a missing name is not worth breaking the briefing over */ }
+  stationNameCache.set(stationId, out)
+  return out
+}
+
+/** Hop counts over the fleet's learned jump graph, from one system outward.
+ *  Bounded breadth-first walk; the adjacency is rebuilt at most once a minute
+ *  because this runs on every turn's cache-comparison render. */
+let linkAdjacency: { at: number; adj: Map<string, string[]> } | null = null
+function hopsFrom(origin: string, maxDepth = 4): Map<string, number> {
+  const now = Date.now()
+  if (!linkAdjacency || now - linkAdjacency.at > 60_000) {
+    const adj = new Map<string, string[]>()
+    try {
+      for (const { a, b } of getKnownLinks()) {
+        if (!adj.has(a)) adj.set(a, [])
+        if (!adj.has(b)) adj.set(b, [])
+        adj.get(a)!.push(b)
+        adj.get(b)!.push(a)
+      }
+    } catch { /* no graph, no hops */ }
+    linkAdjacency = { at: now, adj }
+  }
+  const dist = new Map<string, number>([[origin, 0]])
+  let frontier = [origin]
+  for (let depth = 1; depth <= maxDepth && frontier.length; depth++) {
+    const next: string[] = []
+    for (const s of frontier) {
+      for (const n of linkAdjacency.adj.get(s) ?? []) {
+        if (!dist.has(n)) { dist.set(n, depth); next.push(n) }
+      }
+    }
+    frontier = next
+  }
+  return dist
+}
+
+function fmtHops(h: number | undefined): string {
+  if (h === undefined) return 'route unknown'
+  if (h === 0) return 'HERE'
+  return `${h} jump${h > 1 ? 's' : ''}`
+}
+
+/** Per-empire reputation as the game reports it on the player: the v2 state
+ *  carries `standings[empire].reputation`; the older shape is a flat
+ *  `reputation[empire]` map. Negative means the empire's stations refuse you. */
+function readReputation(gs: Record<string, unknown> | null | undefined): Map<string, number> {
+  const out = new Map<string, number>()
+  const player = gs?.player as Record<string, unknown> | undefined
+  if (!player) return out
+  const standings = player.standings as Record<string, { reputation?: unknown }> | undefined
+  if (standings && typeof standings === 'object') {
+    for (const [emp, s] of Object.entries(standings)) {
+      const r = Number(s?.reputation)
+      if (Number.isFinite(r)) out.set(emp, r)
+    }
+  }
+  const flat = player.reputation as Record<string, unknown> | undefined
+  if (flat && typeof flat === 'object') {
+    for (const [emp, v] of Object.entries(flat)) {
+      const r = Number(v)
+      if (Number.isFinite(r) && !out.has(emp)) out.set(emp, r)
+    }
+  }
+  return out
+}
+
+/** Day-granular age of a fleet_intel_systems row. Coarse ON PURPOSE: this text
+ *  sits inside the cached prompt for non-split agents, so it may change at most
+ *  once a day per line. */
+function fmtRecordAge(updatedAt: string | null | undefined): string | null {
+  if (!updatedAt) return null
+  const t = Date.parse(String(updatedAt).replace(' ', 'T') + (String(updatedAt).endsWith('Z') ? '' : 'Z'))
+  if (!Number.isFinite(t)) return null
+  const days = Math.floor((Date.now() - t) / 86_400_000)
+  return days < 1 ? 'seen today' : `${days}d old`
+}
+
+/** Auto-attached zero-credit distress/rescue entries are not contracts the
+ *  agent chose; listing them buries the paid ones. */
+function isAutoAttachedMission(m: Record<string, unknown>): boolean {
+  if (String(m.type ?? '') === 'distress_response') return true
+  return /^\s*distress:/i.test(String(m.title ?? m.name ?? ''))
+}
+
+/** Ticks are ~10s. Quantized to hours under two days, days beyond, so the
+ *  line does not churn the cached prompt every tick. */
+function fmtExpiry(m: Record<string, unknown>): string {
+  const ticks = Number(m.expires_in_ticks)
+  if (Number.isFinite(ticks) && ticks > 0) {
+    const hours = (ticks * 10) / 3600
+    if (hours < 1) return '<1h'
+    if (hours < 48) return `~${Math.ceil(hours)}h`
+    return `~${Math.round(hours / 24)}d`
+  }
+  const at = m.expires_at
+  if (typeof at === 'string' && at) return at.slice(0, 16)
+  return '?'
+}
+
+/** Rent rows go silent when the facility is gone (dismantle events are not
+ *  always captured) and when the agent is simply away. Past this many hours of
+ *  silence the row is treated as lapsed and NOT rendered — a 26-day-stale
+ *  "ACTIVE RENTAL" nag sent one hunter on 88 facility queries in a day. */
+const RENT_LAPSE_HOURS = 72
+
+/** Whether an obligation row is lapsed. Defers to the db layer's own helper
+ *  when it exists (the intel side owns the lapse rule), and always treats a
+ *  non-active status or a long-silent row as lapsed regardless. */
+function isObligationLapsed(o: ObligationRow, now: number): boolean {
+  const helper = (dbModule as unknown as { isObligationLapsed?: (row: ObligationRow) => boolean }).isObligationLapsed
+  if (typeof helper === 'function') {
+    try { if (helper(o)) return true } catch { /* fall through to the local rule */ }
+  }
+  if (o.status !== 'active') return true
+  const staleH = (now - Date.parse(o.last_seen)) / 3_600_000
+  return Number.isFinite(staleH) && staleH > RENT_LAPSE_HOURS
+}
+
 // ─── Briefing Builder ─────────────────────────────────────────────
 
 function fmtNum(n: number): string {
@@ -236,14 +428,21 @@ export function buildSituationalBriefing(profileId: string): string {
   lines.push(`Location: ${systemName}${poiName ? ' > ' + poiName : ''}`)
   lines.push(`Wallet: ${fmtNum(Number(credits))}cr | Fuel: ${fuel}/${maxFuel} | Hull: ${hull}/${maxHull}${shield !== undefined ? ' | Shield: ' + shield : ''}`)
 
+  const profileRow = getProfile(profileId)
+  const role: AgentRole = profileRow ? resolveAgentRole(profileRow) : 'default'
+
   // Standing drains — every agent sees its own rents every turn. A Crew Bunk +
   // Ledger Desk billed one agent ~2M over 30 days precisely because no surface
   // showed it. Rent silent >6h is shown as (lapsed?) rather than dropped: absence
-  // of a payment is weaker evidence than a dismantle event.
+  // of a payment is weaker evidence than a dismantle event — but past
+  // RENT_LAPSE_HOURS of silence the row is lapsed and rendered NOT AT ALL. The
+  // Lithium Cell Foundry row (last paid 2026-08-06) was still being injected as
+  // an ACTIVE RENTAL on 2026-09-01, and the agent spent 88 facility calls that
+  // day trying to find and cancel a facility he no longer owned.
   {
-    const obs = listObligations(profileId).filter(o => o.obligation_type === 'rent' && o.status === 'active')
+    const now = Date.now()
+    const obs = listObligations(profileId).filter(o => o.obligation_type === 'rent' && !isObligationLapsed(o, now))
     if (obs.length > 0) {
-      const now = Date.now()
       const parts = obs.map(o => {
         const staleH = (now - new Date(o.last_seen).getTime()) / 3_600_000
         // total rounded to 10k: the nag keeps its weight while the briefing text —
@@ -331,11 +530,15 @@ export function buildSituationalBriefing(profileId: string): string {
         n >= 1000 ? `~${Math.floor(n / 100) * 100}` :
         n >= 100 ? `~${Math.floor(n / 25) * 25}` :
         n >= 20 ? `~${Math.floor(n / 5) * 5}` : String(n)
+      // Station ids in these rows are mostly opaque 32-hex ids (e.g.
+      // 0028449658...); an agent cannot fly to a hash. Render the display
+      // name (and system, when the facility capture knows it) instead.
       const byStation = new Map<string, string[]>()
       for (const r of rows) {
-        const list = byStation.get(r.station_id) ?? []
+        const key = stationDisplayName(r.station_id)
+        const list = byStation.get(key) ?? []
         list.push(`${r.item_id} x${quant(r.quantity)}`)
-        byStation.set(r.station_id, list)
+        byStation.set(key, list)
       }
       const parts = [...byStation.entries()].map(([st, items]) => `${st}: ${items.join(', ')}`)
       lines.push(`YOUR STORAGE (fleet-tracked, may lag — verify with view_storage when acting): ${parts.join(' | ')}`)
@@ -345,9 +548,11 @@ export function buildSituationalBriefing(profileId: string): string {
   // Galaxy-wide market intel (public feed relay — agents cannot fetch HTTP).
   // Rendered from a threshold-throttled snapshot so stable prices keep these
   // lines byte-identical between fetches (see galaxy-market.ts header).
+  // Hunters get bids for what they carry (loot has to be sold somewhere) but
+  // not the sellable-ore board — they have no mining laser.
   {
     const cargoIds = (cache.cargo ?? []).map((c: unknown) => String((c as Record<string, unknown>).item_id ?? '')).filter(Boolean)
-    for (const line of galaxyMarketLines(cargoIds)) lines.push(line)
+    for (const line of galaxyMarketLines(cargoIds, { oreBoard: role !== 'hunter' })) lines.push(line)
     // Both-sides quotes for items the directive names — buy-leg agents hold
     // nothing, so cargo-keyed lines alone leave them on stale directive numbers.
     const directive = getProfile(profileId)?.directive ?? ''
