@@ -23,12 +23,14 @@ interface Scenario {
   hullSeq?: number[]        // hull reported on successive status reads
   battleTicks?: number      // how many reads report an active battle
   failAttack?: string
+  failAttackTimes?: number
 }
 
 function harness(s: Scenario) {
   const calls: Array<{ cmd: string; args: any }> = []
   let undocked = false
   let travelled = false
+  let attackFails = 0
   let reads = 0
   let battleReads = 0
   const hullSeq = s.hullSeq ?? [1785]
@@ -59,7 +61,12 @@ function harness(s: Scenario) {
         if (s.systemPois && !travelled) return { result: { creatures: [], pirates: [], empire_npcs: [], nearby: [] } }
         return { result: s.targets ?? { creatures: [], pirates: [], empire_npcs: [], nearby: [] } }
       }
-      if (cmd === 'attack' && s.failAttack) return { error: { code: s.failAttack, message: 'nope' } }
+      if (cmd === 'attack' && s.failAttack) {
+        attackFails++
+        if (s.failAttackTimes === undefined || attackFails <= s.failAttackTimes) {
+          return { error: { code: s.failAttack, message: 'nope' } }
+        }
+      }
       if (cmd === 'wrecks') return { result: { wrecks: [{ wreck_id: 'wr_1', name: 'Grazer wreck' }] } }
       return { result: 'ok' }
     },
@@ -181,6 +188,29 @@ describe('hunt_here', () => {
     expect(calls.some(c => c.cmd === 'travel')).toBe(false)
     expect(out).toContain('NO KILLS')
   }, 60_000)
+
+
+  test('waits for an unfinished battle instead of attacking into it', async () => {
+    // After its first real kill at Nekkar Belt the macro attacked into its own
+    // unresolved fight, got action_pending, reported NO KILLS, and the model
+    // called it again — a spin. It must let the battle settle first.
+    const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 3 })
+    await executeTool('hunt_here', { max_kills: 1 }, ctx)
+    // The very first thing after the prelude is a state read, not an attack.
+    const firstAttack = calls.findIndex(c => c.cmd === 'attack')
+    const firstScan = calls.findIndex(c => c.cmd === 'get_nearby')
+    expect(firstScan).toBeGreaterThanOrEqual(0)
+    expect(firstAttack).toBeGreaterThan(firstScan)
+  }, 60_000)
+
+  test('action_pending on attack is treated as pacing, not a dead hunt', async () => {
+    // The game acks the order then reports action_pending once; the retry lands.
+    const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 1, failAttack: 'action_pending', failAttackTimes: 1 })
+    const out = await executeTool('hunt_here', { max_kills: 1 }, ctx)
+    expect(out).not.toContain('attack failed [action_pending]')
+    expect(calls.filter(c => c.cmd === 'attack').length).toBeGreaterThan(1)  // it retried
+    expect(out).toContain('1 kill')
+  }, 120_000)
 
   test('a failed attack stops the macro instead of spinning', async () => {
     const { ctx, calls } = harness({ targets: GRAZERS, failAttack: 'target_not_found' })

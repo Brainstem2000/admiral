@@ -2766,7 +2766,10 @@ function macroStepDelayMs(conn: GameConnection): number {
 }
 
 /** Errors that mean "wait and retry this same step", not "the step failed". */
-const MACRO_RETRYABLE = new Set(['action_pending', 'cooldown', 'in_transit', 'rate_limited', 'action_in_progress'])
+// mutation_timeout means the game ACKED the order and the result did not arrive
+// in time — the order is usually live. Retrying is right; treating it as a hard
+// failure ended hunts that had actually landed (Morg'Thar, 2026-09-02).
+const MACRO_RETRYABLE = new Set(['action_pending', 'cooldown', 'in_transit', 'rate_limited', 'action_in_progress', 'mutation_timeout'])
 
 /** Read {credits, cargoUsed, cargoCapacity, systemId, docked} — local cache when available, else a get_status query. */
 async function macroReadState(conn: GameConnection): Promise<{
@@ -3112,6 +3115,19 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
     const interrupt = ctx.interruptPending?.()
     if (interrupt) { stopReason = `operator interrupt (${interrupt})`; break }
 
+    // Let the previous engagement settle before touching the game again.
+    // Without this the macro attacked into its own unfinished fight: the game
+    // answered `action_pending: Another action is already pending (attack)`,
+    // the macro reported NO KILLS, the model called it again, and it span —
+    // observed on Morg'Thar at Nekkar Belt on 2026-09-02 immediately after its
+    // first successful kill.
+    for (let settle = 0; settle < 18; settle++) {
+      const s = await readShip()
+      if (!s.inBattle) break
+      if (settle === 0) narrate('waiting for the current battle to finish', true)
+      await macroSleep(HUNT_TICK_MS)
+    }
+
     const scan = await conn.execute('get_nearby')
     if (scan.error) { stopReason = `get_nearby failed [${scan.error.code}]`; break }
     const data = scan.structuredContent ?? scan.result
@@ -3140,10 +3156,20 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
     const target = beatable[0]
     narrate(`engaging ${target.name} (${kills.length + 1}/${maxKills})`, true)
 
-    const atk = await macroAction(ctx, 'attack', { id: target.id }, 3)
+    // action_pending and mutation_timeout are pacing, not failure: the game
+    // acked the order and is still resolving it. Give attack a generous retry
+    // budget (macroAction already backs off on MACRO_RETRYABLE codes) rather
+    // than ending the hunt on a transient.
+    const atk = await macroAction(ctx, 'attack', { id: target.id }, 8)
     if (!atk.ok) {
-      stopReason = `attack failed [${atk.errorCode}] ${atk.errorMessage ?? ''}`.trim()
-      break
+      if (atk.errorCode === 'mutation_timeout' || atk.errorCode === 'action_pending') {
+        // The order is probably live; fall through to the battle watch and let
+        // it decide, instead of reporting a failure that did not happen.
+        narrate(`attack on ${target.name} is still resolving (${atk.errorCode}) — watching the battle`, true)
+      } else {
+        stopReason = `attack failed [${atk.errorCode}] ${atk.errorMessage ?? ''}`.trim()
+        break
+      }
     }
 
     // Fight it out. Close the range when out of reach, break off on the floor.
