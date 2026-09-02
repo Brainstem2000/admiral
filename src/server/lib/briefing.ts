@@ -15,33 +15,11 @@ import { galaxyMarketLines, directiveMarketLines } from './galaxy-market'
 
 const REFRESH_INTERVAL = 60_000 // 60 seconds
 
-// ─── Agent role ───────────────────────────────────────────────────
-//
-// The prompt diet is role-scoped: a hunter carries no mining, crafting, trading
-// or bill-of-materials doctrine, and its command list drops the commands those
-// doctrines govern. Everything keys off ONE resolver so prompt.md, the command
-// list, the volatile block and the briefing agree on who the agent is. Only
-// `hunter` is distinguished today; every other agent is `default` and renders
-// exactly what it rendered before the diet.
-//
-// Detection reads the TOP of the directive (the current-objective block) plus
-// the profile name and group. Matching the whole directive misfired once: rules
-// text like "no pirate hunting" classified every agent as combat.
-export type AgentRole = 'hunter' | 'default'
-
-const NON_COMBAT_HEAD_RX = /standby|stay docked|crafter|coordinator|verify-only|miner|no (pirate )?hunt/i
-const COMBAT_HEAD_RX = /combat specialist|bounty.?hunt|\bhunter\b|warrior/i
-const COMBAT_NAME_RX = /warrior|hunter/i
-const COMBAT_GROUP_RX = /combat|hunt(er|ing)?|warrior/i
-
-export function resolveAgentRole(profile: Pick<Profile, 'name' | 'directive'> & { group_name?: string | null }): AgentRole {
-  const head = (profile.directive || '').slice(0, 600)
-  if (NON_COMBAT_HEAD_RX.test(head)) return 'default'
-  if (COMBAT_HEAD_RX.test(head) || COMBAT_NAME_RX.test(profile.name || '') || COMBAT_GROUP_RX.test(profile.group_name || '')) {
-    return 'hunter'
-  }
-  return 'default'
-}
+// Agent role: ONE resolver (role.ts) so prompt.md, the command list and the
+// briefing can never disagree about who is a hunter. Re-exported for callers
+// that learned the name here.
+import { resolveAgentRole, type AgentRole } from './role'
+export { resolveAgentRole, type AgentRole }
 
 interface CachedData {
   status: Record<string, unknown> | null

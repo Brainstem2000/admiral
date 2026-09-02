@@ -337,8 +337,8 @@ export class Agent {
       commandList = this.connection.getCommandList()
       this.log('system', `Discovered ${this.connection.toolCount} v2 commands`)
     } else if (profile.connection_mode === 'lib_v2' && this.connection instanceof LibV2Connection) {
-      commandList = this.connection.getCommandList()
-      this.log('system', `Loaded ${this.connection.commandCount} commands from @spacemolt/lib catalog`)
+      commandList = this.connection.getCommandList(resolveAgentRole(profile))
+      this.log('system', `Loaded ${this.connection.commandCount} commands from @spacemolt/lib catalog (${resolveAgentRole(profile)} role list)`)
     } else {
       const serverUrl = profile.server_url.replace(/\/$/, '')
       const apiVersion = profile.connection_mode === 'http_v2' ? 'v2' : 'v1'

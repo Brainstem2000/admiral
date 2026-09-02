@@ -117,6 +117,9 @@ export async function refreshStationsFeed(): Promise<FeedSnapshot | null> {
       const stations = normalise(await res.json())
       if (!stations) throw new Error('stations response malformed')
       snapshot = { fetched_at: Date.now(), stations }
+      // A fresh fetch supersedes whatever is on disk; without this the first
+      // ensureStationsFeed() after boot would reload an older cache over it.
+      diskChecked = true
       index(snapshot)
       try {
         mkdirSync(path.dirname(CACHE_FILE), { recursive: true })
