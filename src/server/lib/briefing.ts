@@ -25,6 +25,8 @@ interface CachedData {
   status: Record<string, unknown> | null
   cargo: unknown[] | null
   nearby: unknown[] | null
+  /** Shootable things at this POI, flattened from get_nearby (see collectTargets). */
+  targets: NearbyTarget[]
   market: unknown[] | null
   system: Record<string, unknown> | null
   missions: unknown[] | null
@@ -39,7 +41,7 @@ const agentTimers = new Map<string, ReturnType<typeof setInterval>>()
 const agentEpochs = new Map<string, number>()
 
 function emptyCache(): CachedData {
-  return { status: null, cargo: null, nearby: null, market: null, system: null, missions: null, updatedAt: 0 }
+  return { status: null, cargo: null, nearby: null, targets: [], market: null, system: null, missions: null, updatedAt: 0 }
 }
 
 /** Execute a query command silently, returning parsed data or null */
@@ -51,6 +53,54 @@ async function safeQuery(conn: GameConnection, command: string, args?: Record<st
   } catch {
     return null
   }
+}
+
+/** One shootable thing at the agent's POI, flattened from get_nearby. */
+export interface NearbyTarget {
+  id: string
+  name: string
+  species: string
+  kind: 'creature' | 'pirate' | 'npc'
+  hull: number | null
+  maxHull: number | null
+  inCombat: boolean
+}
+
+/**
+ * Flatten get_nearby into a list of things that can be attacked.
+ *
+ * The payload is `{creatures: [...], pirates: [...], empire_npcs: [...],
+ * nearby: []}` — and `nearby` is empty even when the others are full, so any
+ * reader that trusts `nearby` alone sees an empty system.
+ */
+export function collectTargets(raw: unknown): NearbyTarget[] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
+  const d = raw as Record<string, unknown>
+  const out: NearbyTarget[] = []
+  const groups: Array<[string, NearbyTarget['kind']]> = [
+    ['creatures', 'creature'], ['pirates', 'pirate'], ['empire_npcs', 'npc'],
+  ]
+  for (const [key, kind] of groups) {
+    const list = d[key]
+    if (!Array.isArray(list)) continue
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue
+      const e = item as Record<string, unknown>
+      const id = String(e.creature_id ?? e.npc_id ?? e.pirate_id ?? e.ship_id ?? e.id ?? '').trim()
+      if (!id) continue
+      const num = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? n : null }
+      out.push({
+        id,
+        name: String(e.name ?? e.species ?? kind),
+        species: String(e.species ?? e.type ?? ''),
+        kind,
+        hull: num(e.hull),
+        maxHull: num(e.max_hull),
+        inCombat: e.in_combat === true,
+      })
+    }
+  }
+  return out
 }
 
 /** Refresh all cached data for an agent via direct connection queries */
@@ -110,6 +160,12 @@ export async function refreshBriefingData(profileId: string, conn: GameConnectio
   else if (nearbyRaw && typeof nearbyRaw === 'object' && 'nearby' in (nearbyRaw as Record<string, unknown>)) {
     cache.nearby = (nearbyRaw as Record<string, unknown>).nearby as unknown[]
   }
+  // get_nearby's `nearby` array is EMPTY even when the POI is full of things to
+  // shoot — the shootable entries live in `creatures` / `pirates` /
+  // `empire_npcs`, each with its own id field. Reading only `nearby` meant the
+  // briefing rendered "Nearby objects: 0" while four grazers sat in front of
+  // Morg'Thar at Alkaid on 2026-09-02, and he jumped away without firing.
+  cache.targets = collectTargets(nearbyRaw)
   if (systemRaw && typeof systemRaw === 'object') cache.system = systemRaw as Record<string, unknown>
   if (Array.isArray(missionsRaw)) cache.missions = missionsRaw
   else if (missionsRaw && typeof missionsRaw === 'object' && 'missions' in (missionsRaw as Record<string, unknown>)) {
@@ -715,6 +771,41 @@ export function buildSituationalBriefing(profileId: string): string {
     }
   }
 
+  // Shootable things at this POI, with the ids `attack` takes.
+  //
+  // This is the difference between a hunter who fires and one who commutes.
+  // The old block rendered "Nearby objects: N" — a bare count nobody can act
+  // on — so the agent had to spend a round on get_nearby to learn a target id,
+  // and when it skipped that round it flew on blind. Morg'Thar crossed 13
+  // systems on 2026-09-02 killing nothing, including a gas pocket holding four
+  // grazers. Inject the ids; never make him re-derive them.
+  if (role === 'hunter' || cache.targets.length > 0) {
+    if (cache.targets.length > 0) {
+      const byKind = new Map<string, { n: number; hull: string; ids: string[]; combat: number }>()
+      for (const t of cache.targets) {
+        const key = `${t.kind}|${t.name}`
+        const e = byKind.get(key) ?? { n: 0, hull: '', ids: [], combat: 0 }
+        e.n++
+        if (!e.hull && t.hull !== null) e.hull = t.maxHull !== null ? `${t.hull}/${t.maxHull}` : String(t.hull)
+        if (t.inCombat) e.combat++
+        e.ids.push(t.id)
+        byKind.set(key, e)
+      }
+      const rows = [...byKind.entries()].map(([key, e]) => {
+        const [kind, name] = key.split('|')
+        const tag = kind === 'pirate' ? ' [PIRATE]' : kind === 'npc' ? ' [EMPIRE NPC — do not attack]' : ''
+        return `  ${name}${e.n > 1 ? ` x${e.n}` : ''}${tag}${e.hull ? ` hull ${e.hull}` : ''}` +
+          `${e.combat ? ` (${e.combat} already in combat)` : ''} — attack ids: ${e.ids.join(', ')}`
+      })
+      lines.push(
+        `TARGETS AT YOUR POI (${cache.targets.length}) — attack(target_id=<id>) directly; you do NOT need get_nearby:\n` +
+        rows.join('\n'),
+      )
+    } else {
+      lines.push('TARGETS AT YOUR POI: none. Nothing here to shoot — move to the next POI or system; do not re-scan.')
+    }
+  }
+
   // Nearby entities
   if (cache.nearby && cache.nearby.length > 0) {
     const players = cache.nearby.filter((n: unknown) => {
@@ -726,7 +817,7 @@ export function buildSituationalBriefing(profileId: string): string {
       const names = players.slice(0, 5).map((p: unknown) => (p as Record<string, unknown>).name ?? '?')
       lines.push(`Nearby players: ${names.join(', ')}${players.length > 5 ? ` (+${players.length - 5} more)` : ''}`)
     }
-    if (others > 0) {
+    if (others > 0 && cache.targets.length === 0) {
       lines.push(`Nearby objects: ${others}`)
     }
   }
