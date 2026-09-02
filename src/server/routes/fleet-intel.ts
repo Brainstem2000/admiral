@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { FleetIntelCollector } from '../lib/fleet-intel'
-import { findDeposits, getPoiDeposits, depositStats, realisableValue, getFleetItemTotals, listObligations, getIntelDashboard } from '../lib/db'
+import { findDeposits, getPoiDeposits, depositStats, realisableValue, getFleetItemTotals, listObligations, listActiveObligations, getIntelDashboard } from '../lib/db'
 
 const fleetIntel = new Hono()
 
@@ -36,11 +36,14 @@ fleetIntel.get('/', (c) => {
     if (c.req.query('wrecks') === 'true') {
       return c.json({ wrecks: FleetIntelCollector.getWreckObservations() })
     }
-    // ?obligations=true[&profile=id] — standing drains: facility rents + taxes,
-    // folded from the action log. Exists because a rented Crew Bunk + Ledger Desk
-    // billed one agent ~2M credits over 30 days with no surface anywhere.
+    // ?obligations=true[&profile=id][&active=true] — standing drains: facility rents +
+    // taxes, folded from the action log. Exists because a rented Crew Bunk + Ledger Desk
+    // billed one agent ~2M credits over 30 days with no surface anywhere. The default is
+    // the audit view (lapsed rows included); `active=true` is what the briefing shows.
     if (c.req.query('obligations') === 'true') {
-      return c.json({ obligations: listObligations(c.req.query('profile') || undefined) })
+      const profile = c.req.query('profile') || undefined
+      const rows = c.req.query('active') === 'true' ? listActiveObligations(profile) : listObligations(profile)
+      return c.json({ obligations: rows })
     }
     // ?facilities=true[&type=substr][&recipe=id][&owned=true] — where things can be crafted.
     if (c.req.query('facilities') === 'true') {

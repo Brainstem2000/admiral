@@ -1,6 +1,7 @@
-import { getDb, gameTimestamp } from './db'
+import { getDb, gameTimestamp, markAllRentLapsed, markObligationLapsed, listActiveObligations } from './db'
 import { getFacility } from './catalog'
 import { safeTruncate } from './text-safe'
+import { feedSaysSystemHasStation, feedServicesForSystem, systemForBase } from './stations-feed'
 import type { FleetIntelData, MarketIntel, SystemIntel, ThreatIntel, KillZone, PlayerSighting } from '../../shared/fleet-intel-types'
 
 type R = Record<string, unknown>
@@ -8,6 +9,28 @@ type R = Record<string, unknown>
 function str(v: unknown): string { return typeof v === 'string' ? v : '' }
 function num(v: unknown): number | null { return typeof v === 'number' ? v : null }
 function int(v: unknown): number { return typeof v === 'number' ? Math.floor(v) : 0 }
+
+/** Refutations repeat on every turn of a looping agent; say each one once per process. */
+const loggedOnce = new Set<string>()
+function logOnce(key: string, message: string): void {
+  if (loggedOnce.has(key)) return
+  loggedOnce.add(key)
+  console.warn(message)
+}
+
+/**
+ * Does this POI carry a dockable base? get_system's SystemPOI says so with `has_base`
+ * (plus base_id/base_name); older/other shapes only hint through the type string.
+ */
+function poiHasBase(p: unknown): boolean {
+  if (!p || typeof p !== 'object') return false
+  const poi = p as R
+  if (poi.has_base === true || poi.has_station === true) return true
+  if (poi.has_base === false) return false
+  if (str(poi.base_id)) return true
+  const t = str(poi.type).toLowerCase()
+  return t.includes('station') || t.includes('outpost') || t === 'base'
+}
 
 /**
  * Quantity resting at the best price in a raw order book.
@@ -114,6 +137,61 @@ export class FleetIntelCollector {
       case 'get_wrecks': return this.processWrecks(r, reportedBy)
       case 'list':
       case 'facility_list': return this.processFacilities(r, reportedBy)
+      case 'owned':
+      case 'facility_owned': return this.processOwnedFacilities(r, reportedBy)
+    }
+  }
+
+  /**
+   * RENTAL LAPSE. `facility_owned` (or `facility` + action:'owned') is the game's own
+   * answer to "what do I still rent". An empty answer retires every rent obligation
+   * on the register for that agent — and ONLY the game's answer does: Morg'Thar's
+   * Lithium Cell Foundry row from 2026-08-06 was still being nagged about on
+   * 2026-09-02 after the game had said `facilities: []` twice, because nothing
+   * listened. Rows are never lapsed on age alone — wallet-zero agents accrue real
+   * arrears in silence, and a stale row there is a debt, not a phantom.
+   *
+   * A later rent_paid event flips a lapsed row straight back to active
+   * (recordObligations), so a wrong lapse costs at most one billing cycle of nag.
+   */
+  private static processOwnedFacilities(r: R, reportedBy: string): void {
+    const rows = Array.isArray(r.facilities) ? r.facilities
+      : Array.isArray(r.owned_facilities) ? r.owned_facilities
+      : Array.isArray(r.player_facilities) ? r.player_facilities
+      : null
+    // Not a shape we understand — never lapse on ambiguity.
+    if (!rows) return
+    const db = getDb()
+    const owner = db.query('SELECT id FROM profiles WHERE name = ?').get(reportedBy) as { id: string } | undefined
+    if (!owner) return
+
+    if (rows.length === 0) {
+      const n = markAllRentLapsed(owner.id)
+      if (n > 0) console.log(`[Intel] ${reportedBy} owns no facilities per the game — ${n} rent obligation(s) marked lapsed`)
+      return
+    }
+
+    // The game enumerated what IS owned. Only stations it named are evidence: a rent
+    // row at a station the answer covers, for a facility the answer omits, is gone.
+    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')
+    const ownedAt = new Map<string, Set<string>>()
+    for (const f of rows as R[]) {
+      if (!f || typeof f !== 'object') continue
+      const base = str(f.base_id || f.station_id || '')
+      if (!base) continue
+      const set = ownedAt.get(base) ?? new Set<string>()
+      for (const key of [f.type, f.facility_type, f.facility_id, f.id, f.name]) {
+        const k = str(key)
+        if (k) set.add(norm(k))
+      }
+      ownedAt.set(base, set)
+    }
+    for (const ob of listActiveObligations(owner.id)) {
+      if (ob.obligation_type !== 'rent') continue
+      const here = ownedAt.get(ob.station_id)
+      if (!here || here.has(norm(ob.facility))) continue
+      markObligationLapsed(owner.id, ob.facility, ob.station_id)
+      console.log(`[Intel] ${reportedBy} no longer owns ${ob.facility} @${ob.station_id} per the game — rent obligation marked lapsed`)
     }
   }
 
@@ -372,11 +450,16 @@ export class FleetIntelCollector {
     if (!systemId || !systemName) return
 
     const pois = Array.isArray(sysObj.pois) ? sysObj.pois : []
-    const hasStation = pois.some((p: unknown) => {
-      if (!p || typeof p !== 'object') return false
-      const poi = p as R
-      return str(poi.type).includes('station') || str(poi.type).includes('base')
-    })
+    // Station evidence is EXPLICIT, in both directions. A live get_system lists every POI
+    // in the system; if none carries a base, there is no station here, whatever the row
+    // said before — the old MAX() latch made a wrong flag permanent. A payload with no POI
+    // list at all is not evidence either way (null = leave the row alone).
+    let hasStation: 0 | 1 | null = pois.length === 0 ? null : (pois.some(poiHasBase) ? 1 : 0)
+    if (hasStation === 1 && feedSaysSystemHasStation(systemId) === false) {
+      logOnce(`sys:${systemId}`, `[Intel] refusing has_station=1 for ${systemId} (${reportedBy}): the stations feed lists no station there`)
+      hasStation = 0
+    }
+    const feedServices = hasStation === 1 ? feedServicesForSystem(systemId) : null
 
     // Extract resource types from POIs (best-effort; field may be absent)
     const resources: string[] = []
@@ -399,13 +482,18 @@ export class FleetIntelCollector {
 
     const db = getDb()
     db.query(`
-      INSERT INTO fleet_intel_systems (system_id, system_name, empire, poi_count, has_station, resources, police_level, poi_types, discovered_by, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      INSERT INTO fleet_intel_systems (system_id, system_name, empire, poi_count, has_station, station_services, resources, police_level, poi_types, discovered_by, updated_at)
+      VALUES (?, ?, ?, ?, COALESCE(?, 0), ?, ?, ?, ?, ?, datetime('now'))
       ON CONFLICT(system_id) DO UPDATE SET
         system_name = excluded.system_name,
         empire = COALESCE(excluded.empire, fleet_intel_systems.empire),
         poi_count = excluded.poi_count,
-        has_station = MAX(fleet_intel_systems.has_station, excluded.has_station),
+        -- Explicit set from evidence (a NULL means the payload carried no POI list).
+        has_station = COALESCE(?, fleet_intel_systems.has_station),
+        -- No station means no services; a refuted or cleared flag takes its copied
+        -- service list with it, otherwise the phantom keeps advertising "missions,refuel".
+        station_services = CASE WHEN ? = 0 THEN NULL
+                                ELSE COALESCE(fleet_intel_systems.station_services, excluded.station_services) END,
         resources = CASE WHEN excluded.resources IS NOT NULL THEN excluded.resources ELSE fleet_intel_systems.resources END,
         police_level = COALESCE(excluded.police_level, fleet_intel_systems.police_level),
         poi_types = CASE WHEN excluded.poi_types IS NOT NULL THEN excluded.poi_types ELSE fleet_intel_systems.poi_types END,
@@ -414,32 +502,55 @@ export class FleetIntelCollector {
       systemId, systemName,
       str(sysObj.empire || '') || null,
       pois.length,
-      hasStation ? 1 : 0,
+      hasStation,
+      feedServices,
       resources.length > 0 ? resources.join(',') : null,
       policeLevel,
       poiTypes.length > 0 ? poiTypes.join(',') : null,
       reportedBy,
+      hasStation,
+      hasStation,
     )
   }
 
+  /**
+   * get_base: `{ base: { id, poi_id, name, ... }, services: [...], condition }`. Note what
+   * is NOT in that shape: a system_id. Any `system_id` riding on a base payload was put
+   * there by something else — a connection's cached location, a caller's argument — and
+   * that is how four systems on a hauler's route were stamped with one station's service
+   * list in a single minute. So the system is resolved from the BASE'S OWN IDENTITY via
+   * the stations feed first; a payload system_id is only trusted when the feed cannot
+   * answer, and is refused outright when the feed says that system has no station.
+   */
   private static processBase(r: R, reportedBy: string): void {
-    const systemId = str(r.system_id || '')
-    const systemName = str(r.system_name || '')
-    if (!systemId && !systemName) return
+    const base = (r.base && typeof r.base === 'object') ? (r.base as R) : r
+    const baseId = str(base.id || r.base_id || r.station_id || base.base_id || '')
+    const claimed = str(r.system_id || base.system_id || '')
+    const resolved = baseId ? systemForBase(baseId) : null
+
+    let systemId = resolved ?? claimed
+    if (!systemId) return
+    if (resolved && claimed && resolved !== claimed) {
+      logOnce(`base:${baseId}:${claimed}`,
+        `[Intel] get_base for ${baseId} claimed system ${claimed} but the stations feed puts it in ${resolved} (${reportedBy}) — using the feed`)
+      systemId = resolved
+    }
+    if (!resolved && feedSaysSystemHasStation(systemId) === false) {
+      logOnce(`base:${systemId}`,
+        `[Intel] refusing station flag for ${systemId} from get_base (${reportedBy}): the stations feed lists no station there`)
+      return
+    }
 
     const services = r.services as unknown[] | undefined
     const serviceList = Array.isArray(services) ? services.map(s => str(s)).filter(Boolean).join(',') : null
 
-    const db = getDb()
-    if (systemId) {
-      db.query(`
-        UPDATE fleet_intel_systems
-        SET has_station = 1,
-            station_services = COALESCE(?, station_services),
-            updated_at = datetime('now')
-        WHERE system_id = ?
-      `).run(serviceList, systemId)
-    }
+    getDb().query(`
+      UPDATE fleet_intel_systems
+      SET has_station = 1,
+          station_services = COALESCE(?, station_services),
+          updated_at = datetime('now')
+      WHERE system_id = ?
+    `).run(serviceList, systemId)
   }
 
   private static processNearby(r: R, reportedBy: string): void {

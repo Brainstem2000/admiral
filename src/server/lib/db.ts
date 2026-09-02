@@ -3,6 +3,7 @@ import path from 'path'
 import fs from 'fs'
 import type { Provider, Profile, LogEntry } from '../../shared/types'
 import type { GalaxyMapData } from '../../shared/galaxy-types'
+import { refreshStationsFeed, MIN_PLAUSIBLE_STATIONS } from './stations-feed'
 
 const DB_DIR = path.join(process.cwd(), 'data')
 const DB_PATH = path.join(DB_DIR, 'admiral.db')
@@ -1758,12 +1759,56 @@ export interface ObligationRow {
   first_seen: string; last_seen: string; status: string
 }
 
-/** Active-first, biggest drain first. `activeWithinHours` treats a rent silent longer than that as lapsed. */
+/** Every row, lapsed included — active-first, biggest drain first. The audit view. */
 export function listObligations(profileId?: string): ObligationRow[] {
   const where = profileId ? 'WHERE profile_id = ?' : ''
   const q = db.query(`SELECT * FROM recurring_obligations ${where}
     ORDER BY status = 'active' DESC, total_paid DESC`)
   return (profileId ? q.all(profileId) : q.all()) as ObligationRow[]
+}
+
+/**
+ * What an agent should be told about. Excludes 'lapsed' — rows the game's own
+ * owned-facility answer no longer lists. This is the briefing's view: Morg'Thar was
+ * nagged for a month about a Lithium Cell Foundry the game had twice said he did
+ * not own, because the only list was the audit list.
+ *
+ * Status vocabulary: 'active' (billing), 'ended' (facility_dismantle event seen),
+ * 'lapsed' (absent from a facility_owned answer). ONLY game evidence moves a row
+ * out of 'active' — never age. A wallet-zero agent accrues real arrears in
+ * silence, and a rent row that has not billed for a week is a debt, not a phantom.
+ */
+export function listActiveObligations(profileId?: string): ObligationRow[] {
+  const where = profileId ? 'WHERE profile_id = ? AND status != \'lapsed\'' : 'WHERE status != \'lapsed\''
+  const q = getDb().query(`SELECT * FROM recurring_obligations ${where}
+    ORDER BY status = 'active' DESC, total_paid DESC`)
+  return (profileId ? q.all(profileId) : q.all()) as ObligationRow[]
+}
+
+/**
+ * Mark one rent obligation lapsed. `facilityOrStation` matches the facility name OR
+ * the station id; pass `stationId` as well to pin one (facility, station) pair.
+ * Only 'active' rows move — 'ended' is stronger evidence and stays. Returns rows changed.
+ * A later rent_paid event flips the row back to 'active' (recordObligations).
+ */
+export function markObligationLapsed(profileId: string, facilityOrStation: string, stationId?: string): number {
+  const target = String(facilityOrStation ?? '').trim()
+  if (!target) return 0
+  const d = getDb()
+  const r = stationId
+    ? d.query(`UPDATE recurring_obligations SET status = 'lapsed'
+        WHERE profile_id = ? AND obligation_type = 'rent' AND status = 'active'
+          AND facility = ? AND station_id = ?`).run(profileId, target, stationId)
+    : d.query(`UPDATE recurring_obligations SET status = 'lapsed'
+        WHERE profile_id = ? AND obligation_type = 'rent' AND status = 'active'
+          AND (facility = ? OR station_id = ?)`).run(profileId, target, target)
+  return r.changes
+}
+
+/** The game answered "you own no facilities": every active rent row for this agent lapses. */
+export function markAllRentLapsed(profileId: string): number {
+  return getDb().query(`UPDATE recurring_obligations SET status = 'lapsed'
+    WHERE profile_id = ? AND obligation_type = 'rent' AND status = 'active'`).run(profileId).changes
 }
 
 // ===== self-accounting helpers (2026-08-21) =====
@@ -2753,28 +2798,65 @@ export function cancelFleetOrder(id: string, reason: string, supersededBy?: stri
  * not an in-system observation, and updated_at feeds danger-grade staleness.
  */
 export async function backfillSystemsFromStations(): Promise<number> {
-  const resp = await fetch('https://game.spacemolt.com/api/stations', {
-    signal: AbortSignal.timeout(15_000),
-    headers: { 'User-Agent': 'SpaceMolt-Admiral' },
-  })
-  if (!resp.ok) return 0
-  const data = await resp.json() as { stations?: Array<{ system_id?: string; system_name?: string; services?: unknown }> }
+  const snap = await refreshStationsFeed()
+  if (!snap) return 0
+  // A snapshot older than a day may be the disk cache standing in for a failed fetch:
+  // fine for filling in, not for refuting.
+  const fresh = Date.now() - snap.fetched_at <= 24 * 60 * 60 * 1000
+  return applyStationsFeed(snap.stations, { clearUnlisted: fresh }).touched
+}
+
+/**
+ * Fold a stations list into fleet_intel_systems. Pure DB, no network — the testable
+ * half of backfillSystemsFromStations.
+ *
+ * With `clearUnlisted` (default on), any row still flagged has_station=1 that the
+ * feed does not list is a ghost and is cleared along with its service list. That is
+ * the self-correction the MAX() latch never allowed: four such rows sent a hunter
+ * looping between systems with nowhere to dock until someone cleared them by hand.
+ * Refusing to clear on a list shorter than `minPlausible` guards against a broken
+ * response reading as an emptied galaxy. updated_at is never touched here — feed
+ * presence is not an in-system observation, and updated_at feeds danger staleness.
+ */
+export function applyStationsFeed(
+  stations: Array<{ system_id: string; system_name?: string; services?: unknown }>,
+  opts: { clearUnlisted?: boolean; minPlausible?: number } = {},
+): { touched: number; cleared: number } {
   const db = getDb()
-  let n = 0
-  for (const st of data.stations ?? []) {
-    if (!st.system_id) continue
-    const services = Array.isArray(st.services) ? st.services.join(',')
-      : typeof st.services === 'string' ? st.services : null
-    db.query(`INSERT INTO fleet_intel_systems (system_id, system_name, has_station, station_services, discovered_by)
-      VALUES (?, ?, 1, ?, 'stations-api')
-      ON CONFLICT(system_id) DO UPDATE SET
-        has_station = 1,
-        system_name = CASE WHEN system_name = '' OR system_name = system_id THEN excluded.system_name ELSE system_name END,
-        station_services = COALESCE(station_services, excluded.station_services)`)
-      .run(st.system_id, st.system_name ?? st.system_id, services)
-    n++
+  const listed = new Set<string>()
+  let touched = 0
+  const upsert = db.query(`INSERT INTO fleet_intel_systems (system_id, system_name, has_station, station_services, discovered_by)
+    VALUES (?, ?, 1, ?, 'stations-api')
+    ON CONFLICT(system_id) DO UPDATE SET
+      has_station = 1,
+      system_name = CASE WHEN system_name = '' OR system_name = system_id THEN excluded.system_name ELSE system_name END,
+      station_services = COALESCE(station_services, excluded.station_services)`)
+  const tx = db.transaction(() => {
+    for (const st of stations) {
+      const sid = String(st.system_id ?? '').toLowerCase().trim()
+      if (!sid) continue
+      listed.add(sid)
+      const services = Array.isArray(st.services) ? st.services.map(String).filter(Boolean).join(',')
+        : typeof st.services === 'string' ? st.services : null
+      upsert.run(sid, st.system_name || sid, services)
+      touched++
+    }
+  })
+  tx()
+
+  let cleared = 0
+  const min = opts.minPlausible ?? MIN_PLAUSIBLE_STATIONS
+  if (opts.clearUnlisted !== false && stations.length >= min) {
+    const flagged = db.query('SELECT system_id FROM fleet_intel_systems WHERE has_station = 1').all() as Array<{ system_id: string }>
+    const ghosts = flagged.filter(r => !listed.has(String(r.system_id).toLowerCase()))
+    if (ghosts.length) {
+      const clear = db.query('UPDATE fleet_intel_systems SET has_station = 0, station_services = NULL WHERE system_id = ?')
+      const tx2 = db.transaction(() => { for (const g of ghosts) { clear.run(g.system_id); cleared++ } })
+      tx2()
+      console.warn(`[Intel] stations feed lists no station in ${ghosts.map(g => g.system_id).join(', ')} — has_station cleared`)
+    }
   }
-  return n
+  return { touched, cleared }
 }
 
 export function getFleetOrdersByChain(chainId: string): FleetOrder[] {
