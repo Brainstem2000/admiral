@@ -1,11 +1,12 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, FORBIDDEN_SYSTEMS } from './db'
+import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
 import { invalidateBriefingCache, collectTargets } from './briefing'
+import { resolveAgentRole } from './role'
 import { safeTruncate } from './text-safe'
 import { codexLookup, codexChain, priceAdvisory, codexGet } from './catalog'
 
@@ -3040,6 +3041,24 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
   }
   const hullPct = (s: { hull: number | null; maxHull: number | null }) =>
     s.hull !== null && s.maxHull ? (s.hull / s.maxHull) * 100 : 100
+
+  // COMBAT ROLES ONLY. Advertising this macro in the default prompt block put
+  // it in front of Cass Margin — a trader flying an UNINSURED 540-cargo
+  // Caravan with one weapon slot, under orders to stay in policed space and
+  // dock on any damage. She called it on 2026-09-02 and got lucky: the gas
+  // cloud was empty. A pirate there would have cost the fleet its hauler.
+  // The prompt is guidance; this is the guard.
+  {
+    const prof = getProfile(ctx.profileId)
+    if (prof && resolveAgentRole(prof) !== 'hunter') {
+      const refusal =
+        `hunt_here REFUSED: you are not a combat agent. This macro picks fights, and your ` +
+        `directive is not a hunter's — engaging would risk your ship and your cargo for nothing. ` +
+        `Do the job your directive actually gives you.`
+      ctx.log('system', `hunt_here refused for non-combat role (${prof.name})`)
+      return refusal
+    }
+  }
 
   const start = await readShip()
   if (hullPct(start) < hullFloorPct) {

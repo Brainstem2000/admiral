@@ -580,7 +580,6 @@ Three macro tools run bounded code loops in ONE call. They are dramatically chea
 - **mine_until_full(max_mines?, stop_at_pct?)** — mines repeatedly until cargo is full or the resource depletes. Use this instead of calling mine over and over. Requires being at a mineable POI (belt/field), not a station.
 - **goto_system(target_system, dock_at_poi?)** — plots the route and jumps EVERY hop in one call, optionally docking at a POI on arrival. Checks fuel first. Use this instead of manual find_route + jump-per-turn chains.
 - **sell_cargo(exclude=[...])** — sells all cargo at the current docked station in one call. **Pass every item you mean to keep in `exclude`** — the macro sells whatever you do not exclude (the ammo your fitted guns fire is protected automatically). Items with no buyers are reported, not errors.
-- **hunt_here(poi?, max_kills?, species?)** — undocks, travels to `poi` if given, then scans that POI, attacks the weakest target you can beat, kills it, loots the wreck and repeats, in one call. Never targets police or empire NPCs, skips anything tougher than half your hull, and breaks off below 60% hull. Combat agents should use this instead of attack/advance/loot by hand.
 
 Rules:
 - One macro call per turn is plenty — each performs many game actions and reports a summary. Read the summary, then decide the next step.

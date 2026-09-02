@@ -42,7 +42,7 @@ const PROMPT_MD = fs.readFileSync(path.join(REPO, 'prompt.md'), 'utf-8')
 //   bun -e 'import fs from "node:fs"; import {createHash} from "node:crypto";
 //     import {renderPromptForRole} from "./src/server/lib/role";
 //     console.log(createHash("sha256").update(renderPromptForRole(fs.readFileSync("prompt.md","utf-8"),"default")).digest("hex"))'
-const DEFAULT_PROMPT_SHA256 = 'e2b06f471886bb10f2ff970ab2d0179e08fc2e063b29425b91270bb67defff56'
+const DEFAULT_PROMPT_SHA256 = 'c56a83ddbf60c8d18a290fb15ae4ab62f529220a740f2df0ca4a6e4622e82c62'
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
 
@@ -117,14 +117,21 @@ describe('macro tools are advertised in the prompt', () => {
   // A macro the prompt never mentions does not get called. hunt_here shipped in
   // the tool list on 2026-09-02 but no prompt block named it, and Morg'Thar went
   // on hand-flying combat (and skipping it) until MACRO TOOLS listed it.
-  for (const role of ['hunter', 'default'] as const) {
-    test(`${role} render advertises hunt_here`, () => {
-      const r = renderPromptForRole(PROMPT_MD, role)
-      expect(r).toContain('hunt_here')
-      expect(r).toContain('goto_system')
-      expect(r).toContain('sell_cargo')
-    })
-  }
+  test('the hunter render advertises hunt_here', () => {
+    const r = renderPromptForRole(PROMPT_MD, 'hunter')
+    expect(r).toContain('hunt_here')
+    expect(r).toContain('goto_system')
+    expect(r).toContain('sell_cargo')
+  })
+
+  test('the DEFAULT render does NOT advertise hunt_here', () => {
+    // Advertising it to everyone put a fight-picking macro in front of Cass
+    // Margin, a trader flying an UNINSURED 540-cargo Caravan under orders to
+    // stay in policed space. She called it on 2026-09-02 and got lucky.
+    const r = renderPromptForRole(PROMPT_MD, 'default')
+    expect(r).not.toContain('hunt_here')
+    expect(r).toContain('goto_system')
+  })
 })
 
 describe('prompt.md role rendering', () => {
