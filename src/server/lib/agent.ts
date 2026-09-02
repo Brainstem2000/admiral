@@ -7,7 +7,8 @@ import { HttpV2Connection } from './connections/http_v2'
 import { WebSocketConnection } from './connections/websocket'
 import { McpConnection } from './connections/mcp'
 import { McpV2Connection } from './connections/mcp_v2'
-import { LibV2Connection } from './connections/lib_v2'
+import { LibV2Connection, formatLibCommandList } from './connections/lib_v2'
+import { resolveAgentRole, renderPromptForRole, type AgentRole } from './role'
 import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
@@ -58,6 +59,19 @@ function getPromptMd(): string {
     _promptMd = '(No prompt.md found)'
   }
   return _promptMd
+}
+
+/** prompt.md rendered per role (see role.ts). Role is static for a profile, so the
+ *  render is memoised by role alongside the raw file — it adds no invalidation trigger
+ *  to the system-prompt cache in the turn loop. */
+const _promptMdByRole = new Map<AgentRole, string>()
+function getPromptMdForRole(role: AgentRole): string {
+  let rendered = _promptMdByRole.get(role)
+  if (rendered === undefined) {
+    rendered = renderPromptForRole(getPromptMd(), role)
+    _promptMdByRole.set(role, rendered)
+  }
+  return rendered
 }
 
 export class Agent {
@@ -1010,9 +1024,19 @@ export function buildSystemPrompt(profile: Profile, commandList: string, phase?:
   const stateAt = splitVolatile
     ? 'in the CURRENT STATE message at the end of this conversation'
     : 'above'
-  const promptMd = getPromptMd()
+  // Role-scoped prompt diet (role.ts): a hunter gets prompt.md without the mining/
+  // trading/BoM doctrine and a command list without the commands those govern. The
+  // role derives from name + directive, both already in the turn loop's rebuild
+  // test, so it adds no new invalidation trigger. The command list is re-derived
+  // here because the connection's getCommandList() is called before the role is
+  // known; for the default role the caller's list is used untouched.
+  const role: AgentRole = resolveAgentRole(profile)
+  const promptMd = getPromptMdForRole(role)
   const directive = profile.directive || 'Play the game. Mine ore, sell it, and grow stronger.'
   const connectionMode = profile.connection_mode
+  const scopedCommandList = role !== 'default' && connectionMode === 'lib_v2'
+    ? formatLibCommandList(role)
+    : commandList
   const apiVersion = connectionMode === 'http_v2' || connectionMode === 'mcp_v2' || connectionMode === 'lib_v2' ? 'v2'
     : connectionMode === 'http' ? 'v1'
     : connectionMode === 'websocket' ? 'ws'
@@ -1053,7 +1077,7 @@ ${credentials}
 
 ${splitVolatile ? '' : buildVolatileState(profile, profileId)}## Available Game Commands
 Command signatures (full docs via: game(command="help", args={command: "name"})):
-${commandList}
+${scopedCommandList}
 
 ## Local Tools (call directly by name -- NOT through "game")
 These are local Admiral tools. Call them directly, e.g. read_todo(), NOT game(command="read_todo").

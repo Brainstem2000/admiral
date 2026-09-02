@@ -2,6 +2,7 @@ import { Account, ACTIONS, ClerkSource, GENERATED_SPEC_VERSION, SpacemoltError }
 import type { AuthCredentials, WebSocketLike } from '@spacemolt/lib'
 import type { GameConnection, LoginResult, RegisterResult, CommandResult, NotificationHandler } from './interface'
 import { USER_AGENT } from './interface'
+import { isCommandForRole, type AgentRole } from '../role'
 
 /**
  * Connection backed by the official @spacemolt/lib WebSocket-v2 client.
@@ -562,23 +563,8 @@ export class LibV2Connection implements GameConnection {
    * catalog (278 commands, spec-synced) — no OpenAPI fetch round-trip.
    * Same shape as schema.ts formatCommandList: one line per command.
    */
-  getCommandList(): string {
-    const lines: string[] = []
-    for (const def of Object.values(ACTIONS)) {
-      if (def.tool === 'spacemolt_auth') continue // login/register handled by the harness
-      const params = (def.params ?? [])
-        .map((p) => `${p.name}${p.required ? '' : '?'}: ${p.type}`)
-        .join(', ')
-      const kind = def.kind === 'mutation' ? 'action' : 'query'
-      lines.push(`- ${def.action}(${params}) [${kind}] — ${def.summary}`)
-    }
-    // REST-v1-only commands (no WS route in this lib build) — see REST_ONLY_COMMANDS.
-    const routes = buildRouteIndex()
-    for (const c of REST_ONLY_COMMANDS) {
-      if (routes.has(c.name)) continue // lib caught up; the real route already listed it
-      lines.push(`- ${c.name}(${c.params}) [action] — ${c.summary}`)
-    }
-    return lines.join('\n')
+  getCommandList(role: AgentRole = 'default'): string {
+    return formatLibCommandList(role)
   }
 
   get commandCount(): number {
@@ -586,4 +572,48 @@ export class LibV2Connection implements GameConnection {
     const extra = REST_ONLY_COMMANDS.filter((c) => !routes.has(c.name)).length
     return Object.keys(ACTIONS).length + extra
   }
+}
+
+/**
+ * The lib's `reload` takes `target` for the ammo, and its catalog text leaves the
+ * agent to guess what `target` means. Morg'Thar burned ~11 tool rounds on
+ * 2026-09-01 guessing weapon ids and calling help(reload). The wire parameter is
+ * still `target` (execute forwards args by name, so the signature has to say so);
+ * the summary spells out that it IS the ammo item id — reload(id, ammo_item_id).
+ */
+const RELOAD_LINE =
+  '- reload(id: string, target: string) [action] — Reload a fitted weapon from ammo in cargo — reload(id, ammo_item_id): ' +
+  'id = the weapon instance id (from get_ship or your Weapons briefing, NOT the weapon type); ' +
+  'target = the AMMO item id to load, e.g. target="ferrous_slug_case" — it must match that weapon\'s ammo type. Pass both.'
+
+/**
+ * Command list for the system prompt, straight from the lib's generated catalog
+ * (spec-synced) — no OpenAPI fetch round-trip. Same shape as schema.ts
+ * formatCommandList: one line per command. Scoped by role: a hunter is not
+ * shown mining/crafting/facility-build/commission/faction-admin commands
+ * (see isCommandForRole in role.ts). Module-level so buildSystemPrompt can
+ * re-derive the list for a role without a connection in hand.
+ */
+export function formatLibCommandList(role: AgentRole = 'default'): string {
+  const lines: string[] = []
+  for (const def of Object.values(ACTIONS)) {
+    if (def.tool === 'spacemolt_auth') continue // login/register handled by the harness
+    if (!isCommandForRole(def.tool, def.action, role)) continue
+    if (def.tool === 'spacemolt_battle' && def.action === 'reload') {
+      lines.push(RELOAD_LINE)
+      continue
+    }
+    const params = (def.params ?? [])
+      .map((p) => `${p.name}${p.required ? '' : '?'}: ${p.type}`)
+      .join(', ')
+    const kind = def.kind === 'mutation' ? 'action' : 'query'
+    lines.push(`- ${def.action}(${params}) [${kind}] — ${def.summary}`)
+  }
+  // REST-v1-only commands (no WS route in this lib build) — see REST_ONLY_COMMANDS.
+  const routes = buildRouteIndex()
+  for (const c of REST_ONLY_COMMANDS) {
+    if (routes.has(c.name)) continue // lib caught up; the real route already listed it
+    lines.push(`- ${c.name}(${c.params}) [action] — ${c.summary}`)
+  }
+  return lines.join('\n')
 }
