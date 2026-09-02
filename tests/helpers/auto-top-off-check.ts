@@ -51,7 +51,10 @@ async function scenario(pid: string, refuel: RefuelBehaviour, shipFuel: { fuel: 
   } as any
   const out = await executeTool('game', { command: 'dock' }, ctx)
   const ledger = db.query('SELECT kind, quantity, amount_signed FROM financial_ledger WHERE profile_id = ? ORDER BY id').all(pid) as Array<Record<string, unknown>>
-  return { calls, note: String(out), logs: logs.filter(l => l.startsWith('system:')), ledger }
+  // The briefing collector refreshes (get_nearby/get_system/get_ship) after any
+  // action; only the mutations are under test here.
+  const actions = calls.filter(c => c === 'dock' || c === 'refuel')
+  return { calls: actions, allCalls: calls, note: String(out), logs: logs.filter(l => l.startsWith('system:')), ledger }
 }
 
 const basic = await scenario('p-topoff-basic', { ok: true, fuel: 143, cost: 286 }, { fuel: 207, max: 350 })
