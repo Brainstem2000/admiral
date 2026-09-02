@@ -6,7 +6,7 @@ import {
   executeTool, isMacroTool, isQueryCommand,
   ACTION_PENDING_SENTINEL, COOLDOWN_BLOCKED_SENTINEL, LOOP_FLUSH_SENTINEL,
 } from './tools'
-import { safeTruncate, scrubContextSurrogates } from './text-safe'
+import { safeTruncate, scrubContextSurrogates, normalizeModelText, looksDegenerate } from './text-safe'
 import { recordLlmSpend } from './db'
 
 // Lowered from 30: the cap was being treated as a quota — turns ran to the ceiling firing queries
@@ -318,11 +318,11 @@ export function recoverToolCallFromText(response: AssistantMessage, log: LogFn):
  * description rather than the blob.
  */
 export function readableThought(text: string): string {
-  const raw = text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '').trim()
-  if (!raw.startsWith('{') || !raw.endsWith('}')) return text
+  const raw = normalizeModelText(text).replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '').trim()
+  if (!raw.startsWith('{') || !raw.endsWith('}')) return raw
   let obj: any
-  try { obj = JSON.parse(raw) } catch { return text }
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return text
+  try { obj = JSON.parse(raw) } catch { return raw }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return raw
   // The payload of update_todo / update_memory / a chat message IS the prose.
   for (const k of ['content', 'message', 'text', 'summary']) {
     if (typeof obj[k] === 'string' && obj[k].trim()) return obj[k].trim()
@@ -605,6 +605,17 @@ export async function runAgentTurn(
     }
 
     if (toolCalls.length === 0) {
+      // A collapsed reply is not a thought and must not be kept. Logging it raw
+      // filled the dashboard with zero-width padding, and leaving it in the
+      // context fed the collapse back to the model on the next call.
+      if (reasoning && looksDegenerate(reasoning)) {
+        const norm = normalizeModelText(reasoning)
+        log('system',
+          `Degenerate model output discarded (${reasoning.length} chars collapsed to repetition): ` +
+          `"${norm.slice(0, 60).replace(/\s+/g, ' ')}…"`)
+        response.content = [{ type: 'text', text: '(discarded: the model produced repetition, not an answer)' } as any]
+        reasoning = ''
+      }
       if (reasoning) log('llm_thought', readableThought(reasoning))
       // A text-only FIRST round gets exactly one retry that says, in so many
       // words, "call the tool". gpt-oss answered the wrap-up prompt in prose —

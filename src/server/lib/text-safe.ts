@@ -76,6 +76,47 @@ export function stripLoneSurrogates(text: string): string {
   return text.replace(LONE_SURROGATE_RE, '')
 }
 
+/** Invisible padding a collapsing model emits by the hundred: zero-width
+ *  space/non-joiner/joiner, BOM, and non-breaking space. */
+const INVISIBLE_RE = /[​‌‍﻿]/g
+
+/**
+ * Make model text fit to log and to keep: drop invisible padding, turn
+ * non-breaking spaces into ordinary ones, and collapse the runaway whitespace
+ * that comes with a repetition collapse.
+ *
+ * CyberSpock emitted 1,662 characters on 2026-09-02 whose visible content was
+ * "STATUSThe...WeWeWeWeThe...We...", padded with 77 zero-width spaces, 93
+ * non-breaking spaces and 206 newlines. Raw, it filled the dashboard log lane
+ * and went back into the context for the model to feed on.
+ */
+export function normalizeModelText(text: string): string {
+  return text
+    .replace(INVISIBLE_RE, '')
+    .replace(/ /g, ' ')
+    .replace(/[ \t]{3,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/**
+ * True when a reply has collapsed into repetition — the local-model failure
+ * mode where the same handful of tokens repeat to fill the budget. Judged on
+ * the NORMALIZED text so invisible padding cannot hide it.
+ */
+export function looksDegenerate(text: string): boolean {
+  const norm = normalizeModelText(text)
+  const words = norm.split(/\s+/).filter(w => w.length > 0)
+  if (words.length < 15) return false
+  const unique = new Set(words.map(w => w.toLowerCase())).size
+  // Real prose about a game turn runs well above 0.5 unique; a collapse sits
+  // near 0.1. 0.35 leaves room for legitimately repetitive status text.
+  if (unique / words.length < 0.35) return true
+  // Padding that survives normalization (a wall of "..." or bare fragments).
+  const alnum = norm.replace(/[^\p{L}\p{N}]/gu, '').length
+  return norm.length > 200 && alnum / norm.length < 0.3
+}
+
 /**
  * Recursively scrub every string leaf of an arbitrary JSON-ish value IN PLACE.
  * Handles nested objects/arrays (e.g. ToolCall.arguments and TypeBox schemas) and
