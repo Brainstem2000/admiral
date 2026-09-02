@@ -20,23 +20,29 @@ import { LibV2Connection, formatLibCommandList } from '../src/server/lib/connect
  * prompt.md is fleet-wide doctrine — 48K chars, ~59% of it irrelevant to a solo
  * hunter and some of it contradicting his directive (a fleet fuel-reserve rule
  * cost Morg'Thar 9,500cr on 2026-09-01). Sections now carry
- * `<!-- role: all | default | hunter -->` markers; the `default` render must be
- * byte-for-byte what every non-hunter saw before the diet, and the `hunter`
- * render must drop the trading/mining/BoM doctrine while keeping hunting,
- * anti-idle and the game-technique sections. The lib command list is scoped
- * the same way.
+ * `<!-- role: all | default | hunter -->` markers; the `default` render is
+ * pinned by hash so nobody changes what the parked fleet reads by accident, and
+ * the `hunter` render must drop the trading/mining/commission doctrine while
+ * keeping hunting, anti-idle and the game-technique sections. The lib command
+ * list is scoped the same way.
+ *
+ * 2026-09-02 stale sweep: the Devastator and Caravan commissions are delivered
+ * and every BoM lock was cleared on 2026-08-28, so BoM LOCK / NO BoM SALES became
+ * COMMISSION LOCKS (default only), the shield_emitter standing blocker and the
+ * "send_gift to Sapper" job line are gone, and the hunter render carries its own
+ * Key Tips / NO-JETTISON / HUNTING / EQUIPMENT / SHIPS blocks.
  */
 
 const REPO = path.resolve(import.meta.dir, '..')
 const PROMPT_MD = fs.readFileSync(path.join(REPO, 'prompt.md'), 'utf-8')
 
-// sha256 of prompt.md as committed BEFORE the role markers were added (commit
-// 93ba353). The default render must still hash to this. If you change the
-// default text ON PURPOSE, refresh it with:
+// sha256 of the DEFAULT render of prompt.md as of the 2026-09-02 stale sweep.
+// The default render must still hash to this. If you change the default text
+// ON PURPOSE, refresh it with:
 //   bun -e 'import fs from "node:fs"; import {createHash} from "node:crypto";
 //     import {renderPromptForRole} from "./src/server/lib/role";
 //     console.log(createHash("sha256").update(renderPromptForRole(fs.readFileSync("prompt.md","utf-8"),"default")).digest("hex"))'
-const DEFAULT_PROMPT_SHA256 = 'fae42e7e6512236523b245c806dcc113abc7869d1ffe5f04b6550dda6d209c1a'
+const DEFAULT_PROMPT_SHA256 = 'c56a83ddbf60c8d18a290fb15ae4ab62f529220a740f2df0ca4a6e4622e82c62'
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
 
@@ -122,8 +128,28 @@ describe('prompt.md role rendering', () => {
     }
   })
 
-  test('the default render is byte-for-byte the pre-diet prompt.md', () => {
+  test('the default render is pinned by hash', () => {
     expect(sha256(DEFAULT)).toBe(DEFAULT_PROMPT_SHA256)
+  })
+
+  test('provably stale content is gone from every render', () => {
+    for (const r of [DEFAULT, HUNTER]) {
+      // Devastator delivered 2026-08-29, BoM locks cleared 2026-08-28 (scripts/clear-devastator-bom.ts).
+      expect(r).not.toContain('## BoM LOCK')
+      expect(r).not.toContain('NO BoM SALES')
+      expect(r).not.toContain('28-item Devastator lock list')
+      // The shield_emitter blocker only ever gated a Devastator line.
+      expect(r).not.toContain('shield_emitter')
+      // The fleet funding sweep was retired 2026-08-28.
+      expect(r).not.toContain('send_gift to Sapper')
+      // The Caravan was delivered to Cass Margin.
+      expect(r).not.toContain('is the long-term goal')
+      expect(r).not.toContain('caravan-class hauler is the goal')
+    }
+    // The still-true facts were relocated, not lost: the harness lock mechanism and the HALT rule.
+    expect(DEFAULT).toContain('## COMMISSION LOCKS')
+    expect(DEFAULT).toContain('correct, not a bug')
+    expect(DEFAULT).toContain('HALT: tempted to sell <item> x<qty>')
   })
 
   test('no render leaks markers or the MAPPING comment', () => {
@@ -134,10 +160,10 @@ describe('prompt.md role rendering', () => {
     }
   })
 
-  test('a hunter does not receive the trading, mining or BoM doctrine', () => {
+  test('a hunter does not receive the trading, mining or commission doctrine', () => {
     const excludedHeadings = [
       '## Getting Started', '## Empires', '## Security',
-      '## BoM LOCK', '## 🔒 INVIOLABLE RULE — NO BoM SALES', '## 💰 RESERVE DOCTRINE',
+      '# INVIOLABLE — MONEY & MATERIAL', '## COMMISSION LOCKS', '## 💰 RESERVE DOCTRINE',
       '## 💼 PROCUREMENT CAPS', '## 🚨 BULK-BUY VERIFICATION', '## TRADING DISCIPLINE',
       '## HOW TO TRADE', '## MINING DISCIPLINE', '## RADIOACTIVE EXTRACTION GUARD',
       '## CRAFT JOB SAFETY', '## 🏛️ FACTION STORAGE', '## 📒 STORAGE LEDGER',
@@ -153,6 +179,11 @@ describe('prompt.md role rendering', () => {
       'Register** with a unique username', 'NEVER send your SpaceMolt password',
       'mine(resource="tritium_ice")', 'craft(job_id=', 'Fleet Munitions Vault',
       '28-item Devastator lock list',
+      // Residue that is not the hunter's mission: commission bookkeeping, the storage
+      // ledger, mining ladders, crafting, the fleet-wide leviathan ban (his directive
+      // holds a Leviathan Bounty), and "query constantly" (the briefing injects state).
+      'BoM', 'Devastator', 'STORAGE LEDGER', 'mining_laser    I:5', 'CRAFT IT',
+      'Do not hunt leviathans', 'use them constantly', 'Save early',
     ]) {
       expect(HUNTER).not.toContain(s)
     }
@@ -181,6 +212,12 @@ describe('prompt.md role rendering', () => {
     // The macro text no longer cites a lock list, but still tells the agent to exclude what it keeps.
     expect(HUNTER).toContain('sell_cargo(exclude=[...])')
     expect(HUNTER).toContain('goto_system(target_system')
+    // The hunter's own blocks keep the load-bearing technique and reconcile with his directive.
+    expect(HUNTER).toContain('under a paid bounty contract you hold')
+    expect(HUNTER).toContain('`scan` the creature first')
+    expect(HUNTER).toContain('uninstall_mod every module worth keeping')
+    expect(HUNTER).toContain('jettison is legal only if EVERY rung fails')
+    expect(HUNTER).toContain('shield_booster I:25')
   })
 
   test('the hunter render is materially smaller', () => {
@@ -260,12 +297,12 @@ describe('buildSystemPrompt renders by role', () => {
 
   const FULL_LIST = new LibV2Connection('https://game.spacemolt.com').getCommandList()
 
-  test('a default profile gets the pre-diet prompt.md and the untouched command list', async () => {
+  test('a default profile gets the default prompt.md and the untouched command list', async () => {
     const { buildSystemPrompt } = await import('../src/server/lib/agent')
     const sys = buildSystemPrompt(NOVA, FULL_LIST)
     expect(sys).toContain(`## Game Knowledge\n${renderPromptForRole(PROMPT_MD, 'default')}\n`)
     expect(sys).toContain(FULL_LIST)
-    expect(sys).toContain('## BoM LOCK')
+    expect(sys).toContain('## COMMISSION LOCKS')
   })
 
   test('a hunter profile gets the hunter prompt.md and the scoped command list', async () => {
@@ -273,7 +310,7 @@ describe('buildSystemPrompt renders by role', () => {
     const sys = buildSystemPrompt(MORG, FULL_LIST)
     expect(sys).toContain(`## Game Knowledge\n${renderPromptForRole(PROMPT_MD, 'hunter')}\n`)
     expect(sys).toContain(formatLibCommandList('hunter'))
-    expect(sys).not.toContain('## BoM LOCK')
+    expect(sys).not.toContain('## COMMISSION LOCKS')
     expect(sys).not.toContain('\n- mine(')
     expect(sys).not.toContain('\n- craft(')
     expect(sys).toContain('\n- attack(')
