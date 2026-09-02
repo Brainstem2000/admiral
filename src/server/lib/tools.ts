@@ -3061,7 +3061,33 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
       }
       await macroSleep(macroStepDelayMs(conn))
     }
-    const wantPoi = String(args.poi ?? '').trim()
+    let wantPoi = String(args.poi ?? '').trim()
+
+    // No POI named? Find one. Creatures live at belts, gas clouds and ice
+    // fields — never at the star you arrive on. Morg'Thar jumped into
+    // GSC-0030 (which has both a gas cloud and an ice field), called a bare
+    // hunt_here() at the arrival POI, got nothing, and jumped away. The macro
+    // knows how to read get_system; the model should not have to.
+    if (!wantPoi) {
+      const cur = String((conn.getLocalState?.()?.location as Record<string, unknown> | undefined)?.poi_id ?? '')
+      const probe = await conn.execute('get_nearby')
+      const here = probe.error ? [] : collectTargets(probe.structuredContent ?? probe.result)
+      if (here.filter((t) => t.kind !== 'npc').length === 0) {
+        const sys = await conn.execute('get_system')
+        if (!sys.error) {
+          const sd = (sys.structuredContent ?? sys.result) as Record<string, unknown> | undefined
+          const node = (sd?.system ?? sd) as Record<string, unknown> | undefined
+          const pois = Array.isArray(node?.pois) ? node!.pois as Array<Record<string, unknown>> : []
+          const hunting = pois.filter((p) => /asteroid_belt|gas_cloud|ice_field|nebula|debris/i.test(String(p.type ?? '')))
+          const pick = hunting.find((p) => String(p.id ?? '') && String(p.id) !== cur)
+          if (pick) {
+            wantPoi = String(pick.id)
+            prelude.push(`No targets at ${cur || 'arrival POI'}; moving to ${pick.name ?? wantPoi} (${pick.type}).`)
+          }
+        }
+      }
+    }
+
     if (wantPoi) {
       const here = String((conn.getLocalState?.()?.location as Record<string, unknown> | undefined)?.poi_id ?? '')
       if (here !== wantPoi) {

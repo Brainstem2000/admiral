@@ -19,6 +19,7 @@ interface Scenario {
   targets?: any
   docked?: boolean
   failTravel?: string
+  systemPois?: any[]
   hullSeq?: number[]        // hull reported on successive status reads
   battleTicks?: number      // how many reads report an active battle
   failAttack?: string
@@ -27,6 +28,7 @@ interface Scenario {
 function harness(s: Scenario) {
   const calls: Array<{ cmd: string; args: any }> = []
   let undocked = false
+  let travelled = false
   let reads = 0
   let battleReads = 0
   const hullSeq = s.hullSeq ?? [1785]
@@ -50,7 +52,13 @@ function harness(s: Scenario) {
       calls.push({ cmd, args })
       if (cmd === 'undock') { undocked = true; return { result: 'ok' } }
       if (cmd === 'travel' && s.failTravel) return { error: { code: s.failTravel, message: 'no such poi' } }
-      if (cmd === 'get_nearby') return { result: s.targets ?? { creatures: [], pirates: [], empire_npcs: [], nearby: [] } }
+      if (cmd === 'travel') { travelled = true; return { result: 'ok' } }
+      if (cmd === 'get_system') return { result: { system: { id: 'gsc_0030', pois: s.systemPois ?? [] } } }
+      if (cmd === 'get_nearby') {
+        // Arrival POI is empty until we travel to the hunting POI.
+        if (s.systemPois && !travelled) return { result: { creatures: [], pirates: [], empire_npcs: [], nearby: [] } }
+        return { result: s.targets ?? { creatures: [], pirates: [], empire_npcs: [], nearby: [] } }
+      }
       if (cmd === 'attack' && s.failAttack) return { error: { code: s.failAttack, message: 'nope' } }
       if (cmd === 'wrecks') return { result: { wrecks: [{ wreck_id: 'wr_1', name: 'Grazer wreck' }] } }
       return { result: 'ok' }
@@ -148,6 +156,30 @@ describe('hunt_here', () => {
     expect(out).toContain('ABORT')
     expect(out).toContain('nowhere')
     expect(calls.some(c => c.cmd === 'attack')).toBe(false)
+  }, 60_000)
+
+
+  test('with no poi given it finds the belt/gas/ice POI itself instead of hunting the star', async () => {
+    // Morg'Thar jumped into GSC-0030 — which has a gas cloud AND an ice field —
+    // called a bare hunt_here() at the arrival POI, got nothing and jumped away.
+    const { ctx, calls } = harness({
+      targets: GRAZERS, battleTicks: 1,
+      systemPois: [
+        { id: 'gsc_0030_star', name: 'GSC-0030 Star', type: 'sun' },
+        { id: 'gsc_0030_emission_nebula', name: 'Emission Nebula', type: 'gas_cloud' },
+      ],
+    })
+    const out = await executeTool('hunt_here', { max_kills: 1 }, ctx)
+    expect(calls.find(c => c.cmd === 'travel')?.args?.target_poi).toBe('gsc_0030_emission_nebula')
+    expect(out).toContain('No targets at')
+    expect(calls.some(c => c.cmd === 'attack')).toBe(true)
+  }, 60_000)
+
+  test('a system with no hunting POI at all still reports cleanly', async () => {
+    const { ctx, calls } = harness({ systemPois: [{ id: 'star', name: 'Star', type: 'sun' }] })
+    const out = await executeTool('hunt_here', {}, ctx)
+    expect(calls.some(c => c.cmd === 'travel')).toBe(false)
+    expect(out).toContain('NO KILLS')
   }, 60_000)
 
   test('a failed attack stops the macro instead of spinning', async () => {
