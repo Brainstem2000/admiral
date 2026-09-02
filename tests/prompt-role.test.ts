@@ -42,7 +42,7 @@ const PROMPT_MD = fs.readFileSync(path.join(REPO, 'prompt.md'), 'utf-8')
 //   bun -e 'import fs from "node:fs"; import {createHash} from "node:crypto";
 //     import {renderPromptForRole} from "./src/server/lib/role";
 //     console.log(createHash("sha256").update(renderPromptForRole(fs.readFileSync("prompt.md","utf-8"),"default")).digest("hex"))'
-const DEFAULT_PROMPT_SHA256 = 'c56a83ddbf60c8d18a290fb15ae4ab62f529220a740f2df0ca4a6e4622e82c62'
+const DEFAULT_PROMPT_SHA256 = '17b2b66ceb5d876a93a3c103a1f8b69d429a08078005c3b179ebcce93a461ebd'
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
 
@@ -111,6 +111,20 @@ describe('resolveAgentRole', () => {
     expect(resolveAgentRole(profile({ name: 'Zed', directive: '', group_name: 'Combat Wing' }))).toBe('hunter')
     expect(resolveAgentRole(profile({ name: 'Zed', directive: '', group_name: '' }))).toBe('default')
   })
+})
+
+describe('macro tools are advertised in the prompt', () => {
+  // A macro the prompt never mentions does not get called. hunt_here shipped in
+  // the tool list on 2026-09-02 but no prompt block named it, and Morg'Thar went
+  // on hand-flying combat (and skipping it) until MACRO TOOLS listed it.
+  for (const role of ['hunter', 'default'] as const) {
+    test(`${role} render advertises hunt_here`, () => {
+      const r = renderPromptForRole(PROMPT_MD, role)
+      expect(r).toContain('hunt_here')
+      expect(r).toContain('goto_system')
+      expect(r).toContain('sell_cargo')
+    })
+  }
 })
 
 describe('prompt.md role rendering', () => {
