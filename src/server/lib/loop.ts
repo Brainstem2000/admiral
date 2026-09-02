@@ -452,7 +452,7 @@ export async function runAgentTurn(
     // acting on) — the split point is a user-message boundary, and the wrap-up
     // note is a user message. A turn's growth is bounded by the round cap and
     // the result caps; overflow mid-turn is still caught by emergency compaction.
-    if (rounds === 0) await compactContext(summaryModel, context, compaction, options, model)
+    if (rounds === 0) await compactContext(summaryModel, context, compaction, options, model, log)
 
     options?.onActivity?.('Waiting for LLM response...')
     const callStartedAt = Date.now()
@@ -785,6 +785,30 @@ function findTurnBoundary(messages: Message[], idx: number): number {
   return idx
 }
 
+/**
+ * Drop whole turns from the front until the messages fit `budget`, keeping the
+ * first message (the mission seed) and at least `MIN_RECENT_MESSAGES`.
+ *
+ * The floor under compaction. A summarizer failure used to leave the context
+ * exactly as it was, so the next call carried the same oversized history and
+ * failed identically — CyberSpock burned five retries a turn against
+ * "180,121 tokens exceeds max context window of 131,072" on 2026-09-02 and
+ * could not take a single action. Dropping history loses detail; not dropping
+ * it loses the agent.
+ */
+export function dropOldestUntilUnderBudget(messages: Message[], budget: number, cpt: number): number {
+  let total = totalMessageTokens(messages, cpt)
+  let dropped = 0
+  while (total > budget && messages.length > MIN_RECENT_MESSAGES + 1) {
+    // Never drop index 0; cut from index 1 and take orphaned tool results with it.
+    const removed = messages.splice(1, 1)[0]
+    total -= estimateMessageTokens(removed, cpt)
+    dropped++
+  }
+  if (dropped > 0) sanitizeToolPairing({ messages } as unknown as Context)
+  return dropped
+}
+
 function formatMessagesForSummary(messages: Message[]): string {
   const lines: string[] = []
   for (const msg of messages) {
@@ -827,6 +851,7 @@ async function compactContext(
   compaction?: CompactionState,
   options?: LoopOptions,
   budgetModel: Model<any> = model,
+  log?: LogFn,
 ): Promise<void> {
   // Proactively truncate oversized tool results to prevent token bloat
   for (const msg of context.messages) {
@@ -848,7 +873,15 @@ async function compactContext(
   const messageBudget = messageBudgetFor(budgetModel.contextWindow, systemPromptTokens, ratio)
   const messageTokens = totalMessageTokens(context.messages, cpt)
 
+  // The hard ceiling the provider enforces, with headroom for the reply. Even
+  // when the split below cannot find a clean boundary, the context must come
+  // back under this or every subsequent call 400s.
+  const hardCeiling = Math.max(messageBudget, Math.floor((budgetModel.contextWindow - systemPromptTokens) * 0.8))
+
   if (messageTokens < messageBudget) return
+  log?.('system',
+    `Compaction: ${context.messages.length} messages, ~${messageTokens} est. tokens vs budget ${messageBudget} ` +
+    `(system ~${systemPromptTokens}, window ${budgetModel.contextWindow}, ${cpt} chars/token) — summarizing`)
 
   const recentBudget = Math.floor(messageBudget * 0.6)
   let recentTokens = 0
@@ -864,15 +897,25 @@ async function compactContext(
   }
 
   splitIdx = findTurnBoundary(context.messages, splitIdx)
-  if (splitIdx <= 1) return
+  if (splitIdx <= 1) {
+    // No clean turn boundary to summarize at — but the context is over budget,
+    // so it cannot be left alone (that is how a history grows past the window
+    // and every call starts failing). Fall back to the floor.
+    const dropped = dropOldestUntilUnderBudget(context.messages, hardCeiling, cpt)
+    if (dropped > 0) {
+      log?.('system', `Compaction: no turn boundary to summarize at — dropped the ${dropped} oldest message(s) to fit the window`)
+    }
+    return
+  }
 
   const oldMessages = context.messages.slice(1, splitIdx)
   const recentMessages = context.messages.slice(splitIdx)
 
   let summary: string
   try {
-    summary = await summarizeViaLLM(model, oldMessages, compaction?.summary, options)
-  } catch {
+    summary = await summarizeViaLLM(model, oldMessages, compaction?.summary, options, cpt, budgetModel.contextWindow)
+  } catch (err) {
+    log?.('system', `Compaction: summarizer failed (${err instanceof Error ? err.message.slice(0, 120) : String(err)}) — keeping the previous summary and trimming instead`)
     summary = compaction?.summary
       ? compaction.summary + '\n\n(Additional context was lost due to summarization failure.)'
       : '(Earlier session context was lost.)'
@@ -887,6 +930,15 @@ async function compactContext(
   }
 
   context.messages = [context.messages[0], summaryMessage, ...recentMessages]
+
+  // Last line of defence: the kept tail can still exceed the window on its own
+  // (huge tool results, or a summarizer that failed and returned a stub).
+  const after = totalMessageTokens(context.messages, cpt)
+  if (after > hardCeiling) {
+    const dropped = dropOldestUntilUnderBudget(context.messages, hardCeiling, cpt)
+    if (dropped > 0) log?.('system', `Compaction: kept tail was still ~${after} tokens over the ${hardCeiling} ceiling — dropped ${dropped} more message(s)`)
+  }
+  log?.('system', `Compaction complete: ${context.messages.length} messages, ~${totalMessageTokens(context.messages, cpt)} est. tokens`)
 }
 
 async function summarizeViaLLM(
@@ -894,8 +946,23 @@ async function summarizeViaLLM(
   oldMessages: Message[],
   previousSummary: string | undefined,
   options?: LoopOptions,
+  cpt: number = CHARS_PER_TOKEN,
+  contextWindow?: number,
 ): Promise<string> {
-  const transcript = formatMessagesForSummary(oldMessages)
+  let transcript = formatMessagesForSummary(oldMessages)
+
+  // The transcript is the thing being compacted, so it is by definition large —
+  // and a transcript bigger than the summarizer's own window fails EVERY time,
+  // which is how a context that needed compaction never got any (CyberSpock,
+  // 2026-09-02: a ~160k-token history, five failed summaries, five 400s, zero
+  // actions). Keep the TAIL: the end of the transcript is what the agent was
+  // doing most recently, which is what the summary is for.
+  if (contextWindow) {
+    const maxTranscriptChars = Math.floor(Math.max(4_000, (contextWindow * 0.5 - SUMMARY_MAX_TOKENS)) * cpt)
+    if (transcript.length > maxTranscriptChars) {
+      transcript = '...(earlier transcript omitted)...\n' + transcript.slice(transcript.length - maxTranscriptChars)
+    }
+  }
 
   let prompt = 'Summarize this game session transcript. '
   prompt += 'Focus on: (1) what the agent was CURRENTLY DOING and what it planned to do next, '
@@ -1044,9 +1111,11 @@ export async function completeWithRetry(
       }
 
       // Emergency compaction: if "prompt is too long", force-compact context
-      const isOverflow = lastError.message.includes('prompt is too long') ||
-        lastError.message.includes('too many tokens') ||
-        lastError.message.includes('maximum context length')
+      // Provider wordings differ: Anthropic "prompt is too long", OpenAI-style
+      // "maximum context length", oMLX "400 Prompt too long: 180121 tokens
+      // exceeds max context window of 131072 tokens" (which slipped past the
+      // exact-phrase test and burned all five retries on 2026-09-02).
+      const isOverflow = /prompt (is )?too long|too many tokens|maximum context length|exceeds (the )?max(imum)? context|context window/i.test(lastError.message)
       if (isOverflow && context.messages.length > 4) {
         log('system', `Emergency compaction: context overflow detected (${context.messages.length} messages). Force-compacting...`)
         const compactModel = options?.compactionModel || model
@@ -1213,9 +1282,10 @@ async function emergencyCompact(
   const oldMessages = context.messages.slice(1, splitIdx)
   const recentMessages = context.messages.slice(splitIdx)
 
+  const cpt = charsPerTokenFor(model)
   let summary: string
   try {
-    summary = await summarizeViaLLM(model, oldMessages, compaction?.summary, options)
+    summary = await summarizeViaLLM(model, oldMessages, compaction?.summary, options, cpt, model.contextWindow)
   } catch {
     // Last resort: just drop old messages without summarizing
     summary = compaction?.summary || '(Earlier session context was dropped due to overflow.)'
@@ -1230,6 +1300,11 @@ async function emergencyCompact(
   }
 
   context.messages = [context.messages[0], summaryMessage, ...recentMessages]
+
+  // Emergency compaction runs because the provider REFUSED the request; it must
+  // return something that fits, not merely something smaller.
+  const sysToks = context.systemPrompt ? estimateTokens(context.systemPrompt, cpt) : 0
+  dropOldestUntilUnderBudget(context.messages, Math.floor((model.contextWindow - sysToks) * 0.7), cpt)
 }
 
 function sleep(ms: number): Promise<void> {
