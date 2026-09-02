@@ -9,7 +9,7 @@
 import type { GameConnection, CommandResult } from './connections/interface'
 import type { Profile } from '../../shared/types'
 import * as dbModule from './db'
-import { listObligations, getProfile, listPlaybook, getStorageSummaryForProfile, getNavIntel, getHuntIntel, getDb, getKnownLinks } from './db'
+import { listObligations, getProfile, listPlaybook, getStorageSummaryForProfile, getNavIntel, getHuntIntel, getDb, getKnownLinks, getGalaxyMap } from './db'
 import type { ObligationRow } from './db'
 import { galaxyMarketLines, directiveMarketLines } from './galaxy-market'
 
@@ -233,14 +233,25 @@ export function hopsFrom(origin: string, maxDepth = 4): Map<string, number> {
   const now = Date.now()
   if (!linkAdjacency || now - linkAdjacency.at > 60_000) {
     const adj = new Map<string, string[]>()
+    const link = (a: string, b: string) => {
+      if (!a || !b) return
+      if (!adj.has(a)) adj.set(a, [])
+      if (!adj.has(b)) adj.set(b, [])
+      adj.get(a)!.push(b)
+      adj.get(b)!.push(a)
+    }
     try {
-      for (const { a, b } of getKnownLinks()) {
-        if (!adj.has(a)) adj.set(a, [])
-        if (!adj.has(b)) adj.set(b, [])
-        adj.get(a)!.push(b)
-        adj.get(b)!.push(a)
+      for (const { a, b } of getKnownLinks()) link(a, b)
+    } catch { /* no learned graph */ }
+    // The learned graph only holds edges the fleet has flown; the galaxy_map
+    // seed charts every system's connections (505 systems). Without the union,
+    // hop counts existed for one system in six (Cloverfield showed as 6 jumps
+    // from Frontier via flown edges; the map makes it 1 from Zosma).
+    try {
+      for (const s of getGalaxyMap()?.systems ?? []) {
+        for (const c of (s as { connections?: string[] }).connections ?? []) link(String(s.system_id), String(c))
       }
-    } catch { /* no graph, no hops */ }
+    } catch { /* no seed map, learned edges only */ }
     linkAdjacency = { at: now, adj }
   }
   const dist = new Map<string, number>([[origin, 0]])

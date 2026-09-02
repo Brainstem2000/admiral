@@ -1068,7 +1068,12 @@ export class FleetIntelCollector {
     if (grounds.length > 0) {
       const norm = (s: string) => (s || '').toLowerCase().replace(/_/g, ' ').trim()
       const here = currentSystem ? grounds.find(g => norm(g.system_name) === norm(currentSystem)) : undefined
-      const ordered = here ? [here, ...grounds.filter(g => g !== here)] : grounds
+      // Nearest first when the map knows the distance; unknown routes last.
+      const hopOf = (s: typeof grounds[number]) => opts.hops?.(idOf((s as { system_id?: string }).system_id, s.system_name))
+      const byHops = opts.hops
+        ? [...grounds].sort((x, y) => (hopOf(x) ?? 999) - (hopOf(y) ?? 999))
+        : grounds
+      const ordered = here ? [here, ...byHops.filter(g => g !== here)] : byHops
       const lines = ordered.slice(0, 6).map(s => {
         const types = (s.poi_types || '')
           .split(',')
