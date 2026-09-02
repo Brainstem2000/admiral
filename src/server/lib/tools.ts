@@ -112,6 +112,7 @@ export const allTools: Tool[] = [
     name: 'hunt_here',
     description: 'MACRO: hunt everything beatable at your CURRENT POI in one bounded code loop — scan, pick a target, attack, close range, kill it, loot the wreck, repeat. Skips empire NPCs and police, skips anything tougher than your hull allows, and breaks off if your hull drops below the floor. Use this instead of attack/advance/loot by hand. Returns kills, loot and why it stopped.',
     parameters: Type.Object({
+      poi: Type.Optional(Type.String({ description: 'POI id to hunt at (e.g. "krynn_asteroid_belt"). The macro undocks and travels there first. Omit to hunt where you already are.' })),
       max_kills: Type.Optional(Type.Number({ description: 'Stop after this many kills (default 3, max 8)' })),
       hull_floor_pct: Type.Optional(Type.Number({ description: 'Break off and stop hunting below this hull percentage (default 60)' })),
       species: Type.Optional(Type.String({ description: 'Only hunt this species/name (e.g. "belt_grazer" for a Grazer Cull contract). Omit to hunt anything beatable.' })),
@@ -3042,6 +3043,39 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
     return `hunt_here ABORT: hull is ${start.hull}/${start.maxHull} (${hullPct(start).toFixed(0)}%), already under the ${hullFloorPct}% floor. Repair before hunting.`
   }
 
+  // Get to the hunting ground ourselves. A turn ends on the first action, so a
+  // model handed a three-step plan ("undock, travel, hunt") re-reads its TODO
+  // next turn and starts again at step one — Morg'Thar undocked and re-docked
+  // in a loop for twenty minutes on 2026-09-02 and never reached the hunt. One
+  // call has to cover the whole stop.
+  const prelude: string[] = []
+  {
+    let gs: Record<string, unknown> | null = null
+    try { gs = conn.getLocalState?.() ?? null } catch { gs = null }
+    const loc = (gs?.location ?? {}) as Record<string, unknown>
+    if (loc.docked_at) {
+      const u = await macroAction(ctx, 'undock', undefined, 3)
+      prelude.push(u.ok ? 'Undocked.' : `Undock failed [${u.errorCode}].`)
+      if (!u.ok && u.errorCode !== 'not_docked') {
+        return `hunt_here ABORT: could not undock [${u.errorCode}] ${u.errorMessage ?? ''}`.trim()
+      }
+      await macroSleep(macroStepDelayMs(conn))
+    }
+    const wantPoi = String(args.poi ?? '').trim()
+    if (wantPoi) {
+      const here = String((conn.getLocalState?.()?.location as Record<string, unknown> | undefined)?.poi_id ?? '')
+      if (here !== wantPoi) {
+        const t = await macroAction(ctx, 'travel', { target_poi: wantPoi }, 6)
+        if (!t.ok) {
+          return `hunt_here ABORT: could not travel to "${wantPoi}" [${t.errorCode}] ${t.errorMessage ?? ''}. ` +
+            `Run get_system to see the POI ids here.`.trim()
+        }
+        prelude.push(`Travelled to ${wantPoi}.`)
+        await macroSleep(macroStepDelayMs(conn))
+      }
+    }
+  }
+
   const kills: string[] = []
   const looted: string[] = []
   const skipped: string[] = []
@@ -3132,6 +3166,7 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
 
   const end = await readShip()
   return [
+    prelude.join(' '),
     `hunt_here ${kills.length > 0 ? 'DONE' : 'NO KILLS'}: ${kills.length} kill(s)${kills.length ? ` (${kills.join(', ')})` : ''}.`,
     looted.length ? `Looted ${looted.length} wreck(s).` : 'No wrecks looted.',
     `Stopped: ${stopReason}.`,

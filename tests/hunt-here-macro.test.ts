@@ -17,6 +17,8 @@ import { executeTool } from '../src/server/lib/tools'
 
 interface Scenario {
   targets?: any
+  docked?: boolean
+  failTravel?: string
   hullSeq?: number[]        // hull reported on successive status reads
   battleTicks?: number      // how many reads report an active battle
   failAttack?: string
@@ -24,6 +26,7 @@ interface Scenario {
 
 function harness(s: Scenario) {
   const calls: Array<{ cmd: string; args: any }> = []
+  let undocked = false
   let reads = 0
   let battleReads = 0
   const hullSeq = s.hullSeq ?? [1785]
@@ -39,12 +42,14 @@ function harness(s: Scenario) {
       if (inBattle) battleReads++
       return {
         ship: { hull, max_hull: 1785 },
-        location: { system_id: 'krynn', docked_at: null },
+        location: { system_id: 'krynn', docked_at: s.docked && !undocked ? 'crimson_war_citadel' : null, poi_id: 'start_poi' },
         ...(inBattle ? { active_battle: { battle_id: 'b1', your_zone: 'outer' } } : {}),
       }
     },
     execute: async (cmd: string, args?: any) => {
       calls.push({ cmd, args })
+      if (cmd === 'undock') { undocked = true; return { result: 'ok' } }
+      if (cmd === 'travel' && s.failTravel) return { error: { code: s.failTravel, message: 'no such poi' } }
       if (cmd === 'get_nearby') return { result: s.targets ?? { creatures: [], pirates: [], empire_npcs: [], nearby: [] } }
       if (cmd === 'attack' && s.failAttack) return { error: { code: s.failAttack, message: 'nope' } }
       if (cmd === 'wrecks') return { result: { wrecks: [{ wreck_id: 'wr_1', name: 'Grazer wreck' }] } }
@@ -119,6 +124,30 @@ describe('hunt_here', () => {
     })
     await executeTool('hunt_here', { max_kills: 1, species: 'belt_grazer' }, ctx)
     expect(calls.find(c => c.cmd === 'attack')?.args?.id).toBe('crt_grz')
+  }, 60_000)
+
+
+  test('undocks and travels to the POI itself — one call covers the whole stop', async () => {
+    // A turn ends on the first action, so a model handed "undock, travel, hunt"
+    // re-reads its TODO next turn and starts again at step one. Morg'Thar
+    // undocked and re-docked in a loop for twenty minutes on 2026-09-02 and
+    // never reached the hunt. The macro has to own the whole sequence.
+    const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 1, docked: true })
+    const out = await executeTool('hunt_here', { poi: 'krynn_belt', max_kills: 1 }, ctx)
+    const order = calls.map(c => c.cmd)
+    expect(order.indexOf('undock')).toBeGreaterThanOrEqual(0)
+    expect(order.indexOf('travel')).toBeGreaterThan(order.indexOf('undock'))
+    expect(order.indexOf('attack')).toBeGreaterThan(order.indexOf('travel'))
+    expect(calls.find(c => c.cmd === 'travel')?.args?.target_poi).toBe('krynn_belt')
+    expect(out).toContain('Undocked')
+  }, 60_000)
+
+  test('a travel failure aborts with the POI named instead of hunting the wrong place', async () => {
+    const { ctx, calls } = harness({ targets: GRAZERS, docked: true, failTravel: 'poi_not_found' })
+    const out = await executeTool('hunt_here', { poi: 'nowhere' }, ctx)
+    expect(out).toContain('ABORT')
+    expect(out).toContain('nowhere')
+    expect(calls.some(c => c.cmd === 'attack')).toBe(false)
   }, 60_000)
 
   test('a failed attack stops the macro instead of spinning', async () => {
