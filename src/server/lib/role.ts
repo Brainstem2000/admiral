@@ -15,7 +15,11 @@ export type AgentRole = 'hunter' | 'default'
 /** Every role a prompt.md marker may name. `all` is a marker value, not a role. */
 export const PROMPT_ROLE_MARKERS: ReadonlySet<string> = new Set(['all', 'hunter', 'default'])
 
-const NON_COMBAT_HEAD_RX = /standby|stay docked|crafter|coordinator|verify-only|miner|no (pirate )?hunt/i
+const NON_COMBAT_HEAD_RX = /standby|stay docked|crafter|coordinator|verify-only|miner|prospector|no (pirate )?hunt/i
+/** The job label in the profile NAME ("Zibal Prospector", "Grit Vane - Miner")
+ *  is the operator's own classification and beats a combat word in the
+ *  directive head: Zibal's head reads "EXPLORER & HUNTER" but he mines. */
+const NON_COMBAT_NAME_RX = /prospector|miner|hauler|trader|smuggler|crafter|courier/i
 const COMBAT_HEAD_RX = /combat specialist|bounty.?hunt|\bhunter\b|warrior/i
 const COMBAT_NAME_RX = /warrior|hunter/i
 const COMBAT_GROUP_RX = /combat|hunt(er|ing)?|warrior/i
@@ -23,6 +27,7 @@ const COMBAT_GROUP_RX = /combat|hunt(er|ing)?|warrior/i
 export function resolveAgentRole(profile: Pick<Profile, 'name' | 'directive'> & { group_name?: string | null }): AgentRole {
   const head = (profile.directive || '').slice(0, 600)
   if (NON_COMBAT_HEAD_RX.test(head)) return 'default'
+  if (NON_COMBAT_NAME_RX.test(profile.name || '')) return 'default'
   if (COMBAT_HEAD_RX.test(head) || COMBAT_NAME_RX.test(profile.name || '') || COMBAT_GROUP_RX.test(profile.group_name || '')) {
     return 'hunter'
   }

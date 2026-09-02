@@ -261,6 +261,40 @@ export function classifyToolCall(
   return isQueryCommand(name, a) ? 'query' : 'action'
 }
 
+/** A tool call the model emitted as TEXT. gpt-oss on oMLX sometimes prints
+ *  `{"command":"hunt","args":{"id":"crt_…"}}` as its whole reply instead of a
+ *  tool_call (observed 39 times in 90 minutes on Morg'Thar, 2026-09-02). When
+ *  the entire reply is one JSON object shaped like a game() call — or a
+ *  {name, arguments} call — rewrite the assistant message in place into the
+ *  call it meant, so it executes now instead of costing a retry round. Hosted
+ *  models never answer this way, so the strict shape check makes this inert
+ *  for them. */
+export function recoverToolCallFromText(response: AssistantMessage, log: LogFn): boolean {
+  if (response.content.some((c) => c.type === 'toolCall')) return false
+  const texts = response.content.filter((c): c is { type: 'text'; text: string } => c.type === 'text' && typeof (c as any).text === 'string')
+  if (texts.length !== 1) return false
+  const raw = texts[0].text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '').trim()
+  if (!raw.startsWith('{') || !raw.endsWith('}')) return false
+  let obj: any
+  try { obj = JSON.parse(raw) } catch { return false }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false
+  let name: string | undefined
+  let args: Record<string, unknown> = {}
+  if (typeof obj.command === 'string' && obj.command.trim()) {
+    name = 'game'
+    args = { command: obj.command.trim() }
+    if (obj.args && typeof obj.args === 'object' && !Array.isArray(obj.args)) args.args = obj.args
+  } else if (typeof obj.name === 'string' && obj.name.trim() && (obj.arguments === undefined || (typeof obj.arguments === 'object' && !Array.isArray(obj.arguments)))) {
+    name = obj.name.trim()
+    args = (obj.arguments ?? {}) as Record<string, unknown>
+  }
+  if (!name) return false
+  const call: ToolCall = { type: 'toolCall', id: `recovered_${Date.now().toString(36)}`, name, arguments: args }
+  response.content = response.content.map((c) => (c === texts[0] ? call : c)) as typeof response.content
+  log('system', `Recovered a tool call the model emitted as text: ${name}(${JSON.stringify(args).slice(0, 140)})`)
+  return true
+}
+
 /** Result prefixes that mean "the game did NOT do it" — see executeTool.
  *  Built on demand: tools.ts → agent-manager → agent → loop → tools is an
  *  import cycle, so the sentinels are still in their temporal dead zone when
@@ -298,11 +332,19 @@ const TEXT_ONLY_RETRY_NOTE =
   `Do not describe it; call it.`
 
 const WRAPUP_NOTE_ACTION =
-  `✅ ACTION DONE — this turn ends here; one action per turn. You have not updated your TODO ` +
-  `this turn, so your remaining tool calls are restricted to update_todo and update_memory ` +
-  `(anything else will be refused, not run).\n\n` +
+  `✅ ACTION DONE — this turn ends here; one action per turn. It has been a full cycle of ` +
+  `rounds since you last updated your TODO, so your remaining tool calls are restricted to ` +
+  `update_todo and update_memory (anything else will be refused, not run).\n\n` +
   `Replace the TODO now with what you verified, what you just did, and the single next action ` +
   `— so the next turn resumes instead of re-deriving all of this.`
+
+/** Rounds since each profile last wrote its TODO, carried ACROSS turns. The
+ *  operator wants the TODO refreshed once per cycle of `maxRounds` rounds, not
+ *  after every action: with turns ending on the first action, a per-action
+ *  wrap-up produced a TODO rewrite every ~20s and provoked prose replies
+ *  ("TODO Updated …") on the next round instead of actions. */
+const roundsSinceTodoWrite = new Map<string, number>()
+export function resetTodoCycle(profileId: string): void { roundsSinceTodoWrite.delete(profileId) }
 
 export async function runAgentTurn(
   model: Model<any>,
@@ -503,6 +545,7 @@ export async function runAgentTurn(
 
     context.messages.push(response)
 
+    recoverToolCallFromText(response, log)
     const toolCalls = response.content.filter((c): c is ToolCall => c.type === 'toolCall')
 
     const textParts = response.content
@@ -609,7 +652,7 @@ export async function runAgentTurn(
       if (result.startsWith(COOLDOWN_BLOCKED_SENTINEL)) cooldownBlocked = true
       if (result.startsWith(LOOP_FLUSH_SENTINEL)) loopFlush = true
       if (isSuccessfulActionResult(kind, toolCall.name, result)) actionSucceeded = true
-      if (toolCall.name === 'update_todo') wroteTodo = true
+      if (toolCall.name === 'update_todo') { wroteTodo = true; roundsSinceTodoWrite.set(profileId, 0) }
       if (toolCall.name === 'update_memory') wroteMemory = true
       if (result.startsWith('Error: [connection_failed]')) connectionFailures++
       const isError = result.startsWith('Error')
@@ -647,9 +690,13 @@ export async function runAgentTurn(
     }
 
     rounds++
+    const sinceTodo = (roundsSinceTodoWrite.get(profileId) ?? 0) + 1
+    roundsSinceTodoWrite.set(profileId, sinceTodo)
 
     // One action per turn. A successful (or queued) game action is the turn's
-    // decision; everything after it is either recording state or waste.
+    // decision; everything after it is either recording state or waste. The
+    // TODO is refreshed once per cycle of `maxRounds` rounds (counted across
+    // turns), or at the cap — not after every action.
     if (actionPending || actionSucceeded) {
       const what = actionPending ? 'Action pending' : 'Action completed'
       if (endTurnAfterAction) {
@@ -658,8 +705,12 @@ export async function runAgentTurn(
           return 'completed'
         }
         if (!wrapUpInjected) {
-          injectWrapUp('action')
-          continue
+          if (sinceTodo >= maxRounds) {
+            injectWrapUp('action')
+            continue
+          }
+          log('system', `${what} — ending turn (TODO refresh due in ${maxRounds - sinceTodo} round(s))`)
+          return 'completed'
         }
       } else if (actionPending) {
         // Legacy behaviour: a queued action ends the turn immediately.

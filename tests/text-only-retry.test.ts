@@ -95,6 +95,36 @@ describe('text-only first round', () => {
     expect(round).toBe(2)
   }, 30_000)
 
+  test('a game() call printed as JSON text is executed as the call it meant, with no retry', async () => {
+    let round = 0
+    const c = ctx()
+    const executed: string[] = []
+    const conn = stubConnection()
+    conn.execute = async (command: string) => { executed.push(command); return { result: 'ok' } }
+    const logs: string[] = []
+    const { runAgentTurn } = await loadLoop(async () => {
+      round++
+      if (round === 1) return assistantText('{\n  "command": "get_status",\n  "args": {}\n}')
+      return assistantCall(`w${round}`)
+    })
+
+    const outcome = await runAgentTurn(
+      model(), c, conn, 'p-text-4', 'Test',
+      ((t: string, s: string) => { logs.push(`${t}:${s}`) }) as any,
+      { value: '' } as any, { value: '' } as any,
+      { maxToolRounds: 4 },
+    )
+
+    expect(outcome).toBe('completed')
+    expect(executed[0]).toBe('get_status')
+    expect(logs.some((l) => l.includes('Recovered a tool call'))).toBe(true)
+    expect(c.messages.some((m: any) => m.role === 'user' && /text, not an action/.test(m.content))).toBe(false)
+    // The rewritten assistant message and its result are paired, so the history stays valid.
+    const first = c.messages.find((m: any) => m.role === 'assistant')
+    expect(first.content[0].type).toBe('toolCall')
+    expect(c.messages.some((m: any) => m.role === 'toolResult' && m.toolCallId === first.content[0].id)).toBe(true)
+  }, 30_000)
+
   test('a response with no text at all (nothing to retry) is idle immediately', async () => {
     let round = 0
     const { runAgentTurn } = await loadLoop(async () => {
