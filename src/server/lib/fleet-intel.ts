@@ -1014,11 +1014,33 @@ export class FleetIntelCollector {
    * the cached system prompt), so newly discovered grounds never invalidate the prompt cache.
    * Empty string if nothing useful is known.
    */
-  static buildHuntingBriefing(currentSystem?: string): string {
+  static buildHuntingBriefing(currentSystem?: string, opts: HuntingBriefingOptions = {}): string {
     const sections: string[] = []
+    const idOf = (id: string | null | undefined, name: string | null | undefined) =>
+      (id || (name || '').toLowerCase().replace(/\s+/g, '_')).toLowerCase()
+    // Systems left out on purpose, with the reason — stated once at the end so
+    // the model does not fill the gap from memory (the freshest sighting on
+    // 2026-09-01 was Voss Redoubt in Alhena, a system the directive forbade).
+    const excluded = new Map<string, string>()
+    const keep = (id: string, name: string): boolean => {
+      const why = opts.exclude?.(id, name)
+      if (!why) return true
+      excluded.set(name || id, why)
+      return false
+    }
+    const hopTag = (id: string): string => {
+      const h = opts.hops?.(id)
+      if (h === undefined) return ''
+      return h === 0 ? ' [HERE]' : ` [${h} jump${h === 1 ? '' : 's'}]`
+    }
 
     // 1) Confirmed kill zones — named POIs where pirates actually spawned (get_system can't see these).
-    const zones = this.getKillZones(8)
+    // A zone is checked by its system AND by its POI: the record for Voss
+    // Redoubt carried no system at all, so only the POI name could tie it to
+    // the directive's "Alhena / Voss Redoubt … Never enter."
+    const zones = this.getKillZones(8).filter(z =>
+      keep(idOf(z.system_id, z.system_name), z.system_name || z.system_id || '') &&
+      keep(String(z.poi_id || '').toLowerCase(), String(z.poi_name || z.poi_id || '')))
     if (zones.length > 0) {
       const lines = zones.map(z => {
         const sys = z.system_name || z.system_id || '?'
@@ -1028,7 +1050,7 @@ export class FleetIntelCollector {
           ? `pirates seen (max ${z.pirate_seen})`
           : `${z.wreck_seen} pirate wreck${z.wreck_seen === 1 ? '' : 's'}`
         const fresh = z.last_pirate_at ? ` — last pirates ${z.last_pirate_at} UTC` : ''
-        return `- ${sys} → ${where}${type}: ${evid}${fresh}`
+        return `- ${sys}${hopTag(idOf(z.system_id, z.system_name))} → ${where}${type}: ${evid}${fresh}`
       })
       sections.push(
         '## CONFIRMED KILL ZONES (named spawn POIs — pirates/wrecks actually seen here)\n' +
@@ -1042,6 +1064,7 @@ export class FleetIntelCollector {
 
     // 2) Generic low-police belts (broad coverage from get_system).
     const grounds = this.getHuntingGrounds(20)
+      .filter(s => keep(idOf((s as { system_id?: string }).system_id, s.system_name), s.system_name))
     if (grounds.length > 0) {
       const norm = (s: string) => (s || '').toLowerCase().replace(/_/g, ' ').trim()
       const here = currentSystem ? grounds.find(g => norm(g.system_name) === norm(currentSystem)) : undefined
@@ -1052,7 +1075,7 @@ export class FleetIntelCollector {
           .map(t => t.replace('asteroid_belt', 'belt').replace('ice_field', 'ice').replace('gas_cloud', 'gas'))
           .join('/')
         const hereTag = here && s === here ? '  [YOU ARE HERE — hunt it]' : ''
-        return `- ${s.system_name}: ${types} | ${s.police_level} police${hereTag}`
+        return `- ${s.system_name}${hereTag ? '' : hopTag(idOf((s as { system_id?: string }).system_id, s.system_name))}: ${types} | ${s.police_level} police${hereTag}`
       })
       sections.push(
         '## NEAREST LOW-POLICE BELTS (pirate hunting grounds — scanned by your fleet)\n' +
@@ -1062,8 +1085,20 @@ export class FleetIntelCollector {
       )
     }
 
+    if (excluded.size > 0) {
+      const parts = [...excluded.entries()].map(([name, why]) => `${name} (${why})`)
+      sections.push(`## NO-GO — left out of the lists above on purpose: ${parts.join('; ')}. Do not route there from memory.`)
+    }
+
     return sections.join('\n\n')
   }
+}
+
+export interface HuntingBriefingOptions {
+  /** Return the reason a system must not be recommended, or null to keep it. */
+  exclude?: (systemId: string, systemName: string) => string | null
+  /** Jump count from the agent's position when the fleet map knows the route. */
+  hops?: (systemId: string) => number | undefined
 }
 
 /**

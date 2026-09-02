@@ -12,14 +12,15 @@ import { resolveAgentRole, renderPromptForRole, type AgentRole } from './role'
 import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
-import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest } from './tools'
+import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest, reputationLockedSystemIds } from './tools'
+import { directiveForbidsSystem } from './directive-rules'
 import { runAgentTurn, VOLATILE_STATE_HEADER, VOLATILE_STATE_END, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
-import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles } from './db'
+import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles, FORBIDDEN_SYSTEMS, assessSystemDanger } from './db'
 import { FleetIntelCollector, buildDepositBriefing } from './fleet-intel'
 import { safeTruncate } from './text-safe'
 import { LedgerCollector } from './ledger'
-import { startBriefingCollector, stopBriefingCollector, clearBriefingCache, buildSituationalBriefing, buildFactionBriefing, getCachedSystemName, ensureBriefingWarm } from './briefing'
+import { startBriefingCollector, stopBriefingCollector, clearBriefingCache, buildSituationalBriefing, buildFactionBriefing, getCachedSystemName, ensureBriefingWarm, hopsFrom } from './briefing'
 import { checkEventTriggers } from './event-watcher'
 import { ingestActionLog } from './action-log'
 import { EventEmitter } from 'events'
@@ -64,6 +65,25 @@ function getPromptMd(): string {
 /** prompt.md rendered per role (see role.ts). Role is static for a profile, so the
  *  render is memoised by role alongside the raw file — it adds no invalidation trigger
  *  to the system-prompt cache in the turn loop. */
+/** Why a system must stay out of a hunter's grounds list, or null to keep it.
+ *  Sources, in order: the fleet's hard no-go set, a station in that system that
+ *  refused this profile on reputation (this process), the agent's own directive
+ *  ("Alhena … Never enter."), and a FORBIDDEN danger grade from fleet intel. */
+function huntingExclusions(profileId: string, directive: string | null | undefined): (systemId: string, systemName: string) => string | null {
+  const locked = new Set(reputationLockedSystemIds(profileId))
+  return (systemId, systemName) => {
+    const id = systemId.toLowerCase()
+    if (FORBIDDEN_SYSTEMS.has(id)) return 'fleet no-go'
+    if (locked.has(id)) return 'its station refused you on reputation'
+    if (directiveForbidsSystem(directive, id, systemName)) return 'your directive forbids it'
+    try {
+      const d = assessSystemDanger(id)
+      if (d.grade === 'FORBIDDEN') return `fleet intel grades it ${d.grade}`
+    } catch { /* no grade, no exclusion */ }
+    return null
+  }
+}
+
 const _promptMdByRole = new Map<AgentRole, string>()
 function getPromptMdForRole(role: AgentRole): string {
   let rendered = _promptMdByRole.get(role)
@@ -763,7 +783,17 @@ export class Agent {
           (/combat specialist|bounty.?hunt|\bhunter\b|warrior/i.test(head) ||
             /combat|hunt(er|ing)?|warrior/i.test(cp?.group_name || ''))
         if (isCombat) {
-          const hunting = FleetIntelCollector.buildHuntingBriefing(getCachedSystemName(this.profileId))
+          // Never recommend ground the agent must not enter, and say how far
+          // the rest is: the top kill zone on 2026-09-01 was Voss Redoubt in
+          // Alhena — forbidden by his directive, and its station shot him.
+          const hereName = getCachedSystemName(this.profileId)
+          const hereId = hereName ? hereName.toLowerCase().trim().replace(/\s+/g, '_') : ''
+          let dist: Map<string, number> | null = null
+          try { dist = hereId ? hopsFrom(hereId) : null } catch { dist = null }
+          const hunting = FleetIntelCollector.buildHuntingBriefing(hereName, {
+            exclude: huntingExclusions(this.profileId, cp?.directive),
+            hops: dist ? (id) => dist!.get(id) : undefined,
+          })
           if (hunting) nudgeParts.push(hunting)
         }
       }

@@ -229,7 +229,7 @@ function stationDisplayName(stationId: string): string {
  *  Bounded breadth-first walk; the adjacency is rebuilt at most once a minute
  *  because this runs on every turn's cache-comparison render. */
 let linkAdjacency: { at: number; adj: Map<string, string[]> } | null = null
-function hopsFrom(origin: string, maxDepth = 4): Map<string, number> {
+export function hopsFrom(origin: string, maxDepth = 4): Map<string, number> {
   const now = Date.now()
   if (!linkAdjacency || now - linkAdjacency.at > 60_000) {
     const adj = new Map<string, string[]>()

@@ -347,6 +347,15 @@ function reputationLockoutFor(profileId: string, systemId: string | null): Reput
   return (reputationLockouts.get(profileId) ?? [])
     .find((l) => l.systemId === id && now - l.at < REPUTATION_LOCKOUT_MS) ?? null
 }
+
+/** Systems where a station refused this profile on reputation inside the
+ *  lockout window — so the hunting briefing can leave them out. */
+export function reputationLockedSystemIds(profileId: string): string[] {
+  const now = Date.now()
+  return (reputationLockouts.get(profileId) ?? [])
+    .filter((l) => !!l.systemId && now - l.at < REPUTATION_LOCKOUT_MS)
+    .map((l) => l.systemId as string)
+}
 const FAILURE_LOOP_WINDOW_MS = 5 * 60_000
 const FAILURE_LOOP_THRESHOLD = 3   // fire on the 3rd identical failure
 const FAILURE_LOOP_KEEP = 20       // per-profile history cap — this is a breaker, not a log
