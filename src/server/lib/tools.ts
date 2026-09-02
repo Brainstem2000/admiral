@@ -2340,8 +2340,11 @@ export async function executeTool(
       }
     }
 
+    // TOP OFF ALWAYS: a manual dock refuels exactly like a macro dock does.
+    const topOff = !isQuery && deepBare === 'dock' ? await autoTopOffAfterDock(ctx) : ''
+
     // The fleet record rides OUTSIDE the cap so a long map cannot cut it.
-    return truncateResult(result, deepBare) + (fleetRecord ? `\n\n${fleetRecord}` : '')
+    return truncateResult(result, deepBare) + topOff + (fleetRecord ? `\n\n${fleetRecord}` : '')
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     const errMsg = `Error executing ${command}: ${msg}`
@@ -2697,6 +2700,55 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
 // ─── Macro tools: bounded deterministic loops over game commands ───────────
 
 const macroSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
+/**
+ * TOP OFF ALWAYS (Brian, 2026-09-02): after any successful manual `dock`, refuel
+ * from the station pump before the model gets its next word. The goto_system
+ * macro has done this on its own docks since 08-29; a manual dock() did not, and
+ * fuel discipline as prose failed again today — Morg'Thar left a dry station on
+ * ~200/350 fuel for a 26-jump corridor with no station in it. Preference
+ * `auto_top_off` = 'off' disables it. Returns a note for the dock result; never throws.
+ */
+export async function autoTopOffAfterDock(ctx: ToolContext): Promise<string> {
+  if (getPreference('auto_top_off') === 'off') return ''
+  try {
+    const gs = ctx.connection.getLocalState?.() ?? null
+    const ship = (gs?.ship ?? {}) as Record<string, unknown>
+    const fuel = numOrNull(ship.fuel)
+    const max = numOrNull(ship.max_fuel ?? ship.fuel_capacity)
+    if (fuel !== null && max !== null && fuel >= max) return ' ⛽ Tank already full.'
+    await macroSleep(macroStepDelayMs(ctx.connection))
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const resp = await ctx.connection.execute('refuel')
+      if (!resp.error) {
+        const data = resp.structuredContent ?? resp.result
+        const d = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>
+        const det = (d.details && typeof d.details === 'object' ? d.details : d) as Record<string, unknown>
+        try {
+          observeTacticalResult(ctx.profileId, 'refuel', undefined, data, resp.notifications)
+          bookLedgerFromCommand('refuel', undefined, data, formatToolResult('refuel', data, resp.notifications), ctx.profileId, ctx.profileName)
+          invalidateBriefingCache(ctx.profileId, ctx.connection)
+        } catch { /* accounting must never break the dock */ }
+        const got = numOrNull(det.fuel)
+        const cost = numOrNull(det.cost)
+        const what = got !== null ? `+${got} fuel${cost !== null ? ` for ${cost}cr` : ''}` : 'topped from the station pump'
+        ctx.log('system', `Auto top-off after dock: ${what}`)
+        return ` ⛽ AUTO TOP-OFF (every dock): ${what}.`
+      }
+      const code = String(resp.error.code ?? '')
+      if (MACRO_RETRYABLE.has(code) && attempt < 2) {
+        await macroSleep(Math.max((resp.error.retry_after ?? 5) * 1000, 2000))
+        continue
+      }
+      if (code === 'station_fuel_empty') {
+        return " ⛽ AUTO TOP-OFF: this station's fuel tank is EMPTY — plan your departure fuel from another stop; never buy cells above your directive's price cap."
+      }
+      if (/full/i.test(code)) return ' ⛽ Tank already full.'
+      return ` ⛽ AUTO TOP-OFF skipped [${code}]${resp.error.message ? ': ' + String(resp.error.message).slice(0, 80) : ''}.`
+    }
+  } catch { /* never break the dock result */ }
+  return ''
+}
 
 /** Per-step pause: lib_v2 mutations already await the game tick; other modes need real pacing. */
 function macroStepDelayMs(conn: GameConnection): number {
