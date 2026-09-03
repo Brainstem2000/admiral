@@ -3086,6 +3086,37 @@ async function executeMacroTool(name: string, args: Record<string, unknown>, ctx
  * targeted, anything whose hull exceeds `MAX_TARGET_HULL_RATIO` of our own is
  * skipped, and the loop breaks off the moment hull falls under the floor.
  */
+/**
+ * Longest route goto_system will fly in one macro. This is a STRANDING GUARD,
+ * not a distance preference — every stranding this fleet has suffered began
+ * with a launch that was only barely affordable — so it stays where it is.
+ */
+export const MAX_MACRO_HOPS = 25
+
+/**
+ * Turn an over-long route into a two-leg plan naming the waypoint.
+ *
+ * The old message said "too far for one macro; refuel/plan waypoints", which is
+ * a refusal, not an instruction: Cass Margin spent a turn on 2026-09-02
+ * reasoning out a midpoint by hand for a 28-hop run. Everywhere else we
+ * replaced a refusal with the concrete next step — READY TO CLAIM, JUMP LINKS,
+ * the freight next_step — the agent simply did the right thing.
+ *
+ * The waypoint aims well short of the cap so the SECOND leg still launches with
+ * fuel margin, and so a route only slightly over the cap doesn't produce a
+ * pointless one-hop first leg.
+ */
+export function overlongRouteAdvice(hopIds: string[], target: string): string {
+  const wpIdx = Math.max(0, Math.min(18, hopIds.length - 2))
+  const waypoint = hopIds[wpIdx]
+  return (
+    `MACRO ABORT: route to ${target} is ${hopIds.length} hops (cap ${MAX_MACRO_HOPS}) — too far for one macro. ` +
+    `FLY IT IN TWO LEGS: goto_system(target_system="${waypoint}") first — that is hop ${wpIdx + 1} of ` +
+    `${hopIds.length} — then REFUEL there, then re-run goto_system(target_system="${target}"). ` +
+    `Do not abandon the destination; it is reachable, just not in one macro.`
+  )
+}
+
 const MAX_TARGET_HULL_RATIO = 0.5   // never pick a target tougher than half our hull
 const HUNT_TICK_MS = 10_000         // the game's combat tick
 const HUNT_BATTLE_MAX_TICKS = 45    // ~7.5 min per fight before we disengage
@@ -3513,7 +3544,7 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
       .map((h) => String(h.system_id ?? h.id ?? h.system ?? ''))
       .filter((id) => id && id !== start.systemId)
     if (hopIds.length === 0) return `MACRO ABORT: route to ${target} had no parseable hops — jump manually.`
-    if (hopIds.length > 25) return `MACRO ABORT: route is ${hopIds.length} hops (cap 25) — too far for one macro; refuel/plan waypoints.`
+    if (hopIds.length > MAX_MACRO_HOPS) return overlongRouteAdvice(hopIds, target)
     // Hard fleet bans are absolute: the game's own router happily plotted a ship
     // THROUGH Goldcrest on 2026-08-30, and the macro flew it. Screen every hop.
     {
