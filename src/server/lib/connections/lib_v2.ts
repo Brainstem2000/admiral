@@ -107,6 +107,19 @@ function buildRouteIndex(): Map<string, Route> {
   return index
 }
 
+/**
+ * True when a flat command name resolves to a real lib_v2 route.
+ *
+ * Callers rewriting a v2 GROUP form (`shipping` + {action}) to its flat name
+ * must check this first: not every action has one. `shipping(action=accept)`
+ * and `shipping(action=deliver)` both flatten to real routes, but
+ * `shipping(action=active)` flattens to `shipping_active`, which does not
+ * exist — and the group form it replaced worked fine.
+ */
+export function hasLibV2Route(name: string): boolean {
+  return buildRouteIndex().has(name)
+}
+
 export class LibV2Connection implements GameConnection {
   readonly mode = 'lib_v2' as const
   private account: Account | null = null

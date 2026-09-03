@@ -48,6 +48,11 @@ const KIND_COLORS: Record<string, string> = {
   transfer: 'var(--smui-frost-2)',
   gift_sent: 'var(--smui-red)',
   freight: 'var(--smui-green)',
+  // Correcting entries posted by scripts/repair-escrow-ledger.ts to reverse the
+  // phantom escrow rows. Frost rather than green: the money is real income, but
+  // the row itself is bookkeeping, not a transaction the agent performed.
+  escrow_correction: 'var(--smui-frost-2)',
+  escrow: 'var(--smui-orange)',
   other: 'var(--muted-foreground)',
 }
 

@@ -1,6 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
+import { hasLibV2Route } from './connections/lib_v2'
 import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
@@ -1731,9 +1732,19 @@ export async function executeTool(
     if (V2_GROUPS.has(group)) {
       const action = (commandArgs.action as string).trim().toLowerCase()
       const flat = group === 'battle' && action === 'reload' ? 'reload' : `${group}_${action}`
-      ctx.log('system', `Rewrote group form ${group}(action=${action}) -> ${flat} (no lib_v2 route for the group form)`)
-      command = flat
-      delete commandArgs.action
+      // Only rewrite to a name the route index actually knows. The rewrite
+      // DELETES the action arg, so flattening to a non-existent command is
+      // unrecoverable: the call fails unknown_command with nothing to fall
+      // back to. Cass Margin lost ~10 minutes and a loop-break to exactly
+      // this on 2026-09-03 — `shipping(action=active)` became the
+      // non-existent `shipping_active`, while the group form she started
+      // with dispatches correctly. When there is no flat route, leave the
+      // group form alone; it is the better of the two calls, not the worse.
+      if (hasLibV2Route(flat)) {
+        ctx.log('system', `Rewrote group form ${group}(action=${action}) -> ${flat} (no lib_v2 route for the group form)`)
+        command = flat
+        delete commandArgs.action
+      }
     }
   }
 
