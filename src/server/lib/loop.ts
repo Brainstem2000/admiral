@@ -150,6 +150,41 @@ const SUMMARY_TIMEOUT_MS = 30_000
  *  prefilled; the hosted 30s would abort most local summaries. */
 const LOCAL_SUMMARY_TIMEOUT_MS = 120_000
 
+/**
+ * SELF-CALIBRATING TOKEN ESTIMATE.
+ *
+ * A fixed chars-per-token constant is a guess, and a wrong guess silently
+ * breaks compaction: CyberSpock's context was estimated at ~42,500 tokens while
+ * the provider reported 182,114 (a 4.3x under-count), so the budget was
+ * computed against a fiction, compaction "succeeded", and the very next call
+ * still overflowed the window.
+ *
+ * Every completed call gives us ground truth — the provider's own prompt-token
+ * count — next to our estimate for the same context. Keep the ratio per model
+ * and apply it. Content that tokenizes badly (hex ids, dense JSON, market
+ * tables) corrects itself within a couple of turns, for any model and any
+ * provider, with no constant to maintain.
+ */
+const tokenCalibration = new Map<string, number>()
+/** Trust the measurement, but never let one odd call swing the budget wildly. */
+const CALIBRATION_SMOOTHING = 0.4
+const CALIBRATION_MIN = 0.5
+const CALIBRATION_MAX = 8
+
+export function calibrationFor(modelId: string | undefined): number {
+  return tokenCalibration.get(modelId ?? '') ?? 1
+}
+
+/** Feed one observation: what we estimated, and what the provider charged. */
+export function recordTokenCalibration(modelId: string | undefined, estimated: number, actualPromptTokens: number): number {
+  if (!modelId || estimated <= 0 || actualPromptTokens <= 0) return calibrationFor(modelId)
+  const observed = Math.min(CALIBRATION_MAX, Math.max(CALIBRATION_MIN, actualPromptTokens / estimated))
+  const prev = tokenCalibration.get(modelId)
+  const next = prev === undefined ? observed : prev + (observed - prev) * CALIBRATION_SMOOTHING
+  tokenCalibration.set(modelId, next)
+  return next
+}
+
 export function charsPerTokenFor(model: Pick<Model<any>, 'provider'> | undefined): number {
   return isLocalProvider(model?.provider) ? LOCAL_CHARS_PER_TOKEN : CHARS_PER_TOKEN
 }
@@ -527,6 +562,22 @@ export async function runAgentTurn(
     // transcript, and scoring it as a zero-tool-call turn would be a lie.
     if (options?.signal?.aborted || response.stopReason === 'aborted') {
       return interrupted(`LLM call cancelled after ${(durationMs / 1000).toFixed(1)}s; partial output discarded`, { durationMs })
+    }
+
+    // Ground-truth the estimator against what the provider actually charged for
+    // this exact context, so the compaction budget stops being a guess.
+    {
+      const u = response.usage
+      const actualPrompt = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0)
+      const estimated = (context.systemPrompt ? estimateTokens(context.systemPrompt, cpt) : 0) +
+        totalMessageTokens(context.messages, cpt)
+      const before = calibrationFor(response.model)
+      const after = recordTokenCalibration(response.model, estimated, actualPrompt)
+      if (estimated > 0 && actualPrompt > 0 && Math.abs(after - before) > 0.25) {
+        log('system',
+          `Token estimate recalibrated for ${response.model}: x${after.toFixed(2)} ` +
+          `(estimated ${estimated}, provider charged ${actualPrompt})`)
+      }
     }
 
     // Log rich LLM call metadata
@@ -921,9 +972,14 @@ async function compactContext(
 
   const ratio = options?.contextBudgetRatio ?? CONTEXT_BUDGET_RATIO
   const cpt = charsPerTokenFor(budgetModel)
-  const systemPromptTokens = context.systemPrompt ? estimateTokens(context.systemPrompt, cpt) : 0
+  // Scale the raw estimate by what this model has actually been charging us.
+  // Without it CyberSpock's context read as ~42,500 tokens while the provider
+  // counted 182,114, so compaction "succeeded" against a budget that did not
+  // describe reality and the next call still blew the window.
+  const cal = calibrationFor((budgetModel as { id?: string }).id ?? (budgetModel as { name?: string }).name)
+  const systemPromptTokens = Math.ceil((context.systemPrompt ? estimateTokens(context.systemPrompt, cpt) : 0) * cal)
   const messageBudget = messageBudgetFor(budgetModel.contextWindow, systemPromptTokens, ratio)
-  const messageTokens = totalMessageTokens(context.messages, cpt)
+  const messageTokens = Math.ceil(totalMessageTokens(context.messages, cpt) * cal)
 
   // The hard ceiling the provider enforces, with headroom for the reply. Even
   // when the split below cannot find a clean boundary, the context must come
@@ -953,7 +1009,7 @@ async function compactContext(
     // No clean turn boundary to summarize at — but the context is over budget,
     // so it cannot be left alone (that is how a history grows past the window
     // and every call starts failing). Fall back to the floor.
-    const dropped = dropOldestUntilUnderBudget(context.messages, hardCeiling, cpt)
+    const dropped = dropOldestUntilUnderBudget(context.messages, Math.floor(hardCeiling / cal), cpt)
     if (dropped > 0) {
       log?.('system', `Compaction: no turn boundary to summarize at — dropped the ${dropped} oldest message(s) to fit the window`)
     }
@@ -985,9 +1041,9 @@ async function compactContext(
 
   // Last line of defence: the kept tail can still exceed the window on its own
   // (huge tool results, or a summarizer that failed and returned a stub).
-  const after = totalMessageTokens(context.messages, cpt)
+  const after = Math.ceil(totalMessageTokens(context.messages, cpt) * cal)
   if (after > hardCeiling) {
-    const dropped = dropOldestUntilUnderBudget(context.messages, hardCeiling, cpt)
+    const dropped = dropOldestUntilUnderBudget(context.messages, Math.floor(hardCeiling / cal), cpt)
     if (dropped > 0) log?.('system', `Compaction: kept tail was still ~${after} tokens over the ${hardCeiling} ceiling — dropped ${dropped} more message(s)`)
   }
   log?.('system', `Compaction complete: ${context.messages.length} messages, ~${totalMessageTokens(context.messages, cpt)} est. tokens`)
