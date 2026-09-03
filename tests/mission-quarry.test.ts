@@ -174,3 +174,49 @@ describe('missionQuarry — text payload', () => {
     expect(q.size).toBe(0)
   })
 })
+
+/**
+ * The WARNING version of the quarry check shipped at 00:22 and fired three
+ * times on Morg'Thar between 01:27 and 01:30. He killed Patina-Grazers anyway
+ * ("Use species. pirates not specific. Just hunt_here()") and his wallet fell
+ * 1,092cr in fifty minutes WHILE HUNTING SUCCESSFULLY.
+ *
+ * This repo already learned the same lesson in the wrap-up reserve: "an earlier
+ * version merely ASKED the model to persist and was measurably ignored. The
+ * tool restriction is the load-bearing part." Advice is not a control.
+ *
+ * These assert the DECISION the macro makes, mirroring its guard condition.
+ */
+describe('refusing the unpaid kill', () => {
+  // Mirrors the macro guard: refuse when the agent has contracts, nothing here
+  // advances one, no explicit species was requested, and loot-only is not opted in.
+  const refuses = (quarry: Set<string>, target: {name:string;species:string;kind:string},
+                   opts: {species?: string; allowLootOnly?: boolean} = {}) =>
+    quarry.size > 0 && !isMissionQuarry(target, quarry) && !opts.species && opts.allowLootOnly !== true
+
+  const q = missionQuarry(MISSIONS)
+
+  test('refuses the exact kill that lost Morg money', () => {
+    expect(refuses(q, t('Patina-Grazer'))).toBe(true)
+    expect(refuses(q, t('Belt-Grazer'))).toBe(true)
+    expect(refuses(q, t('Pressblister'))).toBe(true)
+  })
+
+  test('allows the kill when it advances a contract', () => {
+    expect(refuses(q, t('Rime-Grazer'))).toBe(false)
+    expect(refuses(q, t('Sift-Ray'))).toBe(false)
+    expect(refuses(q, {name:'Raider',species:'raider',kind:'pirate'})).toBe(false)
+  })
+
+  test('an explicit species request is an intentional hunt and is honoured', () => {
+    expect(refuses(q, t('Patina-Grazer'), {species: 'patina'})).toBe(false)
+  })
+
+  test('allow_loot_only is the deliberate opt-out', () => {
+    expect(refuses(q, t('Patina-Grazer'), {allowLootOnly: true})).toBe(false)
+  })
+
+  test('with NO contracts held, nothing is refused — loot hunting is legitimate', () => {
+    expect(refuses(new Set(), t('Patina-Grazer'))).toBe(false)
+  })
+})

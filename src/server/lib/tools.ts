@@ -130,6 +130,7 @@ export const allTools: Tool[] = [
       max_kills: Type.Optional(Type.Number({ description: 'Stop after this many kills (default 3, max 8)' })),
       hull_floor_pct: Type.Optional(Type.Number({ description: 'Break off and stop hunting below this hull percentage (default 60)' })),
       species: Type.Optional(Type.String({ description: 'Only hunt this species/name (e.g. "belt_grazer" for a Grazer Cull contract). Omit to hunt anything beatable.' })),
+      allow_loot_only: Type.Optional(Type.Boolean({ description: 'Kill things that advance NO active contract. Default false: if you hold contracts and none of their quarry is here, the macro refuses and tells you where to go, because loot averages ~11cr a unit and does not cover ammo. Set true only to deliberately farm loot at a loss.' })),
     }),
   },
   {
@@ -3400,8 +3401,30 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
       return (a.hull ?? 1e9) - (b.hull ?? 1e9)
     })
     const target = beatable[0]
-    if (quarry.size > 0 && !isMissionQuarry(target, quarry) && !wantSpecies) {
-      narrate(`no mission quarry here — killing ${target.name} pays only loot (~a few cr)`, false)
+
+    // REFUSE the unpaid kill. Do not merely warn about it.
+    //
+    // The warning version of this shipped at 00:22 and fired three times on
+    // Morg'Thar between 01:27 and 01:30. He killed Patina-Grazers anyway
+    // ("Use species. pirates not specific. Just hunt_here()") and his wallet
+    // fell 1,092cr in fifty minutes WHILE HUNTING SUCCESSFULLY — 19 reloads
+    // against loot worth ~11cr a carapace at depth 16.
+    //
+    // This repo already learned this once, in the wrap-up reserve: "an earlier
+    // version merely ASKED the model to persist and was measurably ignored.
+    // The tool restriction is the load-bearing part." Advice is not a control.
+    // A kill that costs more ammo than its loot is worth is a LOSS, so the
+    // macro declines to make it and says where the paying quarry is instead.
+    if (quarry.size > 0 && !isMissionQuarry(target, quarry) && !wantSpecies && args.allow_loot_only !== true) {
+      const here = [...new Set(beatable.map((t) => t.name))].slice(0, 4).join(', ')
+      stopReason =
+        `NOTHING PAID HERE — refusing to spend ammo. This POI holds ${here}, and none of it ` +
+        `advances a contract. You are paid for: ${[...quarry].join(', ')}. ` +
+        `MOVE: gas_cloud POIs hold sift-rays, ice_field POIs hold rime-grazers, and pirates ` +
+        `do not spawn in High Security systems (check Security on get_system's first line). ` +
+        `Killing what is here loses money — measured at 765cr of loot for 21 kills. ` +
+        `Pass allow_loot_only=true only if you genuinely intend to farm loot at a loss.`
+      break
     }
     narrate(`engaging ${target.name} (${kills.length + 1}/${maxKills})`, true)
 
