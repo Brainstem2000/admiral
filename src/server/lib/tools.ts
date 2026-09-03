@@ -3095,6 +3095,53 @@ async function executeMacroTool(name: string, args: Record<string, unknown>, ctx
 export const MAX_MACRO_HOPS = 25
 
 /**
+ * Weapon ammo state, read from a get_ship module list.
+ *
+ * Morg'Thar was destroyed at Algol Gas Pocket on 2026-09-03 at 08:45 with FIVE
+ * OF SEVEN magazines empty. He attacked a pirate beside a hostile station, 24
+ * hostiles answered, and he fired six volleys in three minutes because that was
+ * all the loaded ammo he had. He took 1,750 hull damage and dealt 105. The
+ * Crimson Devastator was lost; insurance paid 2,640,487cr.
+ *
+ * He was carrying 29 ferrous_slug_case in his hold the whole time — six of his
+ * guns fired that case, one case per magazine. The ammo was aboard. Nothing
+ * stopped him engaging without loading it, and being TOLD about it twice (by me,
+ * hours earlier) did not stop him either.
+ *
+ * Modules report ammo as "loaded/capacity"; a module with no `ammo` field is not
+ * a gun and is ignored.
+ */
+export function weaponAmmoState(modules: unknown): { total: number; loaded: number; dry: string[] } {
+  const out = { total: 0, loaded: 0, dry: [] as string[] }
+  if (!Array.isArray(modules)) return out
+  for (const m of modules) {
+    if (!m || typeof m !== 'object') continue
+    const mod = m as Record<string, unknown>
+    const ammo = mod.ammo
+    if (ammo === undefined || ammo === null) continue          // not a weapon
+    const s = String(ammo)
+    const match = s.match(/^\s*(\d+)\s*\/\s*(\d+)\s*$/)
+    if (!match) continue
+    out.total++
+    if (Number(match[1]) > 0) out.loaded++
+    else out.dry.push(String(mod.name ?? mod.id ?? 'weapon'))
+  }
+  return out
+}
+
+/**
+ * Should the macro refuse to hunt on this loadout?
+ *
+ * Refuse when FEWER THAN HALF the fitted weapons have ammo. Half is the line
+ * because a ship at half armament is already losing any fight it did not pick,
+ * and picking fights is exactly what this macro does.
+ */
+export function tooDryToHunt(state: { total: number; loaded: number }): boolean {
+  if (state.total === 0) return false          // no ammo-using weapons; not our call
+  return state.loaded * 2 < state.total
+}
+
+/**
  * POIs each agent has recently walked away from, newest first (max 4).
  * Without this the POI picker keeps choosing the first hunting POI in the
  * system list and the macro ping-pongs between the same two forever.
@@ -3273,6 +3320,27 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
 
   // What this agent is actually PAID to kill. Read once per macro — a free
   // query — because loot alone does not cover ammo (see missionQuarry).
+  // DRY-GUN GUARD. Refuse to go hunting at under half armament — see
+  // weaponAmmoState for the death this exists to prevent.
+  try {
+    const sr = await conn.execute('get_ship')
+    if (!sr.error) {
+      const sd = (sr.structuredContent ?? sr.result) as Record<string, unknown> | undefined
+      const mods = (sd?.modules ?? (sd?.ship as Record<string, unknown> | undefined)?.modules) as unknown
+      const ammo = weaponAmmoState(mods)
+      if (tooDryToHunt(ammo)) {
+        return (
+          `hunt_here ABORT: ${ammo.loaded} of ${ammo.total} weapons have ammo — you are under half armament. ` +
+          `DRY: ${ammo.dry.slice(0, 6).join(', ')}. ` +
+          `RELOAD BEFORE HUNTING: reload(id=<module_id>, target="<ammo_item>") for each empty gun; ` +
+          `check your cargo for cases you are already carrying. ` +
+          `Morg'Thar was destroyed at Algol on 2026-09-03 engaging with 5 of 7 magazines empty while ` +
+          `carrying 29 unused ammo cases — it cost a 2.6M warship. Load the guns, then hunt.`
+        )
+      }
+    }
+  } catch { /* if get_ship fails, fall through — do not block on a read error */ }
+
   let quarry: Set<string> = new Set()
   try {
     const mr = await conn.execute('get_active_missions')
