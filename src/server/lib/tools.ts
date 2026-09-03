@@ -3117,6 +3117,70 @@ export function overlongRouteAdvice(hopIds: string[], target: string): string {
   )
 }
 
+/**
+ * Normalise a creature name for comparison: "Rime-Grazers" and "Rime-Grazer"
+ * and "rime grazer" all collapse to "rimegrazer".
+ */
+function creatureKey(s: string): string {
+  const k = s.toLowerCase().replace(/[^a-z0-9]/g, '')
+  return k.endsWith('s') ? k.slice(0, -1) : k
+}
+
+/**
+ * The species an agent is actually PAID to kill, taken from incomplete
+ * objectives on its active missions.
+ *
+ * Measured on Morg'Thar, 2026-09-02: 21 confirmed kills over one night yielded
+ * **765 credits** of realisable loot, spread across four empires — carapace
+ * bids 11 at depth 16, xeno-meat and nitrogen bladder bid 2. Ammo and fuel over
+ * the same period cost more than that, so grinding whatever stands at the POI
+ * is NET NEGATIVE. His missions, by contrast, pay 150 to 1,000 credits per kill.
+ *
+ * Hunting is profitable only against mission targets, so the macro must know
+ * which those are. He spent that night killing Belt-Grazers after Grazer Cull
+ * had already reached 8/8 — the kills counted for nothing.
+ */
+export function missionQuarry(missions: unknown): Set<string> {
+  const out = new Set<string>()
+  const list = Array.isArray(missions) ? missions
+    : (missions && typeof missions === 'object'
+        ? ((missions as Record<string, unknown>).missions ?? (missions as Record<string, unknown>).active)
+        : null)
+  if (!Array.isArray(list)) return out
+
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object') continue
+    const objs = (raw as Record<string, unknown>).objectives
+    if (!Array.isArray(objs)) continue
+    for (const o of objs) {
+      if (!o || typeof o !== 'object') continue
+      const ob = o as Record<string, unknown>
+      // Only quarry that still needs killing.
+      const cur = Number(ob.current ?? 0), req = Number(ob.required ?? NaN)
+      if (ob.completed === true) continue
+      if (Number.isFinite(req) && cur >= req) continue
+      const desc = String(ob.description ?? ob.type ?? '')
+      // Hyphenated/multiword proper creature names: "Rime-Grazers", "Sift-Rays".
+      for (const m of desc.matchAll(/\b([A-Z][a-z]+(?:[- ][A-Z][a-z]+)+)\b/g)) out.add(creatureKey(m[1]))
+      // Generic classes the game words in lowercase.
+      for (const word of ['pirate', 'pirates', 'scout', 'raider']) {
+        if (new RegExp(`\\b${word}\\b`, 'i').test(desc)) out.add(creatureKey(word))
+      }
+    }
+  }
+  return out
+}
+
+/** Does this target advance one of those objectives? */
+export function isMissionQuarry(
+  t: { name: string; species: string; kind: string },
+  quarry: Set<string>,
+): boolean {
+  if (quarry.size === 0) return false
+  if (t.kind === 'pirate' && (quarry.has('pirate') || quarry.has('raider') || quarry.has('scout'))) return true
+  return quarry.has(creatureKey(t.name)) || quarry.has(creatureKey(t.species))
+}
+
 const MAX_TARGET_HULL_RATIO = 0.5   // never pick a target tougher than half our hull
 const HUNT_TICK_MS = 10_000         // the game's combat tick
 const HUNT_BATTLE_MAX_TICKS = 45    // ~7.5 min per fight before we disengage
@@ -3172,6 +3236,14 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
   if (hullPct(start) < hullFloorPct) {
     return `hunt_here ABORT: hull is ${start.hull}/${start.maxHull} (${hullPct(start).toFixed(0)}%), already under the ${hullFloorPct}% floor. Repair before hunting.`
   }
+
+  // What this agent is actually PAID to kill. Read once per macro — a free
+  // query — because loot alone does not cover ammo (see missionQuarry).
+  let quarry: Set<string> = new Set()
+  try {
+    const mr = await conn.execute('get_active_missions')
+    if (!mr.error) quarry = missionQuarry(mr.structuredContent ?? mr.result)
+  } catch { /* target selection just falls back to weakest-first */ }
 
   // Get to the hunting ground ourselves. A turn ends on the first action, so a
   // model handed a three-step plan ("undock, travel, hunt") re-reads its TODO
@@ -3279,9 +3351,23 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
       break
     }
 
-    // Weakest first: fastest kill, least damage taken, most contract ticks per minute.
-    beatable.sort((a, b) => (a.hull ?? 1e9) - (b.hull ?? 1e9))
+    // MISSION QUARRY FIRST, then weakest.
+    //
+    // Loot alone does not pay: 21 kills on 2026-09-02 realised 765cr against
+    // more than that in ammo and fuel. Mission targets pay 150-1,000cr a head.
+    // So a creature that advances an objective outranks a slightly softer one
+    // that does not; within each group, weakest first still means the fastest
+    // kill and the least damage taken.
+    beatable.sort((a, b) => {
+      const am = isMissionQuarry(a, quarry) ? 0 : 1
+      const bm = isMissionQuarry(b, quarry) ? 0 : 1
+      if (am !== bm) return am - bm
+      return (a.hull ?? 1e9) - (b.hull ?? 1e9)
+    })
     const target = beatable[0]
+    if (quarry.size > 0 && !isMissionQuarry(target, quarry) && !wantSpecies) {
+      narrate(`no mission quarry here — killing ${target.name} pays only loot (~a few cr)`, false)
+    }
     narrate(`engaging ${target.name} (${kills.length + 1}/${maxKills})`, true)
 
     // action_pending and mutation_timeout are pacing, not failure: the game
