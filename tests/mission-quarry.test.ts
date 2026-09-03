@@ -112,3 +112,65 @@ describe('target ranking', () => {
     expect(out[0].name).toBe('Slag-Tortoise')
   })
 })
+
+/**
+ * get_active_missions answers as TEXT on Morg'Thar's connection. The first
+ * version of missionQuarry handled only the structured form, so quarry came
+ * back EMPTY, ranking silently fell through to weakest-first, and he carried on
+ * killing Pressblisters twelve minutes after the fix deployed. Same dual-shape
+ * trap that made get_system drop its jump-link table.
+ */
+const TEXT = `Active missions (5/5):
+--- Trade Convoy Protection [05229a84] (combat, difficulty 4) ---
+Thin out scout-class pirates threatening freight convoys.
+Objectives:
+  - Kill 5 pirates to protect trade convoys: 0/5
+Rewards: 5,000cr
+--- Ice-Field Thinning [b948e3aa] (combat, difficulty 2) ---
+Progress: 50%
+Objectives:
+  - Hunt 6 Rime-Grazers: 3/6
+Rewards: 1,300cr
+--- Grazer Cull [b5f700df] (combat, difficulty 2) ---
+Progress: 100%
+Objectives:
+  - Hunt 8 Belt-Grazers: 8/8 [DONE]
+Rewards: 1,200cr
+--- Ghosts in the Cloud [ae01b330] (combat, difficulty 2) ---
+Objectives:
+  - Hunt 4 Sift-Rays in a gas cloud: 0/4
+Rewards: 2,000cr`
+
+describe('missionQuarry — text payload', () => {
+  test('extracts quarry from the text form', () => {
+    const q = missionQuarry(TEXT)
+    expect(q.has('rimegrazer')).toBe(true)
+    expect(q.has('siftray')).toBe(true)
+    expect(q.has('pirate')).toBe(true)
+  })
+
+  test('honours [DONE] — the exact bug that cost Morg his night', () => {
+    expect(missionQuarry(TEXT).has('beltgrazer')).toBe(false)
+  })
+
+  test('honours a satisfied N/N count even without a DONE marker', () => {
+    const q = missionQuarry('Objectives:\n  - Hunt 4 Sift-Rays: 4/4')
+    expect(q.has('siftray')).toBe(false)
+  })
+
+  test('an unmet count is still quarry', () => {
+    expect(missionQuarry('Objectives:\n  - Hunt 4 Sift-Rays: 1/4').has('siftray')).toBe(true)
+  })
+
+  test('text and structured payloads agree on the same missions', () => {
+    const fromText = missionQuarry(TEXT)
+    const fromObj = missionQuarry(MISSIONS)
+    expect([...fromText].sort()).toEqual([...fromObj].sort())
+  })
+
+  test('prose that is not an objective line is ignored', () => {
+    // The flavour line mentions pirates but is not an objective.
+    const q = missionQuarry('Thin out scout-class pirates threatening convoys.')
+    expect(q.size).toBe(0)
+  })
+})

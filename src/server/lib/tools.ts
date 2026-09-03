@@ -3142,6 +3142,32 @@ function creatureKey(s: string): string {
  */
 export function missionQuarry(missions: unknown): Set<string> {
   const out = new Set<string>()
+
+  // get_active_missions answers as TEXT on some connections and as structured
+  // data on others — the same dual-shape trap that made get_system drop its
+  // jump-link table. Handling only the object form shipped this whole feature
+  // INERT for Morg'Thar: quarry came back empty, ranking silently fell through
+  // to weakest-first, and he carried on killing Pressblisters. Parse both.
+  //
+  //   Objectives:
+  //     - Kill 5 pirates to protect trade convoys: 0/5
+  //     - Hunt 8 Belt-Grazers: 8/8 [DONE]
+  if (typeof missions === 'string') {
+    for (const raw of missions.split('\n')) {
+      const line = raw.trim()
+      if (!line.startsWith('- ')) continue
+      if (/\[DONE\]/i.test(line)) continue
+      const counted = line.match(/:\s*(\d+)\s*\/\s*(\d+)\s*$/)
+      if (counted && Number(counted[1]) >= Number(counted[2])) continue
+      const desc = line.replace(/^-\s*/, '').replace(/:\s*\d+\s*\/\s*\d+\s*$/, '')
+      for (const m of desc.matchAll(/\b([A-Z][a-z]+(?:[- ][A-Z][a-z]+)+)\b/g)) out.add(creatureKey(m[1]))
+      for (const word of ['pirate', 'pirates', 'scout', 'raider']) {
+        if (new RegExp(`\\b${word}\\b`, 'i').test(desc)) out.add(creatureKey(word))
+      }
+    }
+    return out
+  }
+
   const list = Array.isArray(missions) ? missions
     : (missions && typeof missions === 'object'
         ? ((missions as Record<string, unknown>).missions ?? (missions as Record<string, unknown>).active)
@@ -3242,8 +3268,17 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
   let quarry: Set<string> = new Set()
   try {
     const mr = await conn.execute('get_active_missions')
-    if (!mr.error) quarry = missionQuarry(mr.structuredContent ?? mr.result)
+    if (!mr.error) {
+      // Take whichever field actually yields quarry. structuredContent is not
+      // reliably the richer one — for Morg'Thar the objectives live in the text
+      // `result` — and preferring it blindly is what made this inert.
+      for (const c of [mr.structuredContent, mr.result]) {
+        const q = missionQuarry(c)
+        if (q.size > quarry.size) quarry = q
+      }
+    }
   } catch { /* target selection just falls back to weakest-first */ }
+  if (quarry.size > 0) narrate(`paid quarry: ${[...quarry].join(', ')}`, false)
 
   // Get to the hunting ground ourselves. A turn ends on the first action, so a
   // model handed a three-step plan ("undock, travel, hunt") re-reads its TODO
