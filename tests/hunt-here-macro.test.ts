@@ -69,7 +69,7 @@ function harness(s: Scenario) {
         }
       }
       if (cmd === 'wrecks') return { result: { wrecks: [
-        { id: 'wr_1', type: 'creature', victim_name: 'Belt-Grazer', killer_name: "Morg'Thar",
+        { id: 'wr_1', type: 'creature', victim_id: 'crt_small', victim_name: 'Belt-Grazer', killer_name: "Morg'Thar",
           cargo: [{ item_id: 'creature_carapace', quantity: 2 }] },
         { id: 'wr_other', type: 'creature', victim_name: 'Someone Else', killer_name: 'Rival Pilot', cargo: [] },
       ] } }
@@ -98,7 +98,7 @@ describe('hunt_here', () => {
     const out = await executeTool('hunt_here', { max_kills: 1 }, ctx)
     const attack = calls.find(c => c.cmd === 'attack')
     expect(attack?.args?.id).toBe('crt_small')       // weakest first, not the Leviathan
-    expect(out).toContain('1 kill')
+    expect(out).toContain('1 CONFIRMED kill')
     expect(calls.some(c => c.cmd === 'loot')).toBe(true)
   }, 60_000)
 
@@ -217,7 +217,7 @@ describe('hunt_here', () => {
     const out = await executeTool('hunt_here', { max_kills: 1 }, ctx)
     expect(out).not.toContain('attack failed [action_pending]')
     expect(calls.filter(c => c.cmd === 'attack').length).toBeGreaterThan(1)  // it retried
-    expect(out).toContain('1 kill')
+    expect(out).toContain('1 CONFIRMED kill')
   }, 120_000)
 
 

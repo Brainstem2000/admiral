@@ -3125,6 +3125,7 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
   }
 
   const kills: string[] = []
+  const unconfirmed: string[] = []
   const looted: string[] = []
   const skipped: string[] = []
   let stopReason = `reached max_kills (${maxKills})`
@@ -3219,7 +3220,37 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
       await macroAction(ctx, 'retreat', undefined, 2)
       break
     }
-    kills.push(target.name)
+
+    // VERIFY THE KILL. A battle ends for several reasons — the target died, the
+    // target fled, or we were dropped from it — and counting "battle over" as
+    // "kill" made the macro report nine Belt-Grazer kills on 2026-09-02 while
+    // every contract counter stayed at 0/8, no wreck existed and the wallet
+    // never moved. Never claim a kill we cannot see evidence for.
+    await macroSleep(HUNT_TICK_MS)
+    let confirmed = false
+    let escaped = false
+    const wrCheck = await conn.execute('wrecks')
+    if (!wrCheck.error) {
+      const wdc = (wrCheck.structuredContent ?? wrCheck.result) as Record<string, unknown> | undefined
+      const wl = Array.isArray(wdc?.wrecks) ? wdc!.wrecks as Array<Record<string, unknown>> : []
+      if (wl.some((w) => String(w.victim_id ?? '') === target.id)) confirmed = true
+    }
+    if (!confirmed) {
+      // No wreck: is the target simply gone from the POI (killed, or fled)?
+      const after = await conn.execute('get_nearby')
+      if (!after.error) {
+        const still = collectTargets(after.structuredContent ?? after.result)
+        if (still.some((t) => t.id === target.id)) {
+          escaped = false
+          stopReason = `${target.name} survived the engagement (still present, no wreck) — disengaging rather than claiming a kill`
+          await macroAction(ctx, 'stance', { id: 'flee' }, 2)
+          break
+        }
+        escaped = true   // gone, but no wreck to prove we killed it
+      }
+    }
+    if (confirmed) kills.push(target.name)
+    else if (escaped) unconfirmed.push(target.name)
 
     // Loot whatever the kill left. The wreck does not exist the instant the
     // target dies — it appears on the next game tick — and the payload names
@@ -3272,7 +3303,10 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
   const end = await readShip()
   return [
     prelude.join(' '),
-    `hunt_here ${kills.length > 0 ? 'DONE' : 'NO KILLS'}: ${kills.length} kill(s)${kills.length ? ` (${kills.join(', ')})` : ''}.`,
+    `hunt_here ${kills.length > 0 ? 'DONE' : 'NO KILLS'}: ${kills.length} CONFIRMED kill(s)${kills.length ? ` (${kills.join(', ')})` : ''}.`,
+    unconfirmed.length
+      ? `${unconfirmed.length} target(s) left the field with no wreck (${[...new Set(unconfirmed)].join(', ')}) — NOT counted as kills; they probably fled, so your contract counters did not move.`
+      : '',
     // Name the haul, not just a count — the agent has to decide whether it is
     // worth a trip to a market, and the operator wants to see income happening.
     looted.length ? `Looted ${looted.length} wreck(s): ${looted.join('; ')}.` : 'No wrecks looted.',
