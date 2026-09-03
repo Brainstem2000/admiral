@@ -69,7 +69,7 @@ function harness(s: Scenario) {
         }
       }
       if (cmd === 'wrecks') return { result: { wrecks: [
-        { id: 'wr_1', type: 'creature', victim_name: 'Belt-Grazer', killer_name: 'Test',
+        { id: 'wr_1', type: 'creature', victim_name: 'Belt-Grazer', killer_name: "Morg'Thar",
           cargo: [{ item_id: 'creature_carapace', quantity: 2 }] },
         { id: 'wr_other', type: 'creature', victim_name: 'Someone Else', killer_name: 'Rival Pilot', cargo: [] },
       ] } }
@@ -79,7 +79,7 @@ function harness(s: Scenario) {
       return { result: 'ok' }
     },
   } as any
-  const ctx = { connection: conn, profileId: `p-hunt-${Math.random()}`, profileName: 'Test', log: () => {}, todo: '', memory: '' } as any
+  const ctx = { connection: conn, profileId: `p-hunt-${Math.random()}`, profileName: "Morg'Thar - Warrior", log: () => {}, todo: '', memory: '' } as any
   return { ctx, calls }
 }
 
@@ -243,6 +243,19 @@ describe('hunt_here', () => {
     const out = await executeTool('hunt_here', { max_kills: 1 }, ctx)
     expect(calls.some(c => c.cmd === 'loot' && c.args?.wreck_id === 'wr_1')).toBe(true)
     expect(out).toContain('creature_carapace')
+  }, 90_000)
+
+
+  test('loots wrecks whose killer_name is the game USERNAME, not the profile name', async () => {
+    // The game reports killer_name: "Morg'Thar"; the Admiral profile is
+    // "Morg'Thar - Warrior". Comparing the two filtered out every wreck the
+    // agent had just made — four straight three-kill runs reported
+    // "No wrecks looted" on 2026-09-02.
+    const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 1 })
+    const out = await executeTool('hunt_here', { max_kills: 1 }, ctx)
+    expect(calls.some(c => c.cmd === 'loot')).toBe(true)
+    expect(out).toContain('creature_carapace')
+    expect(out).not.toContain('No wrecks looted')
   }, 90_000)
 
   test('a failed attack stops the macro instead of spinning', async () => {

@@ -3233,10 +3233,22 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
     if (!wr.error) {
       const wd = (wr.structuredContent ?? wr.result) as Record<string, unknown> | undefined
       const list = Array.isArray(wd?.wrecks) ? wd!.wrecks as Array<Record<string, unknown>> : []
-      // Only our own kills, and only ones still holding cargo.
+      // Only our own kills. The game reports the game USERNAME here
+      // (`killer_name: Morg'Thar`), not the Admiral profile name
+      // ("Morg'Thar - Warrior") — comparing against profileName silently
+      // filtered out every wreck the agent had just made, which is why four
+      // straight three-kill runs still said "No wrecks looted".
+      const me = new Set<string>()
+      for (const n of [getProfile(ctx.profileId)?.username, ctx.profileName]) {
+        if (n) { me.add(n); me.add(n.split(' - ')[0]) }
+      }
+      try {
+        const u = (ctx.connection.getLocalState?.()?.player as Record<string, unknown> | undefined)?.username
+        if (typeof u === 'string' && u) me.add(u)
+      } catch { /* username is a bonus */ }
       const mine = list.filter((w) => {
-        const killer = String(w.killer_name ?? '')
-        return !killer || killer === ctx.profileName
+        const killer = String(w.killer_name ?? '').trim()
+        return !killer || me.has(killer)
       })
       for (const w of mine.slice(0, 4)) {
         const wid = String(w.id ?? w.wreck_id ?? '')
