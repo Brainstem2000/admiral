@@ -530,6 +530,11 @@ export async function runAgentTurn(
     // the result caps; overflow mid-turn is still caught by emergency compaction.
     if (rounds === 0) await compactContext(summaryModel, context, compaction, options, model, log)
 
+    // ...but the window must hold on EVERY round. A turn that balloons mid-flight
+    // (a macro returning many results) would otherwise be rejected and recovered
+    // only by emergencyCompact, after burning the call. See enforceHardCeiling.
+    enforceHardCeiling(context, model, log)
+
     options?.onActivity?.('Waiting for LLM response...')
     const callStartedAt = Date.now()
     let response: AssistantMessage
@@ -948,6 +953,64 @@ function formatMessagesForSummary(messages: Message[]): string {
  *                    its window and tokenizer decide when to compact. Defaults
  *                    to `model` for callers that use one model for both.
  */
+/**
+ * Keep the context under the window before EVERY round, not just the first.
+ *
+ * Summarizing compaction deliberately runs only between turns: its split point
+ * is a user-message boundary, so mid-turn it can summarize away the turn's own
+ * opening. But a turn can still outgrow the window on its own — Morg'Thar's
+ * hunt_here returned three kills and six looted wrecks at 22:19 on 2026-09-02,
+ * and his very next call was rejected at 169,483 tokens against a 131,072
+ * window. Recovery worked (emergencyCompact fires on the 400), but only after
+ * burning a call and logging an error, every single time.
+ *
+ * This is the cheap half of that recovery, run BEFORE the call instead of
+ * after the rejection: truncate oversized tool results, then drop the oldest
+ * messages until the estimate fits. It never summarizes, so the turn's recent
+ * work — the state block it opened with and the results it is acting on — is
+ * exactly what survives. It only acts when the alternative is a guaranteed
+ * rejection, so it cannot trade away anything the provider would have kept.
+ */
+export function enforceHardCeiling(
+  context: Context,
+  budgetModel: Model<any>,
+  log?: LogFn,
+): number {
+  const cpt = charsPerTokenFor(budgetModel)
+  const cal = calibrationFor((budgetModel as { id?: string }).id ?? (budgetModel as { name?: string }).name)
+  const sysToks = Math.ceil((context.systemPrompt ? estimateTokens(context.systemPrompt, cpt) : 0) * cal)
+  const ceiling = Math.floor((budgetModel.contextWindow - sysToks) * 0.8)
+  if (ceiling <= 0) return 0
+  if (Math.ceil(totalMessageTokens(context.messages, cpt) * cal) <= ceiling) return 0
+
+  // A single huge tool result is the usual cause, and trimming it is far
+  // cheaper than dropping whole messages the turn still needs.
+  for (const msg of context.messages) {
+    if (msg.role !== 'toolResult' || !Array.isArray(msg.content)) continue
+    for (const block of msg.content) {
+      if (!('text' in block)) continue
+      const text = (block as any).text
+      if (typeof text === 'string' && text.length > 4000) {
+        (block as any).text = safeTruncate(text, 3000, '\n...(truncated)')
+      }
+    }
+  }
+
+  const after = Math.ceil(totalMessageTokens(context.messages, cpt) * cal)
+  if (after <= ceiling) {
+    log?.('system', `Context guard: trimmed oversized tool results to fit the window (~${after}/${ceiling} tokens)`)
+    return 0
+  }
+
+  const dropped = dropOldestUntilUnderBudget(context.messages, Math.floor(ceiling / cal), cpt)
+  if (dropped > 0) {
+    log?.('system',
+      `Context guard: mid-turn context reached ~${after} tokens against a ${ceiling} ceiling — ` +
+      `dropped the ${dropped} oldest message(s) before calling (no summarization, recent work kept)`)
+  }
+  return dropped
+}
+
 async function compactContext(
   model: Model<any>,
   context: Context,
