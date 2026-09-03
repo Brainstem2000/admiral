@@ -3192,7 +3192,18 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
       }
     }
 
-    // Fight it out. Close the range when out of reach, break off on the floor.
+    // Actually FIGHT. Two things the first version got wrong, both proved by
+    // live probing on 2026-09-02:
+    //   * neither get_status nor the lib's local state carries active_battle or
+    //     combat_state, so the old `inBattle` flag was ALWAYS false and the loop
+    //     exited one tick after attacking — no range closed, no damage, every
+    //     attack scored as a win.
+    //   * the macro never set a firing stance. stance(id="fire") answers
+    //     "Firing weapons at target. Full damage dealt and received" — without
+    //     it we are in a battle but not shooting.
+    // advance()/stance() are free queries that SUCCEED in a battle and fail with
+    // not_in_battle outside one, so they are both the action and the probe.
+    await macroAction(ctx, 'stance', { id: 'fire' }, 2)
     let ticks = 0
     let broke = false
     for (; ticks < HUNT_BATTLE_MAX_TICKS; ticks++) {
@@ -3206,10 +3217,11 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
         broke = true
         break
       }
-      if (!s.inBattle) break   // target dead, or the battle dropped us
-      // "Guns can't reach" until the range closes — advance while we are outside it.
-      if (typeof s.zone === 'string' && s.zone.toLowerCase() === 'outer') {
-        await macroAction(ctx, 'advance', undefined, 2)
+      // Close the range AND probe whether the fight is still on, in one call.
+      const adv = await ctx.connection.execute('advance')
+      const code = adv.error?.code ?? ''
+      if (code === 'not_in_battle' || /not in (a )?battle/i.test(adv.error?.message ?? '')) {
+        break   // the engagement is over — the kill check below decides what happened
       }
       if (ticks % 6 === 5) narrate(`fighting ${target.name}, hull ${hullPct(s).toFixed(0)}%`)
     }

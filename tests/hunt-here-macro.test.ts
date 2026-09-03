@@ -32,6 +32,7 @@ function harness(s: Scenario) {
   let undocked = false
   let travelled = false
   let attackFails = 0
+  let advCalls = 0
   let reads = 0
   let battleReads = 0
   const hullSeq = s.hullSeq ?? [1785]
@@ -54,6 +55,11 @@ function harness(s: Scenario) {
     execute: async (cmd: string, args?: any) => {
       calls.push({ cmd, args })
       if (cmd === 'undock') { undocked = true; return { result: 'ok' } }
+      if (cmd === 'advance') {
+        advCalls++
+        if (advCalls > (s.battleTicks ?? 0)) return { error: { code: 'not_in_battle', message: 'You are not in a battle.' } }
+        return { result: { action: 'advance', message: 'Advancing toward the enemy.' } }
+      }
       if (cmd === 'travel' && s.failTravel) return { error: { code: s.failTravel, message: 'no such poi' } }
       if (cmd === 'travel') { travelled = true; return { result: 'ok' } }
       if (cmd === 'get_system') return { result: { system: { id: 'gsc_0030', pois: s.systemPois ?? [] } } }
@@ -202,7 +208,7 @@ describe('hunt_here', () => {
     // After its first real kill at Nekkar Belt the macro attacked into its own
     // unresolved fight, got action_pending, reported NO KILLS, and the model
     // called it again — a spin. It must let the battle settle first.
-    const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 3 })
+    const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 1 })
     await executeTool('hunt_here', { max_kills: 1 }, ctx)
     // The very first thing after the prelude is a state read, not an attack.
     const firstAttack = calls.findIndex(c => c.cmd === 'attack')
@@ -257,6 +263,19 @@ describe('hunt_here', () => {
     expect(out).toContain('creature_carapace')
     expect(out).not.toContain('No wrecks looted')
   }, 90_000)
+
+
+  test('sets a firing stance and closes range, and only stops when advance says the battle ended', async () => {
+    // Neither get_status nor the local state exposes battle state, so advance()
+    // — which succeeds in a battle and returns not_in_battle outside one — is
+    // both the range-closer and the probe. Without this the loop exited one
+    // tick after attacking and scored every attack as a win.
+    const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 3 })
+    await executeTool('hunt_here', { max_kills: 1 }, ctx)
+    const stances = calls.filter(c => c.cmd === 'stance').map(c => c.args?.id)
+    expect(stances).toContain('fire')
+    expect(calls.filter(c => c.cmd === 'advance').length).toBeGreaterThanOrEqual(3)
+  }, 120_000)
 
   test('a failed attack stops the macro instead of spinning', async () => {
     const { ctx, calls } = harness({ targets: GRAZERS, failAttack: 'target_not_found' })
