@@ -536,7 +536,9 @@ export function FinancialsTab({ profile, connected }: { profile: Profile; connec
               <span className="w-20 shrink-0">Kind</span>
               <span className="flex-1 min-w-0">Item</span>
               <span className="w-24 shrink-0 text-right hidden sm:block">Qty × Price</span>
-              <button onClick={() => toggleSort('amount')} className="w-20 shrink-0 text-right hover:text-foreground transition-colors">
+              {/* w-28 to match TransactionRow, which prints exact credits
+                  rather than the abbreviated form. */}
+              <button onClick={() => toggleSort('amount')} className="w-28 shrink-0 text-right hover:text-foreground transition-colors">
                 Amount{sortMark('amount')}
               </button>
               <span className="w-24 shrink-0 hidden md:block">Counterparty</span>
@@ -568,8 +570,16 @@ function TransactionRow({ r }: { r: LedgerEntry }) {
       <span className="w-24 shrink-0 text-right text-[10px] text-muted-foreground tabular-nums hidden sm:block">
         {r.quantity != null && r.unit_price != null ? `${r.quantity.toLocaleString()} × ${Math.round(r.unit_price).toLocaleString()}` : ''}
       </span>
-      <span className="w-20 shrink-0 text-right tabular-nums" style={{ color: `hsl(${r.amount_signed >= 0 ? 'var(--smui-green)' : 'var(--smui-red)'})` }}>
-        {fmtSigned(r.amount_signed)}
+      {/* Exact credits, NOT fmtSigned's abbreviation. The ledger is the place
+          you come to find a specific figure, and "+89k" is unscannable when you
+          are hunting an 88,970cr freight delivery — it hides the digits that
+          identify the row. Abbreviation stays in the summary cards, where the
+          magnitude is the point; here the number itself is. */}
+      <span
+        className="w-28 shrink-0 text-right tabular-nums"
+        style={{ color: `hsl(${r.amount_signed >= 0 ? 'var(--smui-green)' : 'var(--smui-red)'})` }}
+      >
+        {r.amount_signed >= 0 ? '+' : '−'}{Math.abs(r.amount_signed).toLocaleString()}
       </span>
       <span className="w-24 shrink-0 truncate text-[10px] text-muted-foreground hidden md:block">{r.counterparty || ''}</span>
       <span className="w-14 shrink-0 text-right text-[10px] text-muted-foreground tabular-nums">{formatTime(r.timestamp)}</span>

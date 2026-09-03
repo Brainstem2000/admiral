@@ -1,7 +1,7 @@
 import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
-import { hasLibV2Route } from './connections/lib_v2'
+import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
 import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
@@ -1722,6 +1722,36 @@ export async function executeTool(
       `${out}\n\n(Dispatched: "${command}" is a LOCAL tool, not a game command — the harness ran ` +
       `${command}(${formatArgs(commandArgs ?? {})}) for you. Call the ${command} tool directly next time.)`
     )
+  }
+
+  // A v2 GROUP command with NO action is a guaranteed `invalid_action`, and the
+  // agent cannot see the valid list without spending a call to be told it. Cass
+  // Margin called `shipping` bare, then `shipping(shipment_id=...)`, three times
+  // each on 2026-09-03, tripped two loop-breaks, and finally declared "Shipping
+  // API malfunction" and halted one delivery short of a tier promotion — while
+  // standing on a working freight board. The API was fine; the calls had no
+  // action.
+  //
+  // Answer it here instead: free, instant, and it names the exact verbs. This
+  // has to run BEFORE the rewrite below, which only looks at calls that already
+  // carry an action.
+  if (ctx.connection.mode === 'lib_v2' && commandArgs && typeof commandArgs.action !== 'string') {
+    const group = command.replace(/^spacemolt_/, '')
+    if (V2_GROUPS.has(group)) {
+      const actions = libV2GroupActions(group)
+      if (actions.length) {
+        ctx.log('system', `Refused ${group}() with no action — answered locally with the valid list (no game call spent)`)
+        return (
+          `REFUSED: \`${group}\` needs an \`action\` argument — you sent none, and the server would ` +
+          `reject it as invalid_action.\n\nKnown actions for ${group}: ${actions.join(', ')}\n` +
+          `(That list comes from the bundled client library, which can lag the live server — if ` +
+          `the game names an action that is missing here, trust the game.)\n\n` +
+          `Call it as ${group}(action="<verb>", ...) — for example ${group}(action="${actions[0]}"). ` +
+          `Any id argument you were passing stays; the action is what was missing. Nothing was sent ` +
+          `to the game, so this cost you no time.`
+        )
+      }
+    }
   }
 
   // lib_v2 has no route for the v2 GROUP form (`facility` + {action:'list'}):

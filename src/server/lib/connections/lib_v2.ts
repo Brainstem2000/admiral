@@ -120,6 +120,23 @@ export function hasLibV2Route(name: string): boolean {
   return buildRouteIndex().has(name)
 }
 
+/**
+ * Every action a v2 tool group accepts, e.g. 'shipping' -> ['accept','active',
+ * 'cancel','deliver',...]. Empty when the group is unknown.
+ *
+ * Used to answer a group call that arrives with no `action` locally, instead of
+ * spending a game call to be told the same thing by the server.
+ */
+export function libV2GroupActions(group: string): string[] {
+  const bare = group.replace(/^spacemolt_/, '')
+  const out = new Set<string>()
+  for (const def of Object.values(ACTIONS) as Array<{ tool: string; action: string }>) {
+    const tool = def.tool.replace(/^spacemolt_/, '')
+    if (tool === bare) out.add(def.action)
+  }
+  return [...out].sort()
+}
+
 export class LibV2Connection implements GameConnection {
   readonly mode = 'lib_v2' as const
   private account: Account | null = null
