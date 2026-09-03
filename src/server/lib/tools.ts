@@ -852,6 +852,60 @@ async function checkDockedState(
 }
 
 /**
+ * A craft whose inputs are not in STATION STORAGE cannot succeed, whatever
+ * model is driving.
+ *
+ * The game's own refusal is `cannot_craft: Not enough materials in your station
+ * storage to craft this. Deposit the inputs into station storage first
+ * (crafting no longer pulls from cargo).` It does not say WHICH input is short,
+ * by how much, or that the missing units may be sitting in the agent's own
+ * cargo one `deposit` away — so the agent spends a tick, guesses, and spends
+ * another. Resolve the recipe locally and answer all three questions first.
+ */
+function checkCraftInputs(ctx: ToolContext, deep: string, commandArgs: Record<string, unknown> | undefined): string | null {
+  if (deep !== 'craft' || getPreference('craft_gate') === 'off') return null
+  const recipeId = String(commandArgs?.recipe_id ?? commandArgs?.id ?? '').trim()
+  if (!recipeId) return null
+  const qty = Math.max(1, Number(commandArgs?.quantity ?? 1) || 1)
+  const station = currentLocation(ctx).dockedAt
+  if (!station) return null   // the docked-state gate already covers this
+
+  const recipe = codexGet('recipe', recipeId)
+  const inputs = Array.isArray(recipe?.inputs) ? recipe!.inputs as Array<Record<string, unknown>> : null
+  if (!inputs || inputs.length === 0) return null   // unknown recipe — let the game answer
+
+  const missing: string[] = []
+  for (const inp of inputs) {
+    const item = String(inp.item_id ?? '')
+    const per = Number(inp.quantity ?? 0) || 0
+    if (!item || per <= 0) continue
+    const need = per * qty
+    let have = 0
+    try { have = getStorageQuantity(ctx.profileId, station, item) } catch { have = 0 }
+    if (have >= need) continue
+
+    // Where are the missing units — our own cargo (one deposit away), or elsewhere?
+    let hint = ''
+    try {
+      const inCargo = getCargoQuantity(ctx.profileId, item)
+      if (inCargo > 0) {
+        hint = ` — you are CARRYING ${inCargo}; deposit(item_id="${item}", quantity=${Math.min(inCargo, need - have)}) first`
+      } else {
+        const other = getStorageElsewhere(station, item).filter(r => r.quantity > 0).slice(0, 2)
+        if (other.length) hint = ` — fleet storage holds some at ${other.map(o => `${o.station_id} (${o.quantity})`).join(', ')}`
+      }
+    } catch { /* hints are a bonus */ }
+    missing.push(`${item}: need ${need}, station storage has ${have}${hint}`)
+  }
+  if (missing.length === 0) return null
+  return (
+    `BLOCKED: craft(${recipeId} x${qty}) would fail — crafting draws ONLY from station storage at ${station}, never from cargo.\n` +
+    missing.map(m => `  • ${m}`).join('\n') +
+    `\nDeposit or acquire the missing inputs, then craft. Checked locally; no game tick was spent.`
+  )
+}
+
+/**
  * A buy against a board with no ask fills nothing and costs a tick. The
  * station's last view_market (this process) or the fleet's station-scoped
  * market table says so before the round trip — and says how deep the ask is.
@@ -1885,6 +1939,16 @@ export async function executeTool(
   // Buy with no ask at this station: the depth is known before the round trip.
   {
     const refusal = checkBuyAsk(ctx, deepBare, commandArgs)
+    if (refusal) {
+      ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
+      ctx.log('tool_result', refusal)
+      return refusal
+    }
+  }
+
+  // A craft whose inputs are not in station storage cannot succeed.
+  {
+    const refusal = checkCraftInputs(ctx, deepBare, commandArgs)
     if (refusal) {
       ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
       ctx.log('tool_result', refusal)
