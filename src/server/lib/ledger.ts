@@ -57,6 +57,17 @@ export class LedgerCollector {
       const action = str(r.action) || bare
 
       const rows = this.mapResult(action, r, args, outer)
+      // Read the pre-insert balance BEFORE booking these rows. lastBookedBalance
+      // takes the newest row by id, so calling it after the loop returns the row
+      // we just wrote — see the shipping-escrow residual below, where that made
+      // `prev` equal `after` and produced an escrow row of exactly -explained on
+      // every delivery. Cass Margin's ledger held 22 freight rows totalling
+      // +119,850 against 22 escrow rows totalling -119,850: an exact cancellation
+      // that hid every freight payment from the summary and left the ledger net
+      // ~94,000 short of her real wallet.
+      const balanceBeforeRows = SHIPPING_ESCROW_ACTIONS.has(action)
+        ? this.lastBookedBalance(profileId)
+        : null
       for (const row of rows) this.insert(profileId, row, command, r)
       // Shipping escrow/bond flows carry NO explicit amount fields anywhere in
       // their results, yet move real credits: post-escrow out, carrier bonds
@@ -68,7 +79,7 @@ export class LedgerCollector {
       // unbooked movement since the last row is absorbed under 'escrow'.
       if (SHIPPING_ESCROW_ACTIONS.has(action)) {
         const after = this.readBalance(r) ?? (outer ? this.readBalance(outer) : null)
-        const prev = this.lastBookedBalance(profileId)
+        const prev = balanceBeforeRows
         if (after !== null && prev !== null) {
           const explained = rows.reduce((s, row) => s + row.amount, 0)
           const residual = (after - prev) - explained
