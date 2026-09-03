@@ -3095,6 +3095,13 @@ async function executeMacroTool(name: string, args: Record<string, unknown>, ctx
 export const MAX_MACRO_HOPS = 25
 
 /**
+ * POIs each agent has recently walked away from, newest first (max 4).
+ * Without this the POI picker keeps choosing the first hunting POI in the
+ * system list and the macro ping-pongs between the same two forever.
+ */
+const recentlyEmptyPois = new Map<string, string[]>()
+
+/**
  * Turn an over-long route into a two-leg plan naming the waypoint.
  *
  * The old message said "too far for one macro; refuel/plan waypoints", which is
@@ -3310,17 +3317,41 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
       const cur = String((conn.getLocalState?.()?.location as Record<string, unknown> | undefined)?.poi_id ?? '')
       const probe = await conn.execute('get_nearby')
       const here = probe.error ? [] : collectTargets(probe.structuredContent ?? probe.result)
-      if (here.filter((t) => t.kind !== 'npc').length === 0) {
+      const shootable = here.filter((t) => t.kind !== 'npc')
+      // Advance when the POI is empty OR when everything here is worthless.
+      //
+      // The old condition was "no targets at all", so a POI full of unpaid
+      // creatures stopped the macro dead and the model simply called it again:
+      // Morg'Thar issued four identical hunt_here() calls at Wazn Haze between
+      // 02:36 and 02:38, each refused, each burning a turn. The loop-breaker
+      // never fired because a refusal is a SUCCESSFUL return, not an error —
+      // so nothing in the harness could see the loop.
+      //
+      // Telling the model to move does not work; tonight proved that twice.
+      // Moving it is what works.
+      const nothingPays = quarry.size > 0 && !wantSpecies &&
+        shootable.length > 0 && !shootable.some((t) => isMissionQuarry(t, quarry))
+      if (shootable.length === 0 || nothingPays) {
         const sys = await conn.execute('get_system')
         if (!sys.error) {
           const sd = (sys.structuredContent ?? sys.result) as Record<string, unknown> | undefined
           const node = (sd?.system ?? sd) as Record<string, unknown> | undefined
           const pois = Array.isArray(node?.pois) ? node!.pois as Array<Record<string, unknown>> : []
           const hunting = pois.filter((p) => /asteroid_belt|gas_cloud|ice_field|nebula|debris/i.test(String(p.type ?? '')))
-          const pick = hunting.find((p) => String(p.id ?? '') && String(p.id) !== cur)
+          // Skip the POI we just walked away from as well as the current one,
+          // or the macro ping-pongs between the same two forever.
+          const recent = recentlyEmptyPois.get(ctx.profileId) ?? []
+          const pick = hunting.find((p) => {
+            const id = String(p.id ?? '')
+            return id && id !== cur && !recent.includes(id)
+          }) ?? hunting.find((p) => String(p.id ?? '') && String(p.id) !== cur)
           if (pick) {
             wantPoi = String(pick.id)
-            prelude.push(`No targets at ${cur || 'arrival POI'}; moving to ${pick.name ?? wantPoi} (${pick.type}).`)
+            if (cur) recentlyEmptyPois.set(ctx.profileId, [cur, ...recent].slice(0, 4))
+            prelude.push(
+              nothingPays
+                ? `Nothing that pays at ${cur || 'arrival POI'} (only unpaid species); moving to ${pick.name ?? wantPoi} (${pick.type}).`
+                : `No targets at ${cur || 'arrival POI'}; moving to ${pick.name ?? wantPoi} (${pick.type}).`)
           }
         }
       }

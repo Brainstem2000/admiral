@@ -220,3 +220,46 @@ describe('refusing the unpaid kill', () => {
     expect(refuses(new Set(), t('Patina-Grazer'))).toBe(false)
   })
 })
+
+/**
+ * A refusal the model can retry immediately is a loop, not a guard.
+ *
+ * Morg'Thar issued FOUR identical hunt_here() calls at Wazn Haze between 02:36
+ * and 02:38 on 2026-09-03. Each was refused with NOTHING PAID HERE; each burned
+ * a turn. The loop-breaker never fired because a macro refusal is a SUCCESSFUL
+ * return, not an error, so nothing in the harness could see it.
+ *
+ * The macro already knew how to advance POIs — it did so when a POI was EMPTY.
+ * The condition just did not cover "full of things that pay nothing".
+ */
+describe('POI advance condition', () => {
+  // Mirrors the macro: advance when the POI is empty OR holds only unpaid species.
+  const advance = (shootable: Array<{name:string;species:string;kind:string}>, q: Set<string>,
+                   wantSpecies = '') =>
+    shootable.length === 0 ||
+    (q.size > 0 && !wantSpecies && shootable.length > 0 && !shootable.some(x => isMissionQuarry(x, q)))
+
+  const q = missionQuarry(MISSIONS)
+
+  test('advances off an empty POI (the original behaviour, unchanged)', () => {
+    expect(advance([], q)).toBe(true)
+  })
+
+  test('advances off the POI that trapped Morg — creatures present, none paid', () => {
+    expect(advance([t('Carrion-Moth'), t('Pall-Jelly')], q)).toBe(true)
+    expect(advance([t('Cinder-Sylph'), t('Drift-Ray'), t('Pilot-Whale')], q)).toBe(true)
+  })
+
+  test('does NOT advance when paying quarry is present', () => {
+    expect(advance([t('Carrion-Moth'), t('Sift-Ray')], q)).toBe(false)
+    expect(advance([{name:'Raider',species:'raider',kind:'pirate'}], q)).toBe(false)
+  })
+
+  test('an explicit species hunt is never redirected', () => {
+    expect(advance([t('Carrion-Moth')], q, 'moth')).toBe(false)
+  })
+
+  test('with no contracts held, a populated POI is left alone', () => {
+    expect(advance([t('Carrion-Moth')], new Set())).toBe(false)
+  })
+})
