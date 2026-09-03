@@ -118,6 +118,28 @@ export function normalizeSystem(raw: unknown): Record<string, unknown> | null {
   return Object.keys(out).length > 0 ? out : null
 }
 
+/**
+ * Unwrap a get_active_missions payload, but only accept it when it actually
+ * carries objective counters.
+ *
+ * The lib_v2 local-state cache lists missions WITHOUT objective progress, so a
+ * completed contract reads as 0/N forever. Morg'Thar finished two Sift-Ray
+ * contracts at 06:40 on 2026-09-03 while his briefing still showed 0/4, so
+ * READY TO CLAIM never fired and 3,300cr went unclaimed. Preferring whichever
+ * source has objectives is what makes a finished contract visible.
+ */
+export function missionsWithObjectives(raw: unknown): unknown[] | null {
+  const list = Array.isArray(raw) ? raw
+    : (raw && typeof raw === 'object'
+        ? ((raw as Record<string, unknown>).missions ?? (raw as Record<string, unknown>).active)
+        : null)
+  if (!Array.isArray(list) || list.length === 0) return null
+  const hasObjectives = list.some((m) =>
+    m && typeof m === 'object' && Array.isArray((m as Record<string, unknown>).objectives) &&
+    ((m as Record<string, unknown>).objectives as unknown[]).length > 0)
+  return hasObjectives ? list : null
+}
+
 /** Execute a query command silently, returning parsed data or null */
 async function safeQuery(conn: GameConnection, command: string, args?: Record<string, unknown>): Promise<unknown> {
   try {
@@ -240,17 +262,32 @@ export async function refreshBriefingData(profileId: string, conn: GameConnectio
   if (localState) {
     statusRaw = localState
     cargoRaw = localState.cargo ?? null
-    // lib state's missions section is {active: [...]} — unwrap to the array the parser expects
+    // lib state's missions section is {active: [...]} — unwrap to the array the parser expects.
+    //
+    // But this cache does NOT track objective progress. Morg'Thar completed both
+    // Sift-Ray contracts at 06:40 on 2026-09-03 — the game read 4/4 [DONE] and
+    // 6/6 [DONE] — while his briefing still said "Ghosts in the Cloud 0/4", so
+    // the READY TO CLAIM block never fired and 3,300cr sat unclaimed. An agent
+    // that cannot see a finished contract does not turn it in.
+    //
+    // get_active_missions is a FREE query, so fetch it over the wire and prefer
+    // it whenever it carries objective counters. Falling back to the cache keeps
+    // the zero-round-trip path working if the wire call fails.
     const ms = localState.missions as Record<string, unknown> | unknown[] | null | undefined
     missionsRaw = Array.isArray(ms) ? ms : (ms && typeof ms === 'object' && Array.isArray((ms as Record<string, unknown>).active)) ? (ms as Record<string, unknown>).active : null
-    ;[nearbyRaw, systemRaw, shipRaw, freightRaw] = await Promise.all([
+    let wireMissions: unknown = null
+    ;[nearbyRaw, systemRaw, shipRaw, freightRaw, wireMissions] = await Promise.all([
       safeQuery(conn, 'get_nearby'),
       querySystem(conn),
       // get_status carries no `modules` array, so the weapon loadout has to
       // come from get_ship. Free query, no game tick.
       safeQuery(conn, 'get_ship'),
       safeQuery(conn, 'shipping', { action: 'active' }),
+      safeQuery(conn, 'get_active_missions'),
     ])
+    // Prefer the wire whenever it actually carries objective progress.
+    const fresh = missionsWithObjectives(wireMissions)
+    if (fresh) missionsRaw = fresh
   } else {
     // Run queries in parallel — these are all free query commands
     ;[statusRaw, cargoRaw, nearbyRaw, systemRaw, missionsRaw, shipRaw, freightRaw] = await Promise.all([
