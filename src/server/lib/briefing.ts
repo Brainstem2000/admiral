@@ -742,6 +742,7 @@ export function buildSituationalBriefing(profileId: string): string {
     const all = cache.missions.map((m) => m as Record<string, unknown>)
     const paid = all.filter((m) => !isAutoAttachedMission(m))
     const shown = (paid.length > 0 ? paid : all).slice(0, 5)
+    const ready: string[] = []
     const missionStrs = shown.map((mission) => {
       const title = String(mission.title ?? mission.name ?? mission.type ?? mission.description ?? '?').slice(0, 40)
       const id = String(mission.mission_id ?? mission.id ?? '')
@@ -752,11 +753,29 @@ export function buildSituationalBriefing(profileId: string): string {
       const rewards = (mission.rewards && typeof mission.rewards === 'object' ? mission.rewards : {}) as Record<string, unknown>
       const reward = Number(rewards.credits ?? mission.reward_credits ?? mission.reward ?? NaN)
       const target = mission.target_poi ?? mission.destination ?? ''
+      // WHERE the reward is claimed. A contract is completed at its ISSUING
+      // base, not wherever the last kill happened, and the briefing never said
+      // so — an agent can finish a contract and simply never collect it.
+      const issuer = String(mission.issuing_base_id ?? mission.issuing_base ?? '')
+      const issuerSys = String(mission.issuing_system_id ?? '')
+      const objsDone = objs.length > 0 && objs.every((o) =>
+        o.completed === true || (Number(o.current ?? 0) >= Number(o.required ?? Infinity)))
+      if (objsDone && id) {
+        ready.push(`${title} — ${Number.isFinite(reward) ? fmtNum(reward) + 'cr' : 'reward'} at ${issuer || 'its issuing base'}` +
+          `${issuerSys ? ` (${issuerSys})` : ''}: complete_mission(id="${id}")`)
+      }
       return `${title}${id ? ` [id ${id}]` : ''}${counter ? ` ${counter}` : ''}` +
-        `${Number.isFinite(reward) ? ` ${fmtNum(reward)}cr` : ''} exp ${fmtExpiry(mission)}${target ? ' → ' + target : ''}`
+        `${Number.isFinite(reward) ? ` ${fmtNum(reward)}cr` : ''} exp ${fmtExpiry(mission)}` +
+        `${issuer ? ` claim@${issuer}` : ''}${target ? ' → ' + target : ''}`
     })
     const extra = all.length - shown.length
     lines.push(`Missions (${paid.length} paid held, cap 5): ${missionStrs.join(' | ')}${extra > 0 ? ` (+${extra} more)` : ''}`)
+    if (ready.length > 0) {
+      lines.push(
+        `💰 READY TO CLAIM (${ready.length}) — these are DONE and the credits are unpaid until you turn them in:\n  ` +
+        ready.join('\n  '),
+      )
+    }
   }
 
   // System POIs
