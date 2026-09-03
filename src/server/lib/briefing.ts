@@ -54,6 +54,70 @@ function emptyCache(): CachedData {
   return { status: null, cargo: null, nearby: null, targets: [], market: null, system: null, missions: null, freight: null, updatedAt: 0 }
 }
 
+/**
+ * Normalise get_system into one object shape.
+ *
+ * The command answers as JSON on some connections and as a plain text report on
+ * others:
+ *
+ *   System: Krynn (krynn) | Empire: crimson | Security: Maximum Security
+ *   POIs (7):
+ *   id\tname\ttype\tclass\tbase\tonline
+ *   war_citadel\tWar Citadel\tstation\t\tCrimson War Citadel\t28
+ *   Connections (4):
+ *   system_id\tname\tdistance
+ *   iron_reach\tIron Reach\t399 GU
+ *
+ * The briefing used to keep the payload only when it was already an object, so
+ * for text-answering agents the POI list AND the jump-link table were thrown
+ * away without a word. Morg'Thar (2026-09-02) then guessed his way around the
+ * map — jump(nashira) from gsc_0051, jump(scheat), jump(segin) — collecting
+ * `not_connected` until the loop-breaker fired, because nothing in his prompt
+ * ever told him which systems his current one actually touches.
+ */
+export function normalizeSystem(raw: unknown): Record<string, unknown> | null {
+  if (!raw) return null
+  if (typeof raw === 'object') return raw as Record<string, unknown>
+  if (typeof raw !== 'string') return null
+
+  const text = raw
+  // An in-transit reply is a status sentence, not a system report. Returning
+  // null keeps the last real system cached rather than blanking it mid-jump.
+  if (/^\s*IN TRANSIT/i.test(text)) return null
+
+  const out: Record<string, unknown> = {}
+  const head = text.match(/^System:\s*(.+?)\s*\(([^)]+)\)/m)
+  if (head) { out.name = head[1]; out.id = head[2] }
+  const emp = text.match(/Empire:\s*([^|\n]+)/)
+  if (emp) out.empire = emp[1].trim()
+  const sec = text.match(/Security:\s*([^|\n]+)/)
+  if (sec) out.security = sec[1].trim()
+
+  // Both tables are "Header (n):" then a \t header row then \t data rows.
+  const section = (label: string): Record<string, string>[] => {
+    const start = text.search(new RegExp(`^${label}\\s*\\(\\d+\\)\\s*:`, 'm'))
+    if (start < 0) return []
+    const lines = text.slice(start).split('\n').slice(1)
+    const cols = (lines.shift() ?? '').split('\t').map((c) => c.trim())
+    if (cols.length < 2) return []
+    const rows: Record<string, string>[] = []
+    for (const line of lines) {
+      if (!line.includes('\t')) break            // next section, or end of report
+      const cells = line.split('\t')
+      const row: Record<string, string> = {}
+      cols.forEach((c, i) => { row[c] = (cells[i] ?? '').trim() })
+      if (Object.values(row).some((v) => v !== '')) rows.push(row)
+    }
+    return rows
+  }
+
+  const pois = section('POIs')
+  if (pois.length > 0) out.pois = pois
+  const conns = section('Connections')
+  if (conns.length > 0) out.connections = conns
+  return Object.keys(out).length > 0 ? out : null
+}
+
 /** Execute a query command silently, returning parsed data or null */
 async function safeQuery(conn: GameConnection, command: string, args?: Record<string, unknown>): Promise<unknown> {
   try {
@@ -187,7 +251,12 @@ export async function refreshBriefingData(profileId: string, conn: GameConnectio
   // briefing rendered "Nearby objects: 0" while four grazers sat in front of
   // Morg'Thar at Alkaid on 2026-09-02, and he jumped away without firing.
   cache.targets = collectTargets(nearbyRaw)
-  if (systemRaw && typeof systemRaw === 'object') cache.system = systemRaw as Record<string, unknown>
+  // get_system answers as an OBJECT on some connections and as a plain TEXT
+  // table on others. The object-only check that used to live here dropped the
+  // whole payload — POIs and jump links included — for every text-answering
+  // agent, silently. See normalizeSystem.
+  const sys = normalizeSystem(systemRaw)
+  if (sys) cache.system = sys
   if (Array.isArray(missionsRaw)) cache.missions = missionsRaw
   else if (missionsRaw && typeof missionsRaw === 'object' && 'missions' in (missionsRaw as Record<string, unknown>)) {
     cache.missions = (missionsRaw as Record<string, unknown>).missions as unknown[]
@@ -442,6 +511,40 @@ function fmtTicks(t: unknown): string {
   const h = (n * TICK_SECONDS) / 3600
   const when = Math.abs(h) >= 1 ? `${h.toFixed(1)}h` : `${Math.round(Math.abs(h) * 60)}m`
   return n < 0 ? `${n} ticks (${when} AGO)` : `${n} ticks (~${when})`
+}
+
+/**
+ * Render the systems this one actually touches.
+ *
+ * `jump` only reaches an adjacent system; anything else comes back
+ * `not_connected`. Without the list in front of it, a model guesses from
+ * half-remembered names, and three identical failures trip the loop-breaker —
+ * which is exactly how Morg'Thar spent 22:08 on 2026-09-02. The adjacency was
+ * in get_system the whole time.
+ */
+export function renderJumpLinks(system: Record<string, unknown> | null): string[] {
+  if (!system) return []
+  const raw = (system.connections ?? system.links ?? system.adjacent ?? system.connected_systems) as unknown
+  if (!Array.isArray(raw) || raw.length === 0) return []
+
+  const parts: string[] = []
+  for (const c of raw) {
+    if (typeof c === 'string') { parts.push(c); continue }
+    if (!c || typeof c !== 'object') continue
+    const o = c as Record<string, unknown>
+    const id = String(o.system_id ?? o.id ?? '')
+    if (!id) continue
+    const nm = String(o.name ?? '')
+    const dist = String(o.distance ?? '')
+    parts.push(`${id}${nm && nm !== id ? ` (${nm}${dist ? `, ${dist}` : ''})` : dist ? ` (${dist})` : ''}`)
+  }
+  if (parts.length === 0) return []
+
+  return [
+    `JUMP LINKS FROM HERE (${parts.length}) — jump(id=...) reaches ONLY these. Any other id returns not_connected:`,
+    `  ${parts.join(' · ')}`,
+    '  For anywhere else use goto_system(target_system="<id>"), which routes multi-hop for you. Do NOT retry a jump that returned not_connected.',
+  ]
 }
 
 /**
@@ -879,6 +982,7 @@ export function buildSituationalBriefing(profileId: string): string {
       })
       lines.push(`System POIs: ${poiNames.join(', ')}`)
     }
+    for (const line of renderJumpLinks(cache.system)) lines.push(line)
   }
 
   // Shootable things at this POI, with the ids `attack` takes.
