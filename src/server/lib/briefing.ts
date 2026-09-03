@@ -129,6 +129,52 @@ async function safeQuery(conn: GameConnection, command: string, args?: Record<st
   }
 }
 
+/**
+ * get_system, resolved from whichever field actually carries the tables.
+ *
+ * safeQuery prefers `structuredContent` over `result`, which is right almost
+ * everywhere but wrong here: some connections answer get_system with a thin
+ * structuredContent object (name/id only) AND a full text report in `result`.
+ * Taking the object silently drops the POI list and the jump-link table, which
+ * is why JUMP LINKS never appeared for Morg'Thar even after the parser shipped
+ * and tested clean against his exact payload.
+ *
+ * So parse BOTH candidates and keep the one that carries connections, then
+ * POIs, then anything. "Prefer the payload with the data in it" rather than a
+ * fixed field order.
+ */
+async function querySystem(conn: GameConnection): Promise<Record<string, unknown> | null> {
+  let raw: CommandResult
+  try {
+    raw = await conn.execute('get_system')
+  } catch {
+    return null
+  }
+  if (raw.error) return null
+
+  return pickRichestSystem([raw.structuredContent, raw.result])
+}
+
+/**
+ * Given the candidate payloads get_system can arrive in, return the most
+ * informative merged view. Exported for tests; see querySystem for why.
+ */
+export function pickRichestSystem(raws: unknown[]): Record<string, unknown> | null {
+  const candidates = raws
+    .map((c) => normalizeSystem(c))
+    .filter((c): c is Record<string, unknown> => c !== null)
+  if (candidates.length === 0) return null
+
+  const score = (s: Record<string, unknown>) =>
+    (Array.isArray(s.connections) && s.connections.length > 0 ? 2 : 0) +
+    (Array.isArray(s.pois) && s.pois.length > 0 ? 1 : 0)
+  // Merge rather than discard: one field may hold the tables and the other the
+  // header (empire/security), and both are worth having.
+  const best = candidates.reduce((a, b) => (score(b) > score(a) ? b : a))
+  const other = candidates.find((c) => c !== best)
+  return other ? { ...other, ...best } : best
+}
+
 /** One shootable thing at the agent's POI, flattened from get_nearby. */
 export interface NearbyTarget {
   id: string
@@ -199,7 +245,7 @@ export async function refreshBriefingData(profileId: string, conn: GameConnectio
     missionsRaw = Array.isArray(ms) ? ms : (ms && typeof ms === 'object' && Array.isArray((ms as Record<string, unknown>).active)) ? (ms as Record<string, unknown>).active : null
     ;[nearbyRaw, systemRaw, shipRaw, freightRaw] = await Promise.all([
       safeQuery(conn, 'get_nearby'),
-      safeQuery(conn, 'get_system'),
+      querySystem(conn),
       // get_status carries no `modules` array, so the weapon loadout has to
       // come from get_ship. Free query, no game tick.
       safeQuery(conn, 'get_ship'),
@@ -211,7 +257,7 @@ export async function refreshBriefingData(profileId: string, conn: GameConnectio
       safeQuery(conn, 'get_status'),
       safeQuery(conn, 'get_cargo'),
       safeQuery(conn, 'get_nearby'),
-      safeQuery(conn, 'get_system'),
+      querySystem(conn),
       safeQuery(conn, 'get_active_missions'),
       safeQuery(conn, 'get_ship'),
       safeQuery(conn, 'shipping', { action: 'active' }),
@@ -255,8 +301,9 @@ export async function refreshBriefingData(profileId: string, conn: GameConnectio
   // table on others. The object-only check that used to live here dropped the
   // whole payload — POIs and jump links included — for every text-answering
   // agent, silently. See normalizeSystem.
-  const sys = normalizeSystem(systemRaw)
-  if (sys) cache.system = sys
+  // querySystem already normalized and merged; keep the last good one on null
+  // (an IN TRANSIT reply parses to null and must not blank the cache).
+  if (systemRaw && typeof systemRaw === 'object') cache.system = systemRaw as Record<string, unknown>
   if (Array.isArray(missionsRaw)) cache.missions = missionsRaw
   else if (missionsRaw && typeof missionsRaw === 'object' && 'missions' in (missionsRaw as Record<string, unknown>)) {
     cache.missions = (missionsRaw as Record<string, unknown>).missions as unknown[]

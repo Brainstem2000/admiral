@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { normalizeSystem, renderJumpLinks } from '../src/server/lib/briefing'
+import { normalizeSystem, renderJumpLinks, pickRichestSystem } from '../src/server/lib/briefing'
 
 /**
  * Morg'Thar, 2026-09-02 22:08: jump(nashira) from gsc_0051, then jump(scheat),
@@ -85,5 +85,46 @@ describe('renderJumpLinks', () => {
     expect(renderJumpLinks({})).toEqual([])
     expect(renderJumpLinks({ connections: [] })).toEqual([])
     expect(renderJumpLinks({ connections: [null, {}, 'x'] }).join('\n')).toContain('x')
+  })
+})
+
+/**
+ * The parser shipped and tested clean against Morg'Thar's exact payload, and
+ * JUMP LINKS still never appeared in his prompt. Cause: safeQuery prefers
+ * `structuredContent` over `result`, and his connection answers get_system with
+ * a thin object in the former and the full text report in the latter. Taking
+ * the object dropped both tables silently — a correct parser reached by the
+ * wrong field.
+ */
+describe('pickRichestSystem', () => {
+  const thin = { id: 'gsc_0039', name: 'GSC-0039' }
+
+  test('prefers the payload that actually carries the tables', () => {
+    const picked = pickRichestSystem([thin, TEXT])!
+    expect((picked.connections as unknown[]).length).toBe(4)
+    expect((picked.pois as unknown[]).length).toBe(3)
+  })
+
+  test('field order does not decide it — richness does', () => {
+    const a = pickRichestSystem([thin, TEXT])!
+    const b = pickRichestSystem([TEXT, thin])!
+    expect((a.connections as unknown[]).length).toBe((b.connections as unknown[]).length)
+  })
+
+  test('merges the header from one payload with the tables from the other', () => {
+    const header = { empire: 'crimson', security: 'Maximum Security', extra: 'kept' }
+    const picked = pickRichestSystem([header, TEXT])!
+    expect(picked.extra).toBe('kept')                    // from the thin object
+    expect((picked.connections as unknown[]).length).toBe(4)  // from the text
+  })
+
+  test('a lone usable payload is still returned', () => {
+    expect(pickRichestSystem([null, TEXT])!.connections).toBeDefined()
+    expect(pickRichestSystem([thin, null])!.id).toBe('gsc_0039')
+  })
+
+  test('nothing usable yields null rather than an empty shell', () => {
+    expect(pickRichestSystem([null, undefined, ''])).toBeNull()
+    expect(pickRichestSystem([])).toBeNull()
   })
 })
