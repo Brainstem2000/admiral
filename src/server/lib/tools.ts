@@ -84,6 +84,19 @@ export function fullWeaponReloadVerdict(
 
 // --- Tool Definitions ---
 
+/** Tools only a combat role may call. Offering a fight-picking macro to a
+ *  hauler wastes its turns: Cass Margin called hunt_here three times in twenty
+ *  minutes on 2026-09-02 and was refused each time, because the tool sat in her
+ *  list even though her prompt never mentioned it. A tool the agent must not
+ *  use should not be on the menu — that holds for any driving model. */
+const COMBAT_ONLY_TOOLS = new Set(['hunt_here'])
+
+/** The tool list an agent of this role may actually call. */
+export function toolsForRole(role: 'hunter' | 'default'): Tool[] {
+  if (role === 'hunter') return allTools
+  return allTools.filter((t) => !COMBAT_ONLY_TOOLS.has(t.name))
+}
+
 export const allTools: Tool[] = [
   {
     name: 'game',

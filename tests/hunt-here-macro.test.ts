@@ -284,3 +284,22 @@ describe('hunt_here', () => {
     expect(calls.filter(c => c.cmd === 'attack').length).toBeLessThanOrEqual(4)
   }, 60_000)
 })
+
+describe('combat tools are not offered to non-combat roles', () => {
+  test('a hunter gets hunt_here; everyone else does not see it at all', async () => {
+    // The dispatch-site refusal is the guard, but a tool the agent must never
+    // use should not be on the menu either: Cass Margin (an uninsured hauler)
+    // called hunt_here three times in twenty minutes on 2026-09-02 and was
+    // refused each time, burning a turn apiece.
+    const { toolsForRole } = await import('../src/server/lib/tools')
+    const hunter = toolsForRole('hunter').map(t => t.name)
+    const other = toolsForRole('default').map(t => t.name)
+    expect(hunter).toContain('hunt_here')
+    expect(other).not.toContain('hunt_here')
+    // Everything else must still be offered to both.
+    for (const t of ['game', 'goto_system', 'sell_cargo', 'update_todo', 'codex']) {
+      expect(hunter, t).toContain(t)
+      expect(other, t).toContain(t)
+    }
+  })
+})

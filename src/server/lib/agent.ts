@@ -12,7 +12,7 @@ import { resolveAgentRole, renderPromptForRole, type AgentRole } from './role'
 import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
-import { allTools, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest, reputationLockedSystemIds } from './tools'
+import { allTools, toolsForRole, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest, reputationLockedSystemIds } from './tools'
 import { directiveForbidsSystem } from './directive-rules'
 import { runAgentTurn, VOLATILE_STATE_HEADER, VOLATILE_STATE_END, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
@@ -377,7 +377,7 @@ export class Agent {
         content: `Begin your mission: ${profile.directive || 'Play the game. Mine ore, sell it, and grow stronger.'}`,
         timestamp: Date.now(),
       }],
-      tools: allTools,
+      tools: toolsForRole(resolveAgentRole(profile)),
     }
 
     const compaction: CompactionState = { summary: '' }
