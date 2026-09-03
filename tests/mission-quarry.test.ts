@@ -263,3 +263,51 @@ describe('POI advance condition', () => {
     expect(advance([t('Carrion-Moth')], new Set())).toBe(false)
   })
 })
+
+/**
+ * The first POI-advance fix ping-ponged: Morg'Thar bounced zosma_gas_pocket ->
+ * zosma_belt repeatedly at 03:02 and 03:05. Two causes, both fixed here.
+ *
+ * 1. It recorded as "already checked" the POI reported by getLocalState, which
+ *    does not reflect the macro's OWN travel — so it kept recording the POI it
+ *    had left and re-selecting the same destination. The POI actually REFUSED
+ *    at is what must be remembered.
+ * 2. When every POI was already checked it fell back to "any POI except the
+ *    current one", re-picking a rejected POI forever. An exhausted system must
+ *    end the macro, because the remedy is a JUMP and the macro does not jump.
+ */
+describe('POI exhaustion', () => {
+  const pickNext = (hunting: string[], cur: string, recent: string[]) =>
+    hunting.find(p => p !== cur && !recent.includes(p)) ?? null
+
+  test('picks an unchecked POI when one exists', () => {
+    expect(pickNext(['gas', 'belt', 'ice'], 'gas', ['gas'])).toBe('belt')
+  })
+
+  test('does not re-pick a POI already found empty — the ping-pong', () => {
+    expect(pickNext(['gas', 'belt'], 'belt', ['gas'])).toBeNull()
+    expect(pickNext(['gas', 'belt'], 'gas', ['belt'])).toBeNull()
+  })
+
+  test('returns null when the whole system is checked, so the macro can abort', () => {
+    expect(pickNext(['gas', 'belt', 'ice'], 'ice', ['gas', 'belt', 'ice'])).toBeNull()
+  })
+
+  test('remembering the REFUSED poi (not the departed one) breaks the cycle', () => {
+    // Buggy: always records the stale departure POI, so 'belt' is never excluded.
+    let buggy: string[] = []
+    let choice = null
+    for (let i = 0; i < 3; i++) {
+      choice = pickNext(['gas', 'belt'], 'gas', buggy)
+      if (!buggy.includes('gas')) buggy = ['gas', ...buggy]   // records departure
+    }
+    expect(choice).toBe('belt')            // picks belt forever
+
+    // Fixed: records the POI actually refused at.
+    let fixed: string[] = ['gas']
+    const first = pickNext(['gas', 'belt'], 'gas', fixed)
+    expect(first).toBe('belt')
+    fixed = ['belt', ...fixed]             // refused at belt, record belt
+    expect(pickNext(['gas', 'belt'], 'belt', fixed)).toBeNull()   // cycle broken
+  })
+})

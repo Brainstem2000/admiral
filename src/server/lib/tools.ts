@@ -3294,6 +3294,9 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
   // in a loop for twenty minutes on 2026-09-02 and never reached the hunt. One
   // call has to cover the whole stop.
   const prelude: string[] = []
+  // The POI we are actually hunting at, function-scoped so the refusal path can
+  // record it. getLocalState's poi_id does NOT reflect the macro's own travel.
+  let huntingPoi = ''
   {
     let gs: Record<string, unknown> | null = null
     try { gs = conn.getLocalState?.() ?? null } catch { gs = null }
@@ -3344,14 +3347,27 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
           const pick = hunting.find((p) => {
             const id = String(p.id ?? '')
             return id && id !== cur && !recent.includes(id)
-          }) ?? hunting.find((p) => String(p.id ?? '') && String(p.id) !== cur)
+          })
           if (pick) {
             wantPoi = String(pick.id)
-            if (cur) recentlyEmptyPois.set(ctx.profileId, [cur, ...recent].slice(0, 4))
             prelude.push(
               nothingPays
                 ? `Nothing that pays at ${cur || 'arrival POI'} (only unpaid species); moving to ${pick.name ?? wantPoi} (${pick.type}).`
                 : `No targets at ${cur || 'arrival POI'}; moving to ${pick.name ?? wantPoi} (${pick.type}).`)
+          } else if (hunting.length > 0) {
+            // Every hunting POI here has already come up empty. Falling back to
+            // "any POI except the current one" is what produced the
+            // zosma_gas_pocket <-> zosma_belt ping-pong: it re-picked a POI we
+            // had already rejected. The system is exhausted; say so and stop,
+            // because the fix is a JUMP and the macro does not make those.
+            const sysId = String(node?.id ?? node?.system_id ?? '')
+            return (
+              `hunt_here ABORT: every hunting POI in ${sysId || 'this system'} has been checked and none holds ` +
+              `anything that pays you (${hunting.map((p) => String(p.name ?? p.id)).slice(0, 5).join(', ')}). ` +
+              `THIS SYSTEM IS EXHAUSTED — do not call hunt_here here again. ` +
+              `goto_system(target_system="<id>") to a DIFFERENT system, then hunt there. ` +
+              `You are paid for: ${[...quarry].join(', ')}.`
+            )
           }
         }
       }
@@ -3368,6 +3384,7 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
         prelude.push(`Travelled to ${wantPoi}.`)
         await macroSleep(macroStepDelayMs(conn))
       }
+      huntingPoi = wantPoi
     }
   }
 
@@ -3447,6 +3464,19 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
     // A kill that costs more ammo than its loot is worth is a LOSS, so the
     // macro declines to make it and says where the paying quarry is instead.
     if (quarry.size > 0 && !isMissionQuarry(target, quarry) && !wantSpecies && args.allow_loot_only !== true) {
+      // Remember the POI we are ACTUALLY standing at, not the one getLocalState
+      // reports. That cache does not reflect the macro's own travel, so the
+      // first version recorded the POI it had already left and kept
+      // re-selecting the same destination: Morg'Thar bounced
+      // zosma_gas_pocket -> zosma_belt repeatedly at 03:02 and 03:05.
+      // Recording the refused POI is what actually breaks the cycle.
+      {
+        const at = huntingPoi || String((conn.getLocalState?.()?.location as Record<string, unknown> | undefined)?.poi_id ?? '')
+        if (at) {
+          const prev = recentlyEmptyPois.get(ctx.profileId) ?? []
+          if (!prev.includes(at)) recentlyEmptyPois.set(ctx.profileId, [at, ...prev].slice(0, 6))
+        }
+      }
       const here = [...new Set(beatable.map((t) => t.name))].slice(0, 4).join(', ')
       stopReason =
         `NOTHING PAID HERE — refusing to spend ammo. This POI holds ${here}, and none of it ` +
