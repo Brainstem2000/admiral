@@ -30,8 +30,18 @@ interface CachedData {
   market: unknown[] | null
   system: Record<string, unknown> | null
   missions: unknown[] | null
+  /** Live freight contracts from `shipping(action="active")` — see renderFreight. */
+  freight: unknown[] | null
   updatedAt: number
 }
+
+/**
+ * Seconds per game tick, measured live 2026-09-02 (two `shipping` reads 20s
+ * apart advanced the tick counter by 2). Only used to turn a tick countdown
+ * into wall-clock for the briefing, so drift here is cosmetic — the tick
+ * numbers themselves are always printed alongside.
+ */
+const TICK_SECONDS = 10
 
 const agentCaches = new Map<string, CachedData>()
 const agentTimers = new Map<string, ReturnType<typeof setInterval>>()
@@ -41,7 +51,7 @@ const agentTimers = new Map<string, ReturnType<typeof setInterval>>()
 const agentEpochs = new Map<string, number>()
 
 function emptyCache(): CachedData {
-  return { status: null, cargo: null, nearby: null, targets: [], market: null, system: null, missions: null, updatedAt: 0 }
+  return { status: null, cargo: null, nearby: null, targets: [], market: null, system: null, missions: null, freight: null, updatedAt: 0 }
 }
 
 /** Execute a query command silently, returning parsed data or null */
@@ -116,30 +126,41 @@ export async function refreshBriefingData(profileId: string, conn: GameConnectio
   let statusRaw: unknown, cargoRaw: unknown, nearbyRaw: unknown, systemRaw: unknown, missionsRaw: unknown
 
   let shipRaw: unknown = null
+  let freightRaw: unknown = null
   if (localState) {
     statusRaw = localState
     cargoRaw = localState.cargo ?? null
     // lib state's missions section is {active: [...]} — unwrap to the array the parser expects
     const ms = localState.missions as Record<string, unknown> | unknown[] | null | undefined
     missionsRaw = Array.isArray(ms) ? ms : (ms && typeof ms === 'object' && Array.isArray((ms as Record<string, unknown>).active)) ? (ms as Record<string, unknown>).active : null
-    ;[nearbyRaw, systemRaw, shipRaw] = await Promise.all([
+    ;[nearbyRaw, systemRaw, shipRaw, freightRaw] = await Promise.all([
       safeQuery(conn, 'get_nearby'),
       safeQuery(conn, 'get_system'),
       // get_status carries no `modules` array, so the weapon loadout has to
       // come from get_ship. Free query, no game tick.
       safeQuery(conn, 'get_ship'),
+      safeQuery(conn, 'shipping', { action: 'active' }),
     ])
   } else {
     // Run queries in parallel — these are all free query commands
-    ;[statusRaw, cargoRaw, nearbyRaw, systemRaw, missionsRaw, shipRaw] = await Promise.all([
+    ;[statusRaw, cargoRaw, nearbyRaw, systemRaw, missionsRaw, shipRaw, freightRaw] = await Promise.all([
       safeQuery(conn, 'get_status'),
       safeQuery(conn, 'get_cargo'),
       safeQuery(conn, 'get_nearby'),
       safeQuery(conn, 'get_system'),
       safeQuery(conn, 'get_active_missions'),
       safeQuery(conn, 'get_ship'),
+      safeQuery(conn, 'shipping', { action: 'active' }),
     ])
   }
+
+  // Freight contracts run on their OWN clock, independent of missions, and a
+  // lapsed one bills you. `shipping(action="active")` is a read and works
+  // undocked, so there is no reason for an agent to ever be surprised by one.
+  cache.freight = Array.isArray(freightRaw) ? freightRaw
+    : (freightRaw && typeof freightRaw === 'object' && Array.isArray((freightRaw as Record<string, unknown>).shipments))
+      ? (freightRaw as Record<string, unknown>).shipments as unknown[]
+      : null
 
   if (statusRaw && typeof statusRaw === 'object') cache.status = statusRaw as Record<string, unknown>
   // Graft the module list from get_ship onto the cached ship object — the
@@ -412,6 +433,72 @@ function fmtNum(n: number): string {
   return n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + 'M'
     : n >= 1_000 ? (n / 1_000).toFixed(1) + 'K'
     : String(n)
+}
+
+/** Turn a tick countdown into rough wall-clock. Ticks are still printed too. */
+function fmtTicks(t: unknown): string {
+  const n = Number(t)
+  if (!Number.isFinite(n)) return '?'
+  const h = (n * TICK_SECONDS) / 3600
+  const when = Math.abs(h) >= 1 ? `${h.toFixed(1)}h` : `${Math.round(Math.abs(h) * 60)}m`
+  return n < 0 ? `${n} ticks (${when} AGO)` : `${n} ticks (~${when})`
+}
+
+/**
+ * Render active freight contracts.
+ *
+ * Freight runs on a clock the agent cannot see from get_status, and failing one
+ * charges `failure_debt` and holds `reserved_exposure` against the liability
+ * cap that limits how much freight can be carried at all. Cass Margin
+ * (2026-09-02) sat idle at Gold Run for a whole session broadcasting "no
+ * viable income" while a contract she had already accepted ticked toward a
+ * 500cr penalty, with the package sitting in her own storage three systems
+ * away. Nothing in her prompt mentioned it existed.
+ *
+ * The game computes `next_step` itself, so relay that verbatim rather than
+ * re-deriving the plan here — it stays correct as the contract changes state.
+ */
+export function renderFreight(freight: unknown[] | null): string[] {
+  if (!Array.isArray(freight) || freight.length === 0) return []
+  const lines: string[] = []
+  const rows: string[] = []
+
+  for (const raw of freight) {
+    if (!raw || typeof raw !== 'object') continue
+    const s = raw as Record<string, unknown>
+    const c = (s.contract ?? {}) as Record<string, unknown>
+    const id = String(c.id ?? s.contract_id ?? '')
+    if (!id) continue
+
+    const from = String(s.origin_name ?? c.origin_base_id ?? '?')
+    const to = String(s.destination_name ?? c.destination_base_id ?? '?')
+    const hops = Number(c.route_hops)
+    const late = s.late === true || Number(s.ticks_to_deadline) < 0
+    const debt = Number(s.failure_debt ?? c.failure_debt ?? 0)
+    const payout = Number(s.payout_if_delivered_now ?? c.base_reward ?? 0)
+    const exposure = Number(c.reserved_exposure ?? 0)
+    const inCargo = s.package_in_your_cargo === true
+
+    rows.push(
+      `${late ? '⚠ LATE ' : ''}${from} → ${to}${Number.isFinite(hops) ? ` (${hops} hops)` : ''}` +
+      `${s.role ? ` [${s.role}]` : ''}\n` +
+      `   pays ${fmtNum(payout)}cr if delivered now · FAILURE DEBT ${fmtNum(debt)}cr` +
+      `${exposure > 0 ? ` · ties up ${fmtNum(exposure)}cr of your liability cap` : ''}\n` +
+      `   deadline ${fmtTicks(s.ticks_to_deadline)}` +
+      `${s.ticks_to_recovery_deadline !== undefined ? ` · recovery window ${fmtTicks(s.ticks_to_recovery_deadline)}` : ''}\n` +
+      `   package ${inCargo ? 'IS in your hold' : `NOT in your hold — last seen: ${s.last_known_location ?? 'unknown'}`}` +
+      `${c.package_id ? `\n   package_id="${c.package_id}"` : ''}` +
+      `${s.next_step ? `\n   NEXT STEP (the game's own): ${s.next_step}` : ''}\n` +
+      `   settle: shipping(action="deliver"|"return"|"pay_debt", contract_id="${id}")`,
+    )
+  }
+  if (rows.length === 0) return []
+
+  lines.push(`== ACTIVE FREIGHT (${rows.length}) — these run on their OWN clock and BILL you if they lapse ==`)
+  lines.push(...rows)
+  lines.push('  Freight verbs all go through ONE command: shipping(action="list"|"active"|"accept"|"deliver"|"return"|"pay_debt", ...).')
+  lines.push('  `list`/`accept` need an operational mission service under you — at a station without one they return not_docked, which means WRONG STATION, not "no work available".')
+  return lines
 }
 
 // Station-like POI id suffixes. get_status on some connections carries NO explicit `docked` flag
@@ -777,6 +864,10 @@ export function buildSituationalBriefing(profileId: string): string {
       )
     }
   }
+
+  // Freight sits directly under missions: same shape of obligation, different
+  // clock, and the only one of the two that can bill the agent for inaction.
+  for (const line of renderFreight(cache.freight)) lines.push(line)
 
   // System POIs
   if (cache.system) {
