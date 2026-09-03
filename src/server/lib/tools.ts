@@ -336,6 +336,21 @@ function actionCooldownRemaining(profileId: string): number | null {
 const recentFailures = new Map<string, Array<{ key: string; timestamp: number }>>()
 // Fuel-floor checkpoint state: last blocked jump per profile (see fuel floor guard).
 const fuelFloorBlocks = new Map<string, { dest: string; at: number }>()
+/** Ship classes this profile has successfully commissioned, and when. A hull is
+ *  the most expensive single purchase an agent can make, and a commission takes
+ *  hundreds of ticks during which the ship does not appear in `list_ships` — so
+ *  "do I already have one on order?" is invisible unless you call
+ *  `commission_status`, which agents skip. Morg'Thar paid 735,419cr for a War
+ *  Wagon at 17:40 on 2026-09-03 and re-issued the identical commission seven
+ *  minutes later; only an unrelated `not_docked` error stopped the fleet buying
+ *  a second one. See the commission_ship guard. */
+const shipCommissions = new Map<string, Array<{ shipClass: string; at: number }>>()
+/** How long a recorded commission suppresses a repeat order. Build times run to
+ *  hundreds of ticks (the War Wagon is 450, ~75 minutes at 10s/tick), and the
+ *  window only needs to cover the stretch where the hull is invisible to
+ *  `list_ships`. Six hours is comfortably past the longest build we have seen
+ *  while still clearing on its own if a commission is cancelled. */
+const DUPLICATE_COMMISSION_WINDOW_MS = 6 * 60 * 60 * 1000
 /** Stations that refused docking on reputation, per profile. Reputation
  *  recovers slowly if at all, so a refusal is treated as sticky for a while
  *  rather than re-tested every few minutes.
@@ -1203,6 +1218,30 @@ export function checkDoctrineGuards(
           `Go somewhere you are WELCOME instead: your home space (crimson_war_citadel at Krynn) or any ` +
           `station of a faction you have not attacked — docking anywhere OUTSIDE ${locked.systemId} is not ` +
           `blocked. Record in your TODO that this station is closed to you, so you stop routing here.`
+        )
+      }
+    }
+  }
+
+  // Commission: never buy the same hull twice while one is still building.
+  {
+    const bare = command.replace(/^spacemolt_/, '').replace(/^ship_/, '')
+    if (bare === 'commission_ship' && getPreference('duplicate_commission_gate') !== 'off') {
+      const shipClass = String(commandArgs?.ship_class ?? commandArgs?.id ?? '').trim().toLowerCase()
+      const prior = (shipCommissions.get(ctx.profileId) ?? [])
+        .filter(c => Date.now() - c.at < DUPLICATE_COMMISSION_WINDOW_MS)
+      const dup = prior.find(c => c.shipClass === shipClass)
+      if (shipClass && dup) {
+        const mins = Math.round((Date.now() - dup.at) / 60_000)
+        return (
+          `BLOCKED by Admiral doctrine: you already commissioned a ${shipClass} ${mins} minute(s) ago ` +
+          `and it is still building. A hull is the most expensive thing you can buy, and a second one ` +
+          `would cost you the full price again for a ship you do not need.\n\n` +
+          `A commission in progress does NOT appear in list_ships — that is why it looks like nothing ` +
+          `happened. Run \`commission_status\` to see it. Do not re-issue commission_ship.\n\n` +
+          `If the commission genuinely failed and you must retry, tell the Admiral rather than ` +
+          `re-ordering: this gate exists because a 735,419cr duplicate was seven minutes away from ` +
+          `being bought.`
         )
       }
     }
@@ -2312,6 +2351,26 @@ export async function executeTool(
             `must be a DECISION that uses it (accept something, travel somewhere, buy/sell, or ` +
             `record a blocker and move on) — never this query again.`
           ctx.log('system', `[loop-break] ${command} repeated identically ${repeats}x while succeeding — injected QUERY LOOP note`)
+        }
+      }
+    }
+
+    // A commission that actually went through arms the duplicate gate. Recorded
+    // HERE rather than in captureFromCommandResult because only this scope has
+    // commandArgs, and only results that reached this point succeeded — a
+    // commission rejected for not_docked or missing_materials returns earlier,
+    // so a failed attempt never blocks the retry.
+    {
+      const bare = command.replace(/^spacemolt_/, '').replace(/^ship_/, '')
+      if (bare === 'commission_ship' || bare.endsWith('_commission_ship')) {
+        const cls = String(
+          (resultData as Record<string, unknown> | undefined)?.ship_class ??
+          commandArgs?.ship_class ?? commandArgs?.id ?? '',
+        ).trim().toLowerCase()
+        if (cls) {
+          const prev = shipCommissions.get(ctx.profileId) ?? []
+          shipCommissions.set(ctx.profileId, [{ shipClass: cls, at: Date.now() }, ...prev].slice(0, 12))
+          ctx.log('system', `[commission] recorded ${cls} — a repeat commission_ship for it is now blocked for 6h`)
         }
       }
     }
