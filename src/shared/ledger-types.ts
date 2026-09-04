@@ -12,6 +12,9 @@ export type LedgerKind =
   // Posted by scripts/repair-escrow-ledger.ts to reverse the phantom escrow
   // rows the old reconciler manufactured on every freight delivery.
   | 'escrow_correction'
+  // A correcting entry posted by the Admiral to reverse a mis-booked row.
+  // History is never deleted — the bad posting stays and gains its offset.
+  | 'correction'
 
 export interface LedgerEntry {
   id: number

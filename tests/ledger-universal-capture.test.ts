@@ -80,3 +80,35 @@ describe('universal residual capture', () => {
     expect(shouldBook).toBe(false)
   })
 })
+
+/**
+ * The gift double-count, 2026-09-03. `mirrorFleetGift` credits the RECIPIENT
+ * from the SENDER's command and books no balance_after — it cannot know the
+ * recipient's wallet. `lastBookedBalance` only reads rows that carry one, so
+ * the mirror was invisible, and the recipient's next command re-booked the
+ * whole gift as `unattributed`. CyberSapper showed +50,000 twice for one
+ * transfer from Grit Vane.
+ *
+ * The anchor must be the last recorded balance PLUS everything booked since.
+ */
+const anchor = (lastBalance: number, bookedSince: number) => lastBalance + bookedSince
+
+describe('balance anchor vs unbooked mirror rows', () => {
+  test('a mirrored gift does not get counted twice', () => {
+    // Wallet 33,422 anchored. Grit's send books +50,000 into CyberSapper's
+    // ledger with no balance. His next command reports a wallet of 83,422.
+    const prev = anchor(33_422, 50_000)      // 83,422 — the gift is accounted for
+    expect(residual(83_422, prev, 0)).toBe(0)
+  })
+
+  test('the OLD anchor produced the phantom 50,000', () => {
+    const buggy = anchor(33_422, 0)          // mirror row ignored
+    expect(residual(83_422, buggy, 0)).toBe(50_000)
+  })
+
+  test('a genuine unexplained move still books alongside a mirror', () => {
+    // Same gift, but rent also took 1,000 before the next command.
+    const prev = anchor(33_422, 50_000)
+    expect(residual(82_422, prev, 0)).toBe(-1_000)
+  })
+})

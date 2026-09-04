@@ -56,6 +56,8 @@ const KIND_COLORS: Record<string, string> = {
   // A movement we saw but could not attribute (rent, commission refunds).
   // Purple so it reads as "needs a human eye" rather than routine income.
   unattributed: 'var(--smui-purple)',
+  // Admiral-posted reversal of a mis-booked row; pairs with the row it offsets.
+  correction: 'var(--smui-frost-2)',
   other: 'var(--muted-foreground)',
 }
 

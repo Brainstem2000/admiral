@@ -69,7 +69,7 @@ export class LedgerCollector {
       // command whose result echoes the wallet can be reconciled, and the
       // Admiral's standing requirement is that every movement of every credit
       // is tracked — see the universal residual catch below.
-      const balanceBeforeRows = this.lastBookedBalance(profileId)
+      const balanceBeforeRows = this.balanceAnchor(profileId)
       for (const row of rows) this.insert(profileId, row, command, r)
       // Shipping escrow/bond flows carry NO explicit amount fields anywhere in
       // their results, yet move real credits: post-escrow out, carrier bonds
@@ -458,6 +458,36 @@ export class LedgerCollector {
     }
 
     return rows
+  }
+
+
+  /**
+   * The balance the wallet should hold BEFORE this command's rows — the anchor
+   * the universal residual capture measures against.
+   *
+   * `lastBookedBalance` only sees rows carrying a balance_after, so any row
+   * inserted without one is invisible to it. `mirrorFleetGift` is exactly that
+   * case: it credits the RECIPIENT from the SENDER's command and cannot know
+   * the recipient's wallet, so it books no balance. The recipient's next
+   * command then saw a wallet 50,000 higher than the last anchored row and the
+   * residual capture booked the same gift a second time as `unattributed` —
+   * observed on CyberSapper 2026-09-03, +50,000 twice for one transfer.
+   *
+   * So: take the newest anchored balance and add every amount booked after it.
+   */
+  private static balanceAnchor(profileId: string): number | null {
+    try {
+      const row = getDb().query(
+        'SELECT id, balance_after FROM financial_ledger WHERE profile_id = ? AND balance_after IS NOT NULL ORDER BY id DESC LIMIT 1'
+      ).get(profileId) as { id: number; balance_after: number } | undefined
+      if (!row || typeof row.balance_after !== 'number') return null
+      const since = getDb().query(
+        'SELECT COALESCE(SUM(amount_signed), 0) AS s FROM financial_ledger WHERE profile_id = ? AND id > ?'
+      ).get(profileId, row.id) as { s: number } | undefined
+      return row.balance_after + Number(since?.s ?? 0)
+    } catch {
+      return null
+    }
   }
 
   /** Most recent booked wallet balance for a profile, or null if none exists. */
