@@ -746,13 +746,15 @@ export class Agent {
       if (this.pendingWindDown && !this.pendingSafeDock) {
         this.windDownTurnsRemaining--
         const outstanding = await this.payableMissionsRemaining()
+        // null = could not read. Keep winding down and let the budget decide.
         if (outstanding === 0) {
           this.log('system', 'Wind-down complete — no payable missions left. Docking.')
           this.pendingWindDown = false
           this.pendingSafeDock = true
           this.safeDockTurnsRemaining = 15
         } else if (this.windDownTurnsRemaining <= 0) {
-          this.log('system', `Wind-down turn budget exhausted (${outstanding} mission(s) still open) — docking anyway.`)
+          const note = outstanding == null ? 'mission count unavailable' : `${outstanding} mission(s) still open`
+          this.log('system', `Wind-down turn budget exhausted (${note}) — docking anyway.`)
           this.pendingWindDown = false
           this.pendingSafeDock = true
           this.safeDockTurnsRemaining = 15
@@ -1036,28 +1038,36 @@ export class Agent {
     }
   }
 
-  /** How many ACCEPTED missions still carry a credit reward.
+  /** How many ACCEPTED missions still carry a credit reward, or `null` when the
+   *  count could not be established.
    *
    *  Wind-down must not wait on the Wexler distress spam: those pay 0cr, the
    *  fleet deliberately does not answer them, and there are dozens per agent
    *  — counting them would keep an agent burning turns forever. Only missions
    *  with a credit reward hold the wind-down open.
    *
-   *  A failed read returns 0 (treat as done) rather than pinning the agent
-   *  open on a transport error; the turn budget is the backstop either way. */
-  private async payableMissionsRemaining(): Promise<number> {
-    if (!this.connection) return 0
+   *  This FAILS CLOSED. An earlier version returned 0 on a failed read and
+   *  called that "treat as done"; the first check after arming ran while the
+   *  connection was still coming up, read nothing, and docked Cass Margin
+   *  instantly — before the delivery she had been woken to make. An unknown
+   *  count is not a finished one. The turn budget is the backstop, which is
+   *  the whole reason it exists. */
+  private async payableMissionsRemaining(): Promise<number | null> {
+    if (!this.connection) return null
     try {
       const r = await this.connection.execute('get_active_missions')
-      if (r.error) return 0
+      if (r.error) return null
       const raw = r.structuredContent ?? r.result
       const text = typeof raw === 'string' ? raw : JSON.stringify(raw ?? '')
+      // A real read always names the roster ("Active missions (N/5)"), even at
+      // zero. Empty text means the read did not land, not that nothing is left.
+      if (!text.trim()) return null
       // Each mission block opens with '--- <title>' and lists 'Rewards: N,NNNcr'
       // only when it actually pays credits.
       const blocks = text.split('--- ').slice(1)
       return blocks.filter((b) => /Rewards:\s*[\d,]+\s*cr/i.test(b)).length
     } catch {
-      return 0
+      return null
     }
   }
 

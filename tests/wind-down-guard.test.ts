@@ -91,3 +91,53 @@ describe('completion is NEVER blocked — the point of winding down', () => {
     expect(checkDoctrineGuards('accept_mission', {}, 'some-other-profile')).toBeNull()
   })
 })
+
+/**
+ * Wind-down must FAIL CLOSED on an unreadable mission count.
+ *
+ * The first shipped version returned 0 from `payableMissionsRemaining()` on a
+ * failed read and treated that as "nothing left to do". Armed on Cass Margin
+ * at 19:13:29, the first check ran while her connection was still coming up,
+ * read nothing, and docked her immediately — before the 2,500cr delivery she
+ * had been woken to make. She completed it only because the reconnect landed
+ * after the disconnect.
+ *
+ * `null` (unknown) must never be treated as `0` (done). The turn budget is the
+ * backstop for a genuinely stuck agent; a transport hiccup is not that.
+ */
+describe('payable-mission counting fails closed', () => {
+  // Mirrors the parser in Agent.payableMissionsRemaining.
+  function countPayable(text: string | null): number | null {
+    if (text == null) return null
+    if (!text.trim()) return null
+    return text.split('--- ').slice(1)
+      .filter(b => /Rewards:\s*[\d,]+\s*cr/i.test(b)).length
+  }
+
+  test('an unreadable or empty response is unknown, not zero', () => {
+    expect(countPayable(null)).toBeNull()
+    expect(countPayable('')).toBeNull()
+    expect(countPayable('   ')).toBeNull()
+  })
+
+  test('a real roster with no paying missions counts zero', () => {
+    const text = 'Active missions (1/5):\n--- Distress: Wexler Q75-M5 [abc] (distress_response, difficulty 5) ---\n'
+      + 'Objectives:\n  - Investigate: 0/1\nRewards: +25 piloting XP\nExpires in: 47 ticks\n'
+    expect(countPayable(text)).toBe(0)
+  })
+
+  test('credit rewards hold the wind-down open; XP-only ones do not', () => {
+    const text = 'Active missions (2/5):\n'
+      + '--- Emergency Rations [a1] (delivery, difficulty 2) ---\nRewards: 2,500cr, +35 trading XP\n'
+      + '--- Distress: Wexler [b2] (distress_response, difficulty 5) ---\nRewards: +25 piloting XP\n'
+    expect(countPayable(text)).toBe(1)
+  })
+
+  test('only a real zero ends the wind-down', () => {
+    // The exact confusion that docked Cass early.
+    const unknown = countPayable(null)
+    const done = countPayable('Active missions (0/5):\n')
+    expect(unknown === 0).toBe(false)
+    expect(done).toBe(0)
+  })
+})
