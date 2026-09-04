@@ -6,7 +6,7 @@ recommendations were refuted**, so the failure patterns at the end are the most
 reusable part of this document.
 
 **Funding pool:** 16,470,775cr — 6,396,733 cash + 10,074,042 depth-validated
-holdings, zero unvalidated. Total programme is ~1.2M, about 7%.
+holdings, zero unvalidated. Total program is ~1.2M, about 7%.
 
 ---
 

@@ -1,0 +1,76 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { margin: 0; background: hsl(213 16% 12%); color: hsl(213 27% 88%);
+           font-family: 'JetBrains Mono', monospace; }
+    a { color: hsl(193 44% 67%); } a:hover { color: hsl(193 44% 80%); }
+  </style>
+</helmet>
+
+<div style="display: flex; flex-direction: column; gap: 28px; padding: 44px 48px; background: hsl(213 16% 12%); min-height: 100%; box-sizing: border-box;">
+
+  <div style="display: flex; align-items: baseline; gap: 16px; border-bottom: 1px solid hsl(217 17% 28%); padding-bottom: 18px;">
+    <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 26px; letter-spacing: 0.06em; text-transform: uppercase; color: hsl(193 44% 67%);">Fleet Upgrade Plan</span>
+    <span style="font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: hsl(213 14% 65%);">Admiral · SpaceMolt · 2026-09-04</span>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px;">
+    <div style="display: flex; flex-direction: column; gap: 8px; padding: 22px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%);">
+      <span style="font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: hsl(213 14% 65%);">Funding pool</span>
+      <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 34px; color: hsl(193 44% 67%); font-variant-numeric: tabular-nums;">16,470,775</span>
+      <span style="font-size: 12px; color: hsl(213 14% 65%);">6,396,733 cash + 10,074,042 holdings</span>
+      <span style="font-size: 11px; color: hsl(92 28% 65%);">zero unvalidated — all depth-checked</span>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 8px; padding: 22px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%);">
+      <span style="font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: hsl(213 14% 65%);">Program cost</span>
+      <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 34px; color: hsl(213 27% 88%); font-variant-numeric: tabular-nums;">1,223,882</span>
+      <span style="font-size: 12px; color: hsl(213 14% 65%);">934,182 hulls + 289,700 equipment</span>
+      <span style="font-size: 11px; color: hsl(40 71% 73%);">7% of the pool</span>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 8px; padding: 22px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%);">
+      <span style="font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: hsl(213 14% 65%);">Verification</span>
+      <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 34px; color: hsl(355 52% 64%); font-variant-numeric: tabular-nums;">9 / 12</span>
+      <span style="font-size: 12px; color: hsl(213 14% 65%);">recommendations refuted</span>
+      <span style="font-size: 11px; color: hsl(213 14% 65%);">before anyone spent a credit</span>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 12px;">
+    <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 600; font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: hsl(213 14% 65%);">Where the money goes</span>
+    <div style="display: flex; height: 34px; border: 1px solid hsl(217 17% 28%);">
+      <div style="width: 76.3%; background: hsl(193 44% 67%); display: flex; align-items: center; padding-left: 12px;">
+        <span style="font-size: 11px; font-weight: 600; color: hsl(213 16% 12%); letter-spacing: 0.08em;">HULLS 934,182</span>
+      </div>
+      <div style="width: 23.7%; background: hsl(193 26% 42%); display: flex; align-items: center; padding-left: 12px;">
+        <span style="font-size: 11px; font-weight: 600; color: hsl(213 27% 88%); letter-spacing: 0.08em;">REFIT 289,700</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px;">
+    <div style="display: flex; flex-direction: column; gap: 12px; padding: 22px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%); border-left: 3px solid hsl(92 28% 65%);">
+      <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 600; font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: hsl(92 28% 65%);">Cleared to execute</span>
+      <span style="font-size: 12px; line-height: 1.7; color: hsl(213 27% 88%);">Six hull purchases, every listing re-confirmed live with its id and price. Each agent self-funds from their own holdings, so no cross-station gift mechanics are involved.</span>
+      <span style="font-size: 12px; line-height: 1.7; color: hsl(213 14% 65%);">Three agents keep what they fly — Cass, Juno and CyberSpock. Nothing purchasable beats it.</span>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 12px; padding: 22px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%); border-left: 3px solid hsl(40 71% 73%);">
+      <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 600; font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: hsl(40 71% 73%);">Held for re-run</span>
+      <span style="font-size: 12px; line-height: 1.7; color: hsl(213 27% 88%);">Morg'Thar and CyberSapper. Both recommendations failed regression analysis; the verifier's advice was explicitly "re-run, not a counter-proposal".</span>
+      <span style="font-size: 12px; line-height: 1.7; color: hsl(213 14% 65%);">CyberSapper's rejected hull would have cost 378,468cr to make him worse.</span>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

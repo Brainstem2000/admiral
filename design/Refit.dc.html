@@ -1,0 +1,83 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { margin: 0; background: hsl(213 16% 12%); color: hsl(213 27% 88%);
+           font-family: 'JetBrains Mono', monospace; }
+    a { color: hsl(193 44% 67%); } a:hover { color: hsl(193 44% 80%); }
+    .bar { height: 7px; background: hsl(216 15% 19%); border: 1px solid hsl(217 17% 28%); }
+  </style>
+</helmet>
+
+<div style="display: flex; flex-direction: column; gap: 24px; padding: 44px 48px; background: hsl(213 16% 12%); min-height: 100%; box-sizing: border-box;">
+
+  <div style="display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: 0.06em; text-transform: uppercase; color: hsl(193 44% 67%);">Equipment refit</span>
+      <span style="font-size: 12px; color: hsl(213 14% 65%);">bun scripts/fleet-refit.ts — recomputes live against every hull's real fit</span>
+    </div>
+    <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 26px; color: hsl(213 27% 88%); font-variant-numeric: tabular-nums;">~289,700<span style="font-size: 13px; color: hsl(213 14% 65%);">cr</span></span>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 12px; padding: 22px; background: hsl(217 16% 15.5%); border: 1px solid hsl(40 71% 73%); border-left: 3px solid hsl(40 71% 73%);">
+    <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 600; font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: hsl(40 71% 73%);">The state of the fleet</span>
+    <span style="font-size: 12px; line-height: 1.8; color: hsl(213 27% 88%);">Almost every ore rig is flying <span style="color: hsl(40 71% 73%);">mining_laser_i — power 5</span>, the weakest in the game. Only Grit (22) and Ledger (12) are above it, and nine ships carry empty slots doing nothing at all.</span>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 11px;">
+    <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 600; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: hsl(213 14% 65%);">Mining power today</span>
+    <div style="display: grid; grid-template-columns: 132px 1fr 42px; gap: 12px; align-items: center;">
+      <span style="font-size: 12px;">Grit Vane</span>
+      <div class="bar"><div style="width: 31%; height: 100%; background: hsl(92 28% 65%);"></div></div>
+      <span style="font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; color: hsl(92 28% 65%);">22</span>
+
+      <span style="font-size: 12px;">Morg'Thar</span>
+      <div class="bar"><div style="width: 31%; height: 100%; background: hsl(92 28% 65%);"></div></div>
+      <span style="font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; color: hsl(92 28% 65%);">22</span>
+
+      <span style="font-size: 12px;">Ledger Voss</span>
+      <div class="bar"><div style="width: 17%; height: 100%; background: hsl(40 71% 73%);"></div></div>
+      <span style="font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; color: hsl(40 71% 73%);">12</span>
+
+      <span style="font-size: 12px; color: hsl(213 14% 65%);">Bob · Cass · Juno<br>Nova · Rook · Vera<br>Zibal · CyberSapper</span>
+      <div class="bar"><div style="width: 7%; height: 100%; background: hsl(355 52% 64%);"></div></div>
+      <span style="font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; color: hsl(355 52% 64%);">5</span>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 12px;">
+    <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 600; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: hsl(213 14% 65%);">Three rules the planner encodes</span>
+    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px;">
+      <div style="display: flex; flex-direction: column; gap: 8px; padding: 18px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%);">
+        <span style="font-size: 12px; font-weight: 600; color: hsl(193 44% 67%);">A slot you cannot power is not a slot</span>
+        <span style="font-size: 11px; line-height: 1.7; color: hsl(213 14% 65%);">The budget is free capacity PLUS what the swapped-out module returns — not free capacity alone.</span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px; padding: 18px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%);">
+        <span style="font-size: 12px; font-weight: 600; color: hsl(193 44% 67%);">special is role-critical</span>
+        <span style="font-size: 11px; line-height: 1.7; color: hsl(213 14% 65%);">gas_harvesting only harvests gas, so a higher-power laser is a downgrade for a gas rig. common_only strip miners take only iron and copper.</span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px; padding: 18px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%);">
+        <span style="font-size: 12px; font-weight: 600; color: hsl(193 44% 67%);">Never strip the last harvester</span>
+        <span style="font-size: 11px; line-height: 1.7; color: hsl(213 14% 65%);">An early scoring pass rated a +4 afterburner level with a 40-power laser and proposed exactly that.</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 8px; padding: 20px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%); border-left: 3px solid hsl(311 24% 63%);">
+    <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 600; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: hsl(311 24% 63%);">mining_laser_v fits nobody</span>
+    <span style="font-size: 12px; line-height: 1.8; color: hsl(213 14% 65%);">It needs 13 CPU / 24 power and the largest headroom on any hull in the fleet is 10. CyberSpock alone has the budget — but it would cost him gas harvesting entirely, so he takes gas_harvester_iv instead. The 103,000cr earmarked for it is saved, not transferred.</span>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

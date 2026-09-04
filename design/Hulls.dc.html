@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { margin: 0; background: hsl(213 16% 12%); color: hsl(213 27% 88%);
+           font-family: 'JetBrains Mono', monospace; }
+    a { color: hsl(193 44% 67%); } a:hover { color: hsl(193 44% 80%); }
+    .row { display: grid; grid-template-columns: 132px 148px 1fr 106px; gap: 14px;
+           padding: 13px 16px; border-top: 1px solid hsl(217 17% 28%); align-items: baseline; }
+    .hd { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: hsl(213 14% 65%); }
+    .num { font-variant-numeric: tabular-nums; text-align: right; }
+  </style>
+</helmet>
+
+<div style="display: flex; flex-direction: column; gap: 24px; padding: 44px 48px; background: hsl(213 16% 12%); min-height: 100%; box-sizing: border-box;">
+
+  <div style="display: flex; flex-direction: column; gap: 6px;">
+    <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: 0.06em; text-transform: uppercase; color: hsl(193 44% 67%);">Verified hull purchases</span>
+    <span style="font-size: 12px; color: hsl(213 14% 65%);">Every listing re-confirmed live. Prices move — browse_ships before buying.</span>
+  </div>
+
+  <div style="border: 1px solid hsl(217 17% 28%); background: hsl(217 16% 15.5%);">
+    <div class="row" style="border-top: none; background: hsl(216 15% 19%);">
+      <span class="hd">Agent</span><span class="hd">Hull</span><span class="hd">Station · listing</span><span class="hd num">Price</span>
+    </div>
+    <div class="row">
+      <span style="font-size: 13px; font-weight: 600;">Ledger Voss</span>
+      <span style="font-size: 13px; color: hsl(193 44% 67%);">Siege Breaker <span style="color: hsl(213 14% 65%); font-size: 11px;">T3</span></span>
+      <span style="font-size: 11px; color: hsl(213 14% 65%);">ironhearth_station<br>b64ea11c1f4664d9005e0161bb010cd8</span>
+      <span class="num" style="font-size: 14px; font-weight: 600;">452,679</span>
+    </div>
+    <div class="row">
+      <span style="font-size: 13px; font-weight: 600;">Bob Comet</span>
+      <span style="font-size: 13px; color: hsl(193 44% 67%);">War Wagon <span style="color: hsl(213 14% 65%); font-size: 11px;">T2</span></span>
+      <span style="font-size: 11px; color: hsl(213 14% 65%);">iron_reach_mining_colony<br>4221be79c5a33ce75d910074a83b4f0e</span>
+      <span class="num" style="font-size: 14px; font-weight: 600;">253,734</span>
+    </div>
+    <div class="row">
+      <span style="font-size: 13px; font-weight: 600;">Zibal Prospector</span>
+      <span style="font-size: 13px; color: hsl(193 44% 67%);">Repo Man <span style="color: hsl(213 14% 65%); font-size: 11px;">T2</span></span>
+      <span style="font-size: 11px; color: hsl(213 14% 65%);">unknown_edge_waystation<br>eec261f664e75487f92316a6ae76f15e</span>
+      <span class="num" style="font-size: 14px; font-weight: 600;">146,729</span>
+    </div>
+    <div class="row">
+      <span style="font-size: 13px; font-weight: 600;">Vera Lane</span>
+      <span style="font-size: 13px; color: hsl(193 44% 67%);">Bulk Terms <span style="color: hsl(213 14% 65%); font-size: 11px;">T2</span></span>
+      <span style="font-size: 11px; color: hsl(213 14% 65%);">cargo_lanes_freight_depot<br>1615a7455302eb39b63c987cb3961cf1</span>
+      <span class="num" style="font-size: 14px; font-weight: 600;">36,940</span>
+    </div>
+    <div class="row">
+      <span style="font-size: 13px; font-weight: 600;">Grit Vane</span>
+      <span style="font-size: 13px; color: hsl(193 44% 67%);">Maul <span style="color: hsl(213 14% 65%); font-size: 11px;">T1</span></span>
+      <span style="font-size: 11px; color: hsl(213 14% 65%);">iron_reach_mining_colony<br>8755be134d325a4f7c6d748d45f47402</span>
+      <span class="num" style="font-size: 14px; font-weight: 600;">22,481</span>
+    </div>
+    <div class="row">
+      <span style="font-size: 13px; font-weight: 600;">Rook Vance</span>
+      <span style="font-size: 13px; color: hsl(193 44% 67%);">Bonanza <span style="color: hsl(213 14% 65%); font-size: 11px;">T1</span></span>
+      <span style="font-size: 11px; color: hsl(213 14% 65%);">cargo_lanes_freight_depot<br>9f3f91470f585c0b2a6fe90f666221a0</span>
+      <span class="num" style="font-size: 14px; font-weight: 600;">21,619</span>
+    </div>
+    <div class="row" style="background: hsl(216 15% 19%);">
+      <span style="font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: hsl(213 14% 65%);">Total</span>
+      <span></span><span></span>
+      <span class="num" style="font-family: 'Chakra Petch', sans-serif; font-size: 17px; font-weight: 700; color: hsl(193 44% 67%);">934,182</span>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px;">
+    <div style="display: flex; flex-direction: column; gap: 10px; padding: 20px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%); border-left: 3px solid hsl(92 28% 65%);">
+      <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 600; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: hsl(92 28% 65%);">Keep — verified</span>
+      <span style="font-size: 12px; line-height: 1.7; color: hsl(213 27% 88%);">Cass Margin (Caravan) · Juno Freight (War Wagon) · CyberSpock (Gas Tanker)</span>
+      <span style="font-size: 11px; line-height: 1.7; color: hsl(213 14% 65%);">Juno's is the only hull she can fly with 8 utility slots. Nothing purchasable or commissionable improves on it at her piloting level.</span>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 10px; padding: 20px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%); border-left: 3px solid hsl(193 44% 67%);">
+      <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 600; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: hsl(193 44% 67%);">Funding</span>
+      <span style="font-size: 12px; line-height: 1.7; color: hsl(213 27% 88%);">Every agent covers their own hull by selling their own holdings.</span>
+      <span style="font-size: 11px; line-height: 1.7; color: hsl(213 14% 65%);">Credits and items gift to the SENDER's station, so cross-funding would strand the money unless both parties are co-docked. Self-funding sidesteps it.</span>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

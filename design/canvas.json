@@ -1,0 +1,27 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html",        "x": 0,    "y": 0,    "w": 1000, "h": 700, "title": "Overview" },
+    { "file": "Hulls.dc.html",       "x": 1120, "y": 0,    "w": 1000, "h": 860, "title": "Hull purchases" },
+    { "file": "Battleship.dc.html",  "x": 0,    "y": 980,  "w": 1000, "h": 900, "title": "Morg — warship path" },
+    { "file": "FuryCrystal.dc.html", "x": 1120, "y": 980,  "w": 1000, "h": 720, "title": "Fury crystal" },
+    { "file": "Refit.dc.html",       "x": 0,    "y": 2000, "w": 1000, "h": 860, "title": "Equipment refit" },
+    { "file": "Refuted.dc.html",     "x": 1120, "y": 2000, "w": 1000, "h": 940, "title": "Refuted — 9 of 12" }
+  ],
+  "annotations": [
+    {
+      "id": "brief",
+      "x": -420,
+      "y": 0,
+      "w": 300,
+      "text": "Fleet upgrade plan, 2026-09-04.\n\nSource: docs/fleet-upgrade-plan.md\n\nEvery figure is live-verified. Listing ids and prices were re-confirmed on the boards immediately before the orders went out — check them again before buying, prices move."
+    },
+    {
+      "id": "note-refuted",
+      "x": 2240,
+      "y": 2000,
+      "w": 280,
+      "text": "The most reusable page.\n\nNine of twelve initial recommendations failed adversarial verification. These five patterns are what to check before acting on any future ship analysis."
+    }
+  ],
+  "launch": { "view": "canvas" }
+}

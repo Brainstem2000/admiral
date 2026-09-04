@@ -588,13 +588,13 @@ function FinancialTab({ profiles }: { profiles: Profile[] }) {
       <div className="text-center">
         <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Fleet Net Worth</div>
         <div className="text-3xl font-mono font-bold text-primary">{data.fleetTotal.toLocaleString()}<span className="text-sm text-muted-foreground ml-1">cr</span></div>
-        {/* Split the headline: cash is bankable, holdings are a realisable
+        {/* Split the headline: cash is bankable, holdings are a realizable
             estimate at min(held, bid depth) x best bid — and the depth-unknown
             slice of that is an unvalidated ceiling, so it is called out. */}
         <div className="mt-1.5 flex items-center justify-center gap-3 text-[10px] text-muted-foreground tabular-nums">
           <span>cash <span className="text-foreground/80">{data.fleetWallet.toLocaleString()}</span></span>
           <span className="opacity-40">+</span>
-          <span title="Realisable at min(held, bid depth) × best bid">
+          <span title="Realizable at min(held, bid depth) × best bid">
             holdings <span className="text-foreground/80">{data.fleetAssets.toLocaleString()}</span>
           </span>
         </div>

@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { margin: 0; background: hsl(213 16% 12%); color: hsl(213 27% 88%);
+           font-family: 'JetBrains Mono', monospace; }
+    a { color: hsl(193 44% 67%); } a:hover { color: hsl(193 44% 80%); }
+  </style>
+</helmet>
+
+<div style="display: flex; flex-direction: column; gap: 24px; padding: 44px 48px; background: hsl(213 16% 12%); min-height: 100%; box-sizing: border-box;">
+
+  <div style="display: flex; flex-direction: column; gap: 6px;">
+    <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: 0.06em; text-transform: uppercase; color: hsl(311 24% 63%);">Fury crystal is not for sale</span>
+    <span style="font-size: 12px; color: hsl(213 14% 65%);">The fleet's ship-building feedstock, one halted sale away from being spent as pocket money.</span>
+  </div>
+
+  <div style="display: grid; grid-template-columns: 1fr 40px 1fr 40px 1fr; gap: 12px; align-items: center;">
+    <div style="display: flex; flex-direction: column; gap: 6px; padding: 20px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%); text-align: center;">
+      <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 30px; color: hsl(311 24% 63%); font-variant-numeric: tabular-nums;">7,222</span>
+      <span style="font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: hsl(213 14% 65%);">fury_crystal held</span>
+      <span style="font-size: 10px; color: hsl(213 14% 65%);">6,762 at War Citadel alone</span>
+    </div>
+    <span style="font-family: 'Chakra Petch', sans-serif; font-size: 20px; color: hsl(217 17% 28%); text-align: center;">3:1</span>
+    <div style="display: flex; flex-direction: column; gap: 6px; padding: 20px; background: hsl(217 16% 15.5%); border: 1px solid hsl(193 44% 67%); text-align: center;">
+      <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 30px; color: hsl(193 44% 67%); font-variant-numeric: tabular-nums;">2,455</span>
+      <span style="font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: hsl(213 14% 65%);">fury_alloy</span>
+      <span style="font-size: 10px; color: hsl(213 14% 65%);">refined, plus 48 on hand</span>
+    </div>
+    <span style="font-family: 'Chakra Petch', sans-serif; font-size: 20px; color: hsl(217 17% 28%); text-align: center;">→</span>
+    <div style="display: flex; flex-direction: column; gap: 6px; padding: 20px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%); text-align: center;">
+      <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 30px; color: hsl(92 28% 65%); font-variant-numeric: tabular-nums;">47</span>
+      <span style="font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: hsl(213 14% 65%);">crimson hulls</span>
+      <span style="font-size: 10px; color: hsl(213 14% 65%);">use it as build material</span>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 12px;">
+    <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 600; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: hsl(213 14% 65%);">What 2,455 alloy buys</span>
+    <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;">
+      <div style="display: flex; flex-direction: column; gap: 4px; padding: 15px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%);">
+        <span style="font-size: 12px; color: hsl(213 27% 88%);">siege_breaker</span>
+        <span style="font-size: 10px; color: hsl(213 14% 65%);">tier 3 · 30 alloy</span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 4px; padding: 15px; background: hsl(217 16% 15.5%); border: 1px solid hsl(193 44% 67%);">
+        <span style="font-size: 12px; color: hsl(193 44% 67%);">crimson_devastator</span>
+        <span style="font-size: 10px; color: hsl(213 14% 65%);">tier 4 · 120 alloy · <span style="color: hsl(193 44% 67%);">Morg's target</span></span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 4px; padding: 15px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%);">
+        <span style="font-size: 12px; color: hsl(213 27% 88%);">guillotine</span>
+        <span style="font-size: 10px; color: hsl(213 14% 65%);">tier 4 · 140 alloy</span>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 4px; padding: 15px; background: hsl(217 16% 15.5%); border: 1px solid hsl(217 17% 28%);">
+        <span style="font-size: 12px; color: hsl(213 27% 88%);">armageddon</span>
+        <span style="font-size: 10px; color: hsl(213 14% 65%);">tier 5 · 750 alloy</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 12px; padding: 22px; background: hsl(217 16% 15.5%); border: 1px solid hsl(355 52% 64%); border-left: 3px solid hsl(355 52% 64%);">
+    <span style="font-family: 'Chakra Petch', sans-serif; font-weight: 600; font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; color: hsl(355 52% 64%);">The near miss</span>
+    <span style="font-size: 12px; line-height: 1.8; color: hsl(213 27% 88%);">Nova Reyes had begun liquidating 5,435 crystal into a 320 bid — <span style="color: hsl(355 52% 64%); font-weight: 600;">1,739,200 credits</span> — and was halted mid-sale after roughly 50 units. As alloy the same stock is worth ~1,992,000 at base value, before counting the warships it unlocks.</span>
+    <span style="font-size: 11px; line-height: 1.8; color: hsl(213 14% 65%);">The general rule, now a fleet law: before dumping any refined or exotic material, check what it is an input to. Raw bid price is not what a build material is worth.</span>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

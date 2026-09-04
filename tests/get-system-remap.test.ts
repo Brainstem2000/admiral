@@ -14,7 +14,7 @@
  * exactly the 84-wrong-answers bug, and nothing would fail.
  *
  * An orphaned branch (brainstem2000-animated-spork) carried a test asserting
- * the OLD behaviour — a rewrite to `search_systems(query=...)`. That approach
+ * the OLD behavior — a rewrite to `search_systems(query=...)`. That approach
  * was superseded by the get_map remap, which returns real data for the system
  * actually asked about. This file replaces it.
  */
