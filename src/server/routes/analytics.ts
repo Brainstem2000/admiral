@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
-import { getTimelineEntries, getTokenAnalytics, listProfiles, addFinancialSnapshot, getFinancialSnapshots } from '../lib/db'
+import { getTimelineEntries, getTokenAnalytics, listProfiles, addFinancialSnapshot, getFinancialSnapshots, getLatestWallets, getProfileLastStates, realisableValue, getDb } from '../lib/db'
 import { LedgerCollector } from '../lib/ledger'
 import { agentManager } from '../lib/agent-manager'
 
@@ -105,20 +105,68 @@ analytics.get('/financial', (c) => {
       id: string
       name: string
       wallet: number
+      walletLive: boolean
+      walletAt: string | null
+      assets: number
+      assetsDepthUnknown: number
       total: number
       cargo: Array<{ item: string; quantity: number }>
     }>
     fleetTotal: number
+    fleetWallet: number
+    fleetAssets: number
+    fleetAssetsDepthUnknown: number
     fleetCargo: Record<string, number>
-  } = { profiles: [], fleetTotal: 0, fleetCargo: {} }
+  } = {
+    profiles: [], fleetTotal: 0, fleetWallet: 0, fleetAssets: 0,
+    fleetAssetsDepthUnknown: 0, fleetCargo: {},
+  }
+
+  // Parked agents have no live gameState. Reading the wallet only off a
+  // connected agent made fleet net worth collapse to whatever fraction of the
+  // fleet happened to be online — the banked snapshot is the honest fallback.
+  const banked = getLatestWallets()
+  const lastStates = getProfileLastStates()
+  const db = getDb()
+
+  // Holdings per profile: everything in station storage plus the ship's hold.
+  const holdingsFor = (profileId: string): Map<string, number> => {
+    const held = new Map<string, number>()
+    const add = (item: string, qty: number) => {
+      if (!item || !Number.isFinite(qty) || qty <= 0) return
+      held.set(item, (held.get(item) ?? 0) + qty)
+    }
+    for (const r of db.query('SELECT item_id, SUM(quantity) q FROM storage_inventory WHERE profile_id = ? GROUP BY item_id')
+      .all(profileId) as Array<{ item_id: string; q: number }>) add(r.item_id, Number(r.q))
+    for (const r of db.query('SELECT item_id, SUM(quantity) q FROM cargo_inventory WHERE profile_id = ? GROUP BY item_id')
+      .all(profileId) as Array<{ item_id: string; q: number }>) add(r.item_id, Number(r.q))
+    return held
+  }
 
   for (const profile of profiles) {
     const agent = agentManager.getAgent(profile.id)
     const gameState = agent?.gameState as Record<string, unknown> | null | undefined
     const player = (gameState?.player ?? {}) as Record<string, unknown>
-    const wallet = typeof player.credits === 'number' ? player.credits : 0
 
-    // Extract cargo items from game state
+    const liveWallet = typeof player.credits === 'number' ? player.credits : null
+    const snap = banked.get(profile.id)
+    const lastState = lastStates.get(profile.id)
+    const fallback = snap?.wallet ?? (typeof lastState?.credits === 'number' ? lastState.credits as number : 0)
+    const wallet = liveWallet ?? fallback
+    const walletAt = liveWallet != null ? null : (snap?.at ?? (lastState?.updated_at as string | undefined) ?? null)
+
+    // Asset value uses min(held, bid depth) x best bid — never price x holdings.
+    // A depth-less row is an unvalidated ceiling, so it is reported separately
+    // rather than folded silently into a number that reads as bankable.
+    let assets = 0
+    let depthUnknown = 0
+    for (const [itemId, qty] of holdingsFor(profile.id)) {
+      const rv = realisableValue(itemId, qty)
+      if (!rv.value) continue
+      assets += rv.value
+      if (!rv.depth_known) depthUnknown += rv.value
+    }
+
     const cargo: Array<{ item: string; quantity: number }> = []
     const rawCargo = (gameState?.cargo ?? (gameState?.ship ? (gameState.ship as Record<string, unknown>)?.cargo : undefined)) as Array<Record<string, unknown>> | undefined
     if (Array.isArray(rawCargo)) {
@@ -136,12 +184,20 @@ analytics.get('/financial', (c) => {
       id: profile.id,
       name: profile.name,
       wallet,
-      total: wallet,
+      walletLive: liveWallet != null,
+      walletAt,
+      assets,
+      assetsDepthUnknown: depthUnknown,
+      total: wallet + assets,
       cargo,
     })
-    result.fleetTotal += wallet
+    result.fleetWallet += wallet
+    result.fleetAssets += assets
+    result.fleetAssetsDepthUnknown += depthUnknown
+    result.fleetTotal += wallet + assets
   }
 
+  result.profiles.sort((a, b) => b.total - a.total)
   return c.json(result)
 })
 

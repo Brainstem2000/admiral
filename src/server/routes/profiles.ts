@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, reorderProfiles, listSellQuotas, setSellQuota, clearSellQuota, getLatestWallets, getProfileLastStates } from '../lib/db'
+import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, reorderProfiles, listSellQuotas, setSellQuota, clearSellQuota, getLatestWallets, getProfileLastStates, saveAgentSnapshot, getAgentSnapshot } from '../lib/db'
 import { buildSystemPrompt, buildVolatileState } from '../lib/agent'
 import { fetchGameCommands, formatCommandList } from '../lib/schema'
 import { agentManager } from '../lib/agent-manager'
@@ -213,6 +213,63 @@ profiles.post('/:id/command', async (c) => {
   }
 })
 
+/** Replay the last banked payload for a pane whose live read needs a connection.
+ *  Returns 204 (not an error) when nothing was ever captured, so the UI can say
+ *  "never seen" rather than rendering a failure. */
+function replaySnapshot(c: Parameters<Parameters<typeof profiles.get>[1]>[0], id: string, kind: string) {
+  const snap = getAgentSnapshot(id, kind)
+  if (!snap) return c.json({ stale: true, never: true, error: 'No snapshot captured for this agent yet' }, 200)
+  return c.json({ ...(snap.payload as object), stale: true, fetched_at: snap.fetched_at })
+}
+
+/** GET /api/profiles/:id/skills — live get_skills when connected, last known otherwise. */
+profiles.get('/:id/skills', async (c) => {
+  const id = c.req.param('id')
+  const agent = agentManager.getAgent(id)
+  if (!agent || !agent.isConnected) return replaySnapshot(c, id, 'skills')
+  try {
+    const raw = await agent.executeCommand('get_skills', {}, { silent: true }) as Record<string, unknown>
+    const sc = (raw.structuredContent ?? raw.result ?? raw) as Record<string, unknown>
+    if (!sc?.skills || typeof sc.skills !== 'object') return replaySnapshot(c, id, 'skills')
+    const payload = { skills: sc.skills, fetched_at: new Date().toISOString() }
+    saveAgentSnapshot(id, 'skills', payload)
+    return c.json({ ...payload, stale: false })
+  } catch {
+    return replaySnapshot(c, id, 'skills')
+  }
+})
+
+/** GET /api/profiles/:id/combat-stats — live kill tallies + Empire skill,
+ *  falling back to the last known reading for a parked agent. */
+profiles.get('/:id/combat-stats', async (c) => {
+  const id = c.req.param('id')
+  const agent = agentManager.getAgent(id)
+  if (!agent || !agent.isConnected) return replaySnapshot(c, id, 'combat')
+  try {
+    // Mirrors what the Combat pane has always read: the kill tallies live on
+    // player.stats from get_status, and the Empire skill comes from get_skills.
+    const [statusRaw, skillsRaw] = await Promise.all([
+      agent.executeCommand('get_status', {}, { silent: true }) as Promise<Record<string, unknown>>,
+      (agent.executeCommand('get_skills', {}, { silent: true }) as Promise<Record<string, unknown>>).catch(() => null),
+    ])
+    const sc = (statusRaw.structuredContent ?? statusRaw.result ?? statusRaw) as Record<string, unknown>
+    const stats = (sc.player as Record<string, unknown> | undefined)?.stats
+    if (!stats || typeof stats !== 'object') return replaySnapshot(c, id, 'combat')
+
+    const sk = (skillsRaw?.structuredContent ?? skillsRaw?.result) as Record<string, unknown> | undefined
+    let empireSkill: unknown = null
+    if (sk?.skills && typeof sk.skills === 'object') {
+      empireSkill = Object.values(sk.skills as Record<string, { category?: string }>)
+        .find((v) => v?.category === 'Empire') ?? null
+    }
+    const payload = { stats, empireSkill, fetched_at: new Date().toISOString() }
+    saveAgentSnapshot(id, 'combat', payload)
+    return c.json({ ...payload, stale: false })
+  } catch {
+    return replaySnapshot(c, id, 'combat')
+  }
+})
+
 /**
  * GET /api/profiles/:id/ship-analysis — the Ship pane's data feed.
  *
@@ -226,7 +283,10 @@ profiles.post('/:id/command', async (c) => {
 profiles.get('/:id/ship-analysis', async (c) => {
   const id = c.req.param('id')
   const agent = agentManager.getAgent(id)
-  if (!agent || !agent.isConnected) return c.json({ error: 'Agent not connected' }, 400)
+  // Offline agents replay the last good analysis. The pane used to go blank
+  // here, which is backwards: a parked agent is exactly the one you are trying
+  // to size up before waking it.
+  if (!agent || !agent.isConnected) return replaySnapshot(c, id, 'ship')
   try {
     const { listModules, getItem, getShip } = await import('../lib/catalog')
     const { getDb } = await import('../lib/db')
@@ -328,7 +388,7 @@ profiles.get('/:id/ship-analysis', async (c) => {
     })
 
     const hullInfo = getShip(String(ship.class_id ?? '')) ?? null
-    return c.json({
+    const payload = {
       ship,
       hull_catalog: hullInfo ? {
         tier: hullInfo.tier, class: hullInfo.class, faction: hullInfo.faction,
@@ -339,8 +399,14 @@ profiles.get('/:id/ship-analysis', async (c) => {
       open_slots: openSlots,
       cargo: cargoOut,
       fetched_at: new Date().toISOString(),
-    })
+    }
+    saveAgentSnapshot(id, 'ship', payload)
+    return c.json({ ...payload, stale: false })
   } catch (err) {
+    // A live read that fails mid-flight (session expiry, timeout) should fall
+    // back to the last good one rather than blanking the pane.
+    const snap = getAgentSnapshot(id, 'ship')
+    if (snap) return c.json({ ...(snap.payload as object), stale: true, fetched_at: snap.fetched_at })
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
   }
 })

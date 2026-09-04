@@ -5,7 +5,7 @@ import type { Profile, LogEntry } from '@/types'
 import type { KillZone } from '@shared/fleet-intel-types'
 import { formatTime } from '@/components/log/log-shared'
 import { DossierCard } from '../DossierCard'
-import { DISPLAY, StatCell, Freshness, ageOf, parseTs } from '../dossier-shared'
+import { DISPLAY, StatCell, Freshness, ageOf, parseTs, LastKnownBanner, NeverSeen } from '../dossier-shared'
 
 interface Skill {
   name: string
@@ -16,7 +16,7 @@ interface Skill {
   next_level_xp: number
 }
 
-interface CombatStats { stats: Record<string, number>; empireSkill: Skill | null; fetchedAt: number }
+interface CombatStats { stats: Record<string, number>; empireSkill: Skill | null; fetchedAt: number; stale?: boolean }
 
 interface BattleRow {
   battle_id: string
@@ -77,6 +77,7 @@ export function CombatTab({ profile, connected }: { profile: Profile; connected:
   const [combat, setCombat] = useState<CombatStats | null>(() => combatCache.get(profile.id) || null)
   const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false) // a fetch completed (even if stats were absent)
+  const [neverSeen, setNeverSeen] = useState(false)
   const [killZones, setKillZones] = useState<KillZone[] | null>(null)
   const [watchlist, setWatchlist] = useState<string[]>(loadWatchlist)
   const [watchInput, setWatchInput] = useState('')
@@ -118,33 +119,32 @@ export function CombatTab({ profile, connected }: { profile: Profile; connected:
   }, [profile.id])
 
   // Record + Empire skill (both free queries).
+  // Served live when the agent is up, replayed from the last banked reading
+  // when it is parked — the kill record is history and stays worth reading.
   const fetchCombat = useCallback(async () => {
-    if (!connected) return
     const targetId = profile.id
     setLoading(true)
     try {
-      const [statusRaw, skillsRaw] = await Promise.all([
-        runCommand(targetId, 'get_status'),
-        runCommand(targetId, 'get_skills').catch(() => null),
-      ])
+      const resp = await fetch(`/api/profiles/${targetId}/combat-stats`)
+      const body = await resp.json()
       if (profileIdRef.current !== targetId) return
-      const statusResult = statusRaw.structuredContent || statusRaw.result || statusRaw
-      const stats = (statusResult?.player as Record<string, unknown> | undefined)?.stats
-      const skillsResult = skillsRaw?.structuredContent || skillsRaw?.result
-      let empireSkill: Skill | null = null
-      if (skillsResult?.skills && typeof skillsResult.skills === 'object') {
-        empireSkill = Object.values(skillsResult.skills as Record<string, Skill>).find(s => s?.category === 'Empire') || null
-      }
-      if (stats && typeof stats === 'object') {
-        const next: CombatStats = { stats: stats as Record<string, number>, empireSkill, fetchedAt: Date.now() }
+      if (body?.never) { setNeverSeen(true); setLoaded(true); return }
+      if (body?.stats && typeof body.stats === 'object') {
+        const next: CombatStats = {
+          stats: body.stats as Record<string, number>,
+          empireSkill: (body.empireSkill as Skill | null) ?? null,
+          fetchedAt: body.fetched_at ? parseTs(body.fetched_at) : Date.now(),
+          stale: !!body.stale,
+        }
         combatCache.set(targetId, next)
         setCombat(next)
+        setNeverSeen(false)
       }
       setLoaded(true)
     } catch { /* ignore */ } finally {
       if (profileIdRef.current === targetId) setLoading(false)
     }
-  }, [profile.id, connected])
+  }, [profile.id])
 
   // Shared fleet intel — no game connection needed.
   const fetchKillZones = useCallback(async () => {
@@ -168,8 +168,9 @@ export function CombatTab({ profile, connected }: { profile: Profile; connected:
   }, [profile.id])
 
   useEffect(() => {
-    if (!connected) return
     fetchCombat()
+    // Only poll a live agent; a parked one's snapshot cannot move.
+    if (!connected) return
     const t = setInterval(fetchCombat, 60_000)
     return () => clearInterval(t)
   }, [connected, fetchCombat])
@@ -264,14 +265,15 @@ export function CombatTab({ profile, connected }: { profile: Profile; connected:
         action={
           <span className="flex items-center gap-2">
             <Freshness at={combat?.fetchedAt ?? null} />
-            <button onClick={fetchCombat} disabled={!connected || loading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
+            <button onClick={fetchCombat} disabled={loading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
               <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
             </button>
           </span>
         }
       >
-        {!connected && !stats ? (
-          <span className="text-[11px] text-muted-foreground/50 italic">Connect to load combat record</span>
+        {combat?.stale && <LastKnownBanner at={combat.fetchedAt ? new Date(combat.fetchedAt).toISOString() : null} />}
+        {neverSeen && !stats ? (
+          <NeverSeen what="combat record" />
         ) : !stats ? (
           <span className="text-[11px] text-muted-foreground/50 italic">{loading ? 'Loading...' : 'No combat data'}</span>
         ) : (

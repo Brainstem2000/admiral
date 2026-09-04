@@ -135,3 +135,33 @@ export function SectionLabel({ children, className = '' }: { children: React.Rea
     </div>
   )
 }
+
+/** Banner for a pane rendering banked data because the agent is parked.
+ *  The pane stays fully populated — this only says the reading is historical,
+ *  so a parked agent can still be sized up without waking it. */
+export function LastKnownBanner({ at }: { at: string | null }) {
+  return (
+    <div
+      className="flex items-center gap-1.5 px-2 py-1 mb-2 rounded border text-[10px]"
+      style={{
+        borderColor: 'hsl(var(--smui-yellow) / 0.35)',
+        background: 'hsl(var(--smui-yellow) / 0.07)',
+        color: 'hsl(var(--smui-yellow))',
+      }}
+    >
+      <span className="uppercase tracking-wider font-medium" style={DISPLAY}>Last known</span>
+      <span className="text-muted-foreground/70">
+        agent offline{at ? <> · captured <span className="tabular-nums">{ageOf(at)}</span> ago</> : null}
+      </span>
+    </div>
+  )
+}
+
+/** Empty state for a pane that has never captured a reading for this agent. */
+export function NeverSeen({ what }: { what: string }) {
+  return (
+    <div className="text-xs text-muted-foreground/60 py-6 text-center">
+      No {what} captured yet — connect the agent once to record a baseline.
+    </div>
+  )
+}

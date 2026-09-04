@@ -889,6 +889,23 @@ function migrate(db: Database): void {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Last successful payload of each expensive per-agent read (ship analysis,
+    -- skills, combat stats). The character screens used to fetch these live
+    -- through the agent's connection, so every pane went BLANK the moment an
+    -- agent was parked -- exactly when you most want to look at it, because
+    -- deciding whether to wake an agent means inspecting what it was flying,
+    -- what it had trained, and what it had killed. One row per (profile, kind),
+    -- replaced wholesale on each successful live read. Served with its
+    -- fetched_at so the UI can label it as last-known rather than current.
+    CREATE TABLE IF NOT EXISTS agent_snapshots (
+      profile_id TEXT NOT NULL,
+      kind TEXT NOT NULL,                     -- 'ship' | 'skills' | 'combat'
+      payload TEXT NOT NULL,                  -- JSON
+      fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (profile_id, kind),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS system_danger_daily (
       system_id TEXT NOT NULL,
       day TEXT NOT NULL,
@@ -1972,6 +1989,29 @@ export function getProfileLastStates(): Map<string, Record<string, unknown>> {
 export function getProfileLastState(profileId: string): Record<string, unknown> | null {
   return (db.query('SELECT * FROM profile_last_state WHERE profile_id = ?')
     .get(profileId) as Record<string, unknown>) ?? null
+}
+
+/** Snapshot store for the character panes. These reads are free (no game tick)
+ *  but require a live connection, so the last good payload is banked here and
+ *  replayed when the agent is offline. Kinds: 'ship' | 'skills' | 'combat'. */
+export function saveAgentSnapshot(profileId: string, kind: string, payload: unknown): void {
+  db.query(`INSERT INTO agent_snapshots (profile_id, kind, payload, fetched_at)
+    VALUES (?, ?, ?, datetime('now'))
+    ON CONFLICT(profile_id, kind) DO UPDATE SET
+      payload = excluded.payload, fetched_at = datetime('now')`)
+    .run(profileId, kind, JSON.stringify(payload))
+}
+
+export function getAgentSnapshot(profileId: string, kind: string):
+  { payload: unknown; fetched_at: string } | null {
+  const r = db.query('SELECT payload, fetched_at FROM agent_snapshots WHERE profile_id = ? AND kind = ?')
+    .get(profileId, kind) as { payload: string; fetched_at: string } | undefined
+  if (!r) return null
+  try {
+    return { payload: JSON.parse(r.payload), fetched_at: r.fetched_at }
+  } catch {
+    return null   // corrupt row: treat as absent rather than throwing at the route
+  }
 }
 
 /** Fleet hard bans — systems no route may cross, whatever the evidence says today. */

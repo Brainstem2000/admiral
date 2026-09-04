@@ -7,7 +7,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { Rocket, RefreshCw, Heart, Shield, Fuel, Cpu, Zap, Package, Crosshair, ShieldCheck, Wrench, TrendingUp, Sparkles } from 'lucide-react'
 import type { Profile } from '@/types'
 import { DossierCard } from '../DossierCard'
-import { DISPLAY, Bar, StatCell } from '../dossier-shared'
+import { DISPLAY, Bar, StatCell, LastKnownBanner, NeverSeen } from '../dossier-shared'
 
 interface UpgradeCandidate {
   id: string; name?: string
@@ -28,6 +28,8 @@ interface FittedModule {
 interface OpenSlot { slot: string; open: number; suggestions: UpgradeCandidate[] }
 interface CargoRow { item_id: string; name?: string; item_name?: string; quantity: number; size?: number | null; base_value?: number | null }
 interface Analysis {
+  stale?: boolean
+  never?: boolean
   ship: Record<string, unknown>
   hull_catalog: { tier?: number; class?: string; faction?: string; inherent_capabilities?: Record<string, unknown> | null } | null
   budgets: { cpu_free: number; power_free: number }
@@ -142,6 +144,7 @@ function OpenSlotCard({ slot, suggestions }: { slot: string; suggestions: Upgrad
 export function ShipTab({ profile, connected }: { profile: Profile; connected: boolean }) {
   const [data, setData] = useState<Analysis | null>(() => analysisCache.get(profile.id) || null)
   const [loading, setLoading] = useState(false)
+  const [neverSeen, setNeverSeen] = useState(false)
   const profileIdRef = useRef(profile.id)
 
   useEffect(() => {
@@ -149,41 +152,45 @@ export function ShipTab({ profile, connected }: { profile: Profile; connected: b
     setData(analysisCache.get(profile.id) || null)
   }, [profile.id])
 
+  // Runs for parked agents too — the endpoint replays the last banked analysis
+  // when there is no live connection, so the loadout stays inspectable.
   const fetchShip = useCallback(async () => {
-    if (!connected) return
     const targetId = profile.id
     setLoading(true)
     try {
       const resp = await fetch(`/api/profiles/${targetId}/ship-analysis`)
       const body = await resp.json() as Analysis & { error?: string }
       if (profileIdRef.current !== targetId) return
+      if (body.never) { setNeverSeen(true); return }
       if (body.error || !body.ship) return
       analysisCache.set(targetId, body)
       setData(body)
+      setNeverSeen(false)
     } catch { /* ignore */ } finally {
       if (profileIdRef.current === targetId) setLoading(false)
     }
-  }, [profile.id, connected])
+  }, [profile.id])
 
   useEffect(() => {
-    if (!connected) return
     fetchShip()
+    // An offline agent's snapshot is frozen; only poll a live one.
+    if (!connected) return
     const t = setInterval(fetchShip, 60_000)
     return () => clearInterval(t)
   }, [connected, fetchShip])
 
   const refreshAction = (
-    <button onClick={fetchShip} disabled={!connected || loading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
+    <button onClick={fetchShip} disabled={loading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
       <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
     </button>
   )
 
   if (!data) {
     return (
-      <DossierCard title="Ship" icon={<Rocket size={12} />} source="Server" className="min-h-[120px]" bodyClassName="px-3 py-3" action={connected ? refreshAction : undefined}>
-        <span className="text-[11px] text-muted-foreground/50 italic">
-          {connected ? (loading ? 'Analyzing loadout…' : 'No ship data') : 'Connect to load ship data'}
-        </span>
+      <DossierCard title="Ship" icon={<Rocket size={12} />} source="Server" className="min-h-[120px]" bodyClassName="px-3 py-3" action={refreshAction}>
+        {neverSeen
+          ? <NeverSeen what="ship analysis" />
+          : <span className="text-[11px] text-muted-foreground/50 italic">{loading ? 'Analyzing loadout…' : 'No ship data'}</span>}
       </DossierCard>
     )
   }
@@ -201,6 +208,7 @@ export function ShipTab({ profile, connected }: { profile: Profile; connected: b
 
   return (
     <div className="flex flex-col gap-4">
+      {data.stale && <LastKnownBanner at={data.fetched_at} />}
       {/* ——— Command header: identity + vitals ——— */}
       <DossierCard title="Loadout" icon={<Rocket size={12} />} source="Server" className="min-h-[140px]" bodyClassName="p-3" action={refreshAction}>
         <div className="flex items-baseline gap-2 mb-3 flex-wrap">
@@ -214,7 +222,7 @@ export function ShipTab({ profile, connected }: { profile: Profile; connected: b
             </span>
           )}
           {hull_catalog?.class && <span className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">{hull_catalog.class}</span>}
-          <span className="ml-auto text-[9px] text-muted-foreground/50 tabular-nums" title={data.fetched_at}>as of {fetchedAge}s ago</span>
+          <span className="ml-auto text-[9px] text-muted-foreground/50 tabular-nums" title={data.fetched_at}>as of {data.stale ? 'last contact' : `${fetchedAge}s ago`}</span>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-x-6 gap-y-3 mb-4">
           <Bar icon={<Heart size={12} />} label="Hull" color="var(--destructive)" cur={num(ship.hull)} max={num(ship.max_hull)} />

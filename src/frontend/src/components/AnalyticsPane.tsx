@@ -520,8 +520,15 @@ function CommsTab({ profiles, statuses }: { profiles: Profile[]; statuses: Recor
 // ---- Financial Tab ----
 
 interface FinancialData {
-  profiles: Array<{ id: string; name: string; wallet: number; total: number; cargo: Array<{ item: string; quantity: number }> }>
+  profiles: Array<{
+    id: string; name: string; wallet: number; walletLive: boolean; walletAt: string | null
+    assets: number; assetsDepthUnknown: number; total: number
+    cargo: Array<{ item: string; quantity: number }>
+  }>
   fleetTotal: number
+  fleetWallet: number
+  fleetAssets: number
+  fleetAssetsDepthUnknown: number
   fleetCargo: Record<string, number>
 }
 
@@ -581,6 +588,21 @@ function FinancialTab({ profiles }: { profiles: Profile[] }) {
       <div className="text-center">
         <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Fleet Net Worth</div>
         <div className="text-3xl font-mono font-bold text-primary">{data.fleetTotal.toLocaleString()}<span className="text-sm text-muted-foreground ml-1">cr</span></div>
+        {/* Split the headline: cash is bankable, holdings are a realisable
+            estimate at min(held, bid depth) x best bid — and the depth-unknown
+            slice of that is an unvalidated ceiling, so it is called out. */}
+        <div className="mt-1.5 flex items-center justify-center gap-3 text-[10px] text-muted-foreground tabular-nums">
+          <span>cash <span className="text-foreground/80">{data.fleetWallet.toLocaleString()}</span></span>
+          <span className="opacity-40">+</span>
+          <span title="Realisable at min(held, bid depth) × best bid">
+            holdings <span className="text-foreground/80">{data.fleetAssets.toLocaleString()}</span>
+          </span>
+        </div>
+        {data.fleetAssetsDepthUnknown > 0 && (
+          <div className="mt-1 text-[9px]" style={{ color: 'hsl(var(--smui-yellow))' }}>
+            {data.fleetAssetsDepthUnknown.toLocaleString()} cr of holdings priced without bid depth — a ceiling, not a bid
+          </div>
+        )}
       </div>
 
       {/* Per-agent breakdown */}
@@ -592,7 +614,10 @@ function FinancialTab({ profiles }: { profiles: Profile[] }) {
           return (
             <div key={p.id} className="space-y-1">
               <div className="flex items-center justify-between text-xs">
-                <span className="font-medium" style={{ color }}>{p.name}</span>
+                <span className="font-medium" style={{ color }}>
+                  {p.name}
+                  {!p.walletLive && <span className="ml-1.5 text-[9px] text-muted-foreground/60 uppercase tracking-wider">offline</span>}
+                </span>
                 <span className="font-mono tabular-nums text-foreground/80">{p.total.toLocaleString()} cr</span>
               </div>
               <div className="h-4 bg-secondary/30 relative overflow-hidden">
@@ -600,8 +625,9 @@ function FinancialTab({ profiles }: { profiles: Profile[] }) {
                   className="absolute inset-y-0 left-0 flex items-center"
                   style={{ width: `${pct}%`, background: color, opacity: 0.3 }}
                 />
-                <div className="absolute inset-0 flex items-center px-2 text-[10px]">
+                <div className="absolute inset-0 flex items-center justify-between px-2 text-[10px]">
                   <span className="text-muted-foreground">Wallet: {p.wallet.toLocaleString()}</span>
+                  {p.assets > 0 && <span className="text-muted-foreground/70">Holdings: {p.assets.toLocaleString()}</span>}
                 </div>
               </div>
             </div>

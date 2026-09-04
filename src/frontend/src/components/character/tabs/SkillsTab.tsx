@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { GraduationCap, RefreshCw, Pin } from 'lucide-react'
 import type { Profile } from '@/types'
 import { DossierCard } from '../DossierCard'
-import { DISPLAY, StatCell, Chip, Freshness, SectionLabel } from '../dossier-shared'
+import { DISPLAY, StatCell, Chip, Freshness, SectionLabel, LastKnownBanner, NeverSeen, parseTs } from '../dossier-shared'
 
 interface Skill {
   name: string
@@ -74,6 +74,8 @@ function SkillRow({ skillKey, skill, pinned, onPin }: {
 }
 
 export function SkillsTab({ profile, connected }: { profile: Profile; connected: boolean }) {
+  const [stale, setStale] = useState(false)
+  const [neverSeen, setNeverSeen] = useState(false)
   const [skills, setSkills] = useState<Record<string, Skill> | null>(() => skillsCache.get(profile.id)?.skills || null)
   const [fetchedAt, setFetchedAt] = useState<number | null>(() => skillsCache.get(profile.id)?.fetchedAt ?? null)
   const [loading, setLoading] = useState(false)
@@ -88,33 +90,34 @@ export function SkillsTab({ profile, connected }: { profile: Profile; connected:
     setPinnedKey(loadPin(profile.id))
   }, [profile.id])
 
+  // Fetches whether or not the agent is connected: the endpoint serves a live
+  // read when it can and replays the last banked one when it cannot, so a
+  // parked agent still renders its sheet instead of an empty pane.
   const fetchSkills = useCallback(async () => {
-    if (!connected) return
     const targetId = profile.id
     setLoading(true)
     try {
-      const resp = await fetch(`/api/profiles/${targetId}/command`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'get_skills', silent: true }),
-      })
+      const resp = await fetch(`/api/profiles/${targetId}/skills`)
       if (profileIdRef.current !== targetId) return
       const data = await resp.json()
-      const result = data.structuredContent || data.result || data
-      if (result?.skills && typeof result.skills === 'object') {
-        const now = Date.now()
-        skillsCache.set(targetId, { skills: result.skills as Record<string, Skill>, fetchedAt: now })
-        setSkills(result.skills as Record<string, Skill>)
-        setFetchedAt(now)
+      if (data?.never) { setNeverSeen(true); return }
+      if (data?.skills && typeof data.skills === 'object') {
+        const at = data.fetched_at ? parseTs(data.fetched_at) : Date.now()
+        skillsCache.set(targetId, { skills: data.skills as Record<string, Skill>, fetchedAt: at })
+        setSkills(data.skills as Record<string, Skill>)
+        setFetchedAt(at)
+        setStale(!!data.stale)
+        setNeverSeen(false)
       }
     } catch { /* ignore */ } finally {
       if (profileIdRef.current === targetId) setLoading(false)
     }
-  }, [profile.id, connected])
+  }, [profile.id])
 
   useEffect(() => {
-    if (!connected) return
     fetchSkills()
+    // Only poll a live agent; an offline one's snapshot cannot change.
+    if (!connected) return
     const t = setInterval(fetchSkills, 60_000)
     return () => clearInterval(t)
   }, [connected, fetchSkills])
@@ -167,18 +170,19 @@ export function SkillsTab({ profile, connected }: { profile: Profile; connected:
       action={
         <span className="flex items-center gap-2">
           <Freshness at={fetchedAt} />
-          <button onClick={fetchSkills} disabled={!connected || loading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
+          <button onClick={fetchSkills} disabled={loading} className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
             <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
           </button>
         </span>
       }
     >
-      {!connected && !skills ? (
-        <div className="px-3 py-3 text-[11px] text-muted-foreground/50 italic">Connect to load skills</div>
+      {neverSeen && !skills ? (
+        <NeverSeen what="skill sheet" />
       ) : !skills ? (
         <div className="px-3 py-3 text-[11px] text-muted-foreground/50 italic">{loading ? 'Loading...' : 'No skill data'}</div>
       ) : (
         <>
+          {stale && <div className="px-3 pt-3"><LastKnownBanner at={fetchedAt ? new Date(fetchedAt).toISOString() : null} /></div>}
           {summary && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 px-3 py-3 border-b border-border/40">
               <StatCell label="Trained" value={String(summary.trained)} />
