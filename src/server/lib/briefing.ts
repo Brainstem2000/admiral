@@ -711,10 +711,20 @@ function isAgentDocked(gs: Record<string, unknown> | null | undefined): boolean 
   if (!gs) return false
   const player = gs.player as Record<string, unknown> | undefined
   const location = gs.location as Record<string, unknown> | undefined
-  if (player?.docked === true || player?.is_docked === true) return true
-  if ((gs as Record<string, unknown>).docked === true) return true
-  if (location && Boolean(location.docked_at)) return true
-  // Fallback for the {player:{current_poi}} shape with no explicit flag.
+  // An explicit signal is AUTHORITATIVE IN BOTH DIRECTIONS. These used to be
+  // truthy checks that fell through to the POI-name heuristic below on a false,
+  // so an agent sitting in space AT a station's POI was reported DOCKED —
+  // "War Citadel" matches /citadel$/. Morg'Thar caught it himself on
+  // 2026-09-04: "the briefing says I'm DOCKED but the game says I'm IN SPACE."
+  // The briefing tells an undocked agent it cannot trade/market/storage, so the
+  // wrong answer here sends it to do things that are guaranteed to fail.
+  if (typeof player?.docked === 'boolean') return player.docked
+  if (typeof player?.is_docked === 'boolean') return player.is_docked
+  if (typeof (gs as Record<string, unknown>).docked === 'boolean') return (gs as Record<string, unknown>).docked as boolean
+  // `docked_at: null` is a real answer, not a missing one.
+  if (location && 'docked_at' in location) return Boolean(location.docked_at)
+  // Only with NO authoritative signal at all do we infer from a station-like POI
+  // (the {player:{current_poi}} shape, which carries no docked field).
   const poi = (player?.current_poi ?? location?.poi_name ?? '') as unknown
   if (typeof poi === 'string' && poi.length > 0) {
     if (STATION_POI_RX.test(poi)) return true
