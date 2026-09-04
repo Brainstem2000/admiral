@@ -58,7 +58,12 @@ describe('acquisition is refused while winding down', () => {
   test('buying a ship or commissioning one is blocked', () => {
     setWindDown(P, true)
     expect(checkDoctrineGuards('commission_ship', {}, P)).toContain('REFUSED')
-    expect(checkDoctrineGuards('buy_ship', {}, P)).toContain('REFUSED')
+    // The REAL purchase command. The first version of this guard named
+    // `buy_ship`, which is not a game command at all (lib spec v0.547.0 exposes
+    // ship.buy_listed_ship), so that entry could never fire — a guard against a
+    // command nobody can call is not a guard.
+    expect(checkDoctrineGuards('buy_listed_ship', { listing_id: 'x' }, P)).toContain('REFUSED')
+    expect(checkDoctrineGuards('place_ship_buy_order', {}, P)).toContain('REFUSED')
   })
 
   test('the refusal tells the agent it is not a bug', () => {

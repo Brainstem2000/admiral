@@ -505,7 +505,11 @@ export function isWindingDown(profileId: string): boolean {
  *  is to let the agent finish and turn in what it already holds. */
 const ACQUISITION_COMMANDS = new Set([
   'accept_mission', 'accept_contract', 'accept_shipment',
-  'commission_ship', 'buy_ship', 'buy_ship_license',
+  // Ship purchase is `buy_listed_ship` (spacemolt_ship_buy_listed_ship). An
+  // earlier version of this set named `buy_ship`, which is not a game command —
+  // the guard could never fire. Verified against lib spec v0.547.0: the ship
+  // group exposes browse_ships, buy_listed_ship, commission_ship, place_ship_buy_order.
+  'commission_ship', 'buy_listed_ship', 'place_ship_buy_order', 'buy_ship_license',
 ])
 
 export function cleanupProfileToolState(profileId: string): void {
