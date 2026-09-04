@@ -53,6 +53,9 @@ const KIND_COLORS: Record<string, string> = {
   // the row itself is bookkeeping, not a transaction the agent performed.
   escrow_correction: 'var(--smui-frost-2)',
   escrow: 'var(--smui-orange)',
+  // A movement we saw but could not attribute (rent, commission refunds).
+  // Purple so it reads as "needs a human eye" rather than routine income.
+  unattributed: 'var(--smui-purple)',
   other: 'var(--muted-foreground)',
 }
 
@@ -345,7 +348,11 @@ export function FinancialsTab({ profile, connected }: { profile: Profile; connec
     })
     return rows
   }, [ledger, sortKey, sortDir])
-  const shown = sortedRows.slice(0, 50)
+  // The ledger is the place you come to find a specific movement, so show a
+  // deep slice rather than a token 50 and let the panel scroll. 300 rows renders
+  // instantly and covers well over a day of the busiest agent's activity; the
+  // period selector (24h / 7d / all) is what reaches further back.
+  const shown = sortedRows.slice(0, 300)
   const totalCount = ledger
     ? Object.values(ledger.summary.by_kind).reduce((a, v) => a + v.count, 0) || ledger.rows.length
     : 0
@@ -546,9 +553,13 @@ export function FinancialsTab({ profile, connected }: { profile: Profile; connec
                 Time{sortMark('time')}
               </button>
             </div>
-            {shown.map(r => (
-              <TransactionRow key={r.id} r={r} />
-            ))}
+            {/* Scrolls within the panel so the column headers above stay put
+                and the page itself does not grow to 300 rows. */}
+            <div className="max-h-[60vh] overflow-y-auto overscroll-contain">
+              {shown.map(r => (
+                <TransactionRow key={r.id} r={r} />
+              ))}
+            </div>
             {totalCount > shown.length && (
               <div className="px-3 py-1.5 text-[10px] text-muted-foreground/60 border-t border-border/30">
                 Showing top {shown.length} of {totalCount.toLocaleString()}

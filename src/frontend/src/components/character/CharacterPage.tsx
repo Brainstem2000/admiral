@@ -283,9 +283,9 @@ export function CharacterPage({ profile, status, playerData, onOpenEditor }: Pro
 
             {tab === 'knowledge' && (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <MarkdownCard title="Directive" kind="directive" content={profile.directive} source="Local" />
-                <MarkdownCard title="TODO" kind="todo" content={profile.todo} source="Local" />
-                <MarkdownCard title="Memory" kind="memory" content={profile.memory} source="Local" />
+                <MarkdownCard title="Directive" kind="directive" content={profile.directive} source="Local" profileId={profile.id} />
+                <MarkdownCard title="TODO" kind="todo" content={profile.todo} source="Local" profileId={profile.id} />
+                <MarkdownCard title="Memory" kind="memory" content={profile.memory} source="Local" profileId={profile.id} />
                 <CaptainsLogCard profileId={profile.id} connected={status.connected} />
               </div>
             )}

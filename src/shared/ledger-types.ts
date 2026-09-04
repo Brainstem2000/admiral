@@ -4,6 +4,14 @@ export type LedgerKind =
   | 'mission_reward' | 'fuel' | 'repair' | 'dock_fee' | 'combat'
   | 'insurance' | 'commission'
   | 'deposit' | 'withdraw' | 'transfer' | 'gift_sent' | 'gift_received' | 'trade' | 'freight' | 'escrow' | 'other'
+  // A wallet movement the harness saw but could not attribute to an explicit
+  // amount field — booked so that every credit is accounted for rather than
+  // silently lost. Station rent (auto-deducted ~every 17 min) and commission
+  // refunds land here.
+  | 'unattributed'
+  // Posted by scripts/repair-escrow-ledger.ts to reverse the phantom escrow
+  // rows the old reconciler manufactured on every freight delivery.
+  | 'escrow_correction'
 
 export interface LedgerEntry {
   id: number

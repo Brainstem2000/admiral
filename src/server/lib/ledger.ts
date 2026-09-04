@@ -65,9 +65,11 @@ export class LedgerCollector {
       // +119,850 against 22 escrow rows totalling -119,850: an exact cancellation
       // that hid every freight payment from the summary and left the ledger net
       // ~94,000 short of her real wallet.
-      const balanceBeforeRows = SHIPPING_ESCROW_ACTIONS.has(action)
-        ? this.lastBookedBalance(profileId)
-        : null
+      // Read the pre-insert balance for EVERY command, not just shipping. Any
+      // command whose result echoes the wallet can be reconciled, and the
+      // Admiral's standing requirement is that every movement of every credit
+      // is tracked — see the universal residual catch below.
+      const balanceBeforeRows = this.lastBookedBalance(profileId)
       for (const row of rows) this.insert(profileId, row, command, r)
       // Shipping escrow/bond flows carry NO explicit amount fields anywhere in
       // their results, yet move real credits: post-escrow out, carrier bonds
@@ -94,6 +96,43 @@ export class LedgerCollector {
           }
         }
       }
+      // UNIVERSAL RESIDUAL CATCH — the Admiral's rule: every movement of every
+      // credit is tracked, so a wallet change we cannot attribute is booked as
+      // an explicit `unattributed` row rather than vanishing.
+      //
+      // Two documented precedents did this for one command family each: the
+      // shipping-escrow block above, and accept_trade in mapResult (both note
+      // "better one honest approximation than an invisible transfer"). Every
+      // other command was left to whatever explicit amount fields it happened
+      // to carry, and the gaps were large: reconcile on 2026-09-03 showed 260
+      // windows of unbooked movement across five agents, including 633,560cr
+      // refunded to Morg'Thar when his credits-only War Wagon commission
+      // sourced its materials for less than the earmark.
+      //
+      // Anything the game charges silently lands here too — station rent
+      // auto-deducts roughly every 17 minutes wherever you are, and that is a
+      // real credit movement that belongs in the ledger.
+      //
+      // Skipped for the escrow family (already booked above, would double) and
+      // whenever either balance is unknown, since a residual we cannot anchor
+      // is a guess, not a record.
+      if (!SHIPPING_ESCROW_ACTIONS.has(action)) {
+        const after = this.readBalance(r) ?? (outer ? this.readBalance(outer) : null)
+        const prev = balanceBeforeRows
+        if (after !== null && prev !== null) {
+          const explained = rows.reduce((s, row) => s + row.amount, 0)
+          const residual = (after - prev) - explained
+          if (residual !== 0) {
+            this.insert(profileId, {
+              kind: 'unattributed',
+              amount: residual,
+              counterparty: action || null,
+              balance_after: after,
+            }, command, r)
+          }
+        }
+      }
+
       // Fleet-internal gifts: the recipient side is silent, so the send is the
       // only place their +credits can be booked from.
       if (action === 'send_gift' || action.endsWith('_send_gift')) {

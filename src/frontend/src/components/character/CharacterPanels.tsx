@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import {
   FileText, ListTodo, Brain, BookOpen, Activity, TrendingUp, RefreshCw,
-  Plug, Square, Anchor, SquarePen,
+  Plug, Square, Anchor, SquarePen, Check, X,
   MapPin, Coins, Heart, Shield, Fuel, Package, Cpu, Zap,
 } from 'lucide-react'
 import type { Profile, LogEntry, LogType } from '@/types'
@@ -151,19 +151,68 @@ export function VitalsPanel({ playerData }: { playerData: Record<string, unknown
 
 // ── Markdown cards (directive / todo / memory) ────────────────────────────────
 
-export function MarkdownCard({ title, kind, content, source }: {
+/**
+ * Directive / TODO / memory, rendered as markdown with in-place editing.
+ *
+ * Editing matters most for the TODO: it is the fleet's task list, and hand-
+ * tuning one before restarting an agent was previously only possible through
+ * the API. The three fields behave differently once saved, and the footer says
+ * so rather than leaving it to be discovered:
+ *   directive — PUT triggers restartTurn(); the agent re-plans immediately.
+ *   todo/memory — saved silently, but AGENT-OWNED: they hold update_todo and
+ *   update_memory and will overwrite you. One rewritten TODO was replaced 40
+ *   seconds after a restart. Durable orders belong in the directive.
+ */
+export function MarkdownCard({ title, kind, content, source, profileId, onSaved }: {
   title: string
   kind: 'directive' | 'todo' | 'memory'
   content: string
   source: 'Local'
+  profileId?: string
+  onSaved?: () => void
 }) {
   const icon = kind === 'directive' ? <FileText size={12} /> : kind === 'todo' ? <ListTodo size={12} /> : <Brain size={12} />
   const empty = kind === 'directive' ? 'No directive set' : kind === 'todo' ? 'No TODO items' : 'No memory stored yet'
-  const trimmed = content?.trim() || ''
+
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  // Hold the saved text until the parent's poll feeds the new value back in,
+  // so the card does not flash the stale content after a successful save.
+  const [justSaved, setJustSaved] = useState<string | null>(null)
+
+  const live = justSaved !== null ? justSaved : (content || '')
+  useEffect(() => {
+    if (justSaved !== null && (content || '') === justSaved) setJustSaved(null)
+  }, [content, justSaved])
+
+  const trimmed = live?.trim() || ''
   const words = trimmed ? trimmed.split(/\s+/).length : 0
   // Directives/memories that outgrow the system-prompt budget are a real cost —
   // surface the size so bloat is visible at a glance.
   const sizeLabel = trimmed.length >= 1000 ? `${(trimmed.length / 1000).toFixed(1)}k chars` : trimmed ? `${trimmed.length} chars` : ''
+
+  const save = useCallback(async () => {
+    if (!profileId) return
+    setSaving(true); setError(null)
+    try {
+      const res = await fetch(`/api/profiles/${profileId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [kind]: draft }),
+      })
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      setJustSaved(draft)
+      setEditing(false)
+      onSaved?.()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Save failed')
+    } finally {
+      setSaving(false)
+    }
+  }, [profileId, kind, draft, onSaved])
+
   return (
     <DossierCard
       title={title}
@@ -171,13 +220,65 @@ export function MarkdownCard({ title, kind, content, source }: {
       source={source}
       className="min-h-[140px] max-h-[420px]"
       bodyClassName="px-3 py-2.5"
-      action={trimmed
-        ? <Chip label={sizeLabel} title={`${words.toLocaleString()} words — lives inside the cached system prompt; size is token cost`} />
-        : undefined}
+      action={
+        <span className="flex items-center gap-2">
+          {trimmed && !editing && (
+            <Chip label={sizeLabel} title={`${words.toLocaleString()} words — lives inside the cached system prompt; size is token cost`} />
+          )}
+          {profileId && !editing && (
+            <button
+              onClick={() => { setDraft(live || ''); setError(null); setEditing(true) }}
+              className="flex items-center gap-1 text-[10px] uppercase tracking-[1.5px] px-1.5 py-0.5 border border-border text-muted-foreground hover:text-foreground hover:border-primary/40 transition-colors"
+              title={`Edit this ${kind}`}
+            >
+              <SquarePen size={10} />Edit
+            </button>
+          )}
+          {editing && (
+            <>
+              <button
+                onClick={save}
+                disabled={saving}
+                className="flex items-center gap-1 text-[10px] uppercase tracking-[1.5px] px-1.5 py-0.5 border border-[hsl(var(--smui-green))]/50 text-[hsl(var(--smui-green))] hover:border-[hsl(var(--smui-green))] transition-colors disabled:opacity-50"
+              >
+                <Check size={10} />{saving ? 'Saving' : 'Save'}
+              </button>
+              <button
+                onClick={() => { setEditing(false); setError(null) }}
+                disabled={saving}
+                className="flex items-center gap-1 text-[10px] uppercase tracking-[1.5px] px-1.5 py-0.5 border border-border text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+              >
+                <X size={10} />Cancel
+              </button>
+            </>
+          )}
+        </span>
+      }
     >
-      {trimmed
-        ? <MarkdownRenderer content={content} />
-        : <span className="text-[11px] text-muted-foreground/50 italic">{empty}</span>}
+      {editing ? (
+        <div className="flex flex-col gap-1.5">
+          <textarea
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            spellCheck={false}
+            className="w-full min-h-[240px] bg-background border border-border px-2 py-1.5 text-[11px] leading-relaxed font-mono text-foreground/90 focus:outline-none focus:border-primary/50 resize-y"
+            placeholder={empty}
+          />
+          <div className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground/70">
+            <span>
+              {kind === 'directive'
+                ? 'Saving restarts the agent’s turn so it re-plans on the new orders.'
+                : `Saved silently — but the agent owns its ${kind} and may overwrite it. Put durable orders in the directive.`}
+            </span>
+            <span className="tabular-nums shrink-0">{draft.length.toLocaleString()} chars</span>
+          </div>
+          {error && <span className="text-[10px] text-[hsl(var(--smui-red))]">{error}</span>}
+        </div>
+      ) : trimmed ? (
+        <MarkdownRenderer content={live} />
+      ) : (
+        <span className="text-[11px] text-muted-foreground/50 italic">{empty}</span>
+      )}
     </DossierCard>
   )
 }
