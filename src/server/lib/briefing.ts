@@ -922,7 +922,7 @@ export function buildSituationalBriefing(profileId: string): string {
   // not the sellable-ore board — they have no mining laser.
   {
     const cargoIds = (cache.cargo ?? []).map((c: unknown) => String((c as Record<string, unknown>).item_id ?? '')).filter(Boolean)
-    for (const line of galaxyMarketLines(cargoIds, { oreBoard: role !== 'hunter' })) lines.push(line)
+    for (const line of galaxyMarketLines(cargoIds, { oreBoard: role !== 'hunter', profileId })) lines.push(line)
     // Both-sides quotes for items the directive names — buy-leg agents hold
     // nothing, so cargo-keyed lines alone leave them on stale directive numbers.
     const directive = getProfile(profileId)?.directive ?? ''

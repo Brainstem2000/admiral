@@ -19,8 +19,7 @@ import { deriveActivity, type LogRef } from '@/lib/activity'
 import { ActivityGraphic } from './ActivityGraphic'
 import {
   CharacterHeader, VitalsPanel, MarkdownCard, CaptainsLogCard,
-  RecentActivityFeed, FinancialSparkline,
-} from './CharacterPanels'
+  RecentActivityFeed, FinancialSparkline, BriefingCard } from './CharacterPanels'
 import { FinancialsTab } from './tabs/FinancialsTab'
 import { InventoryTab } from './tabs/InventoryTab'
 import { SkillsTab } from './tabs/SkillsTab'
@@ -287,6 +286,11 @@ export function CharacterPage({ profile, status, playerData, onOpenEditor }: Pro
                 <MarkdownCard title="TODO" kind="todo" content={profile.todo} source="Local" profileId={profile.id} />
                 <MarkdownCard title="Memory" kind="memory" content={profile.memory} source="Local" profileId={profile.id} />
                 <CaptainsLogCard profileId={profile.id} connected={status.connected} />
+                {/* Generated, not authored — but injected into every prompt, so
+                    it belongs beside the three the operator can edit. */}
+                <div className="lg:col-span-2">
+                  <BriefingCard profileId={profile.id} connected={status.connected} />
+                </div>
               </div>
             )}
 

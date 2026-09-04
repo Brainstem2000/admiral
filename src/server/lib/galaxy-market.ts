@@ -18,12 +18,37 @@
  *    than the intel is worth.
  */
 
+import { getCommissionRequirement } from './db'
+
 const FEED_URL = 'https://game.spacemolt.com/api/market'
 const FETCH_INTERVAL_MS = 10 * 60 * 1000
 const RERENDER_THRESHOLD = 0.25
-// Items whose sale Admiral blocks fleet-wide (Devastator feedstock) — showing
-// them as "sellable" would walk agents straight into the guard.
-const LOCKED = new Set(['iron_ore', 'titanium_ore', 'titanium_alloy', 'steel_plate', 'fury_crystal'])
+
+/** Is this item reserved by an OPEN commission of this agent's own?
+ *
+ *  This used to be a hardcoded Set of Devastator feedstock — iron_ore,
+ *  titanium_ore, titanium_alloy, steel_plate, fury_crystal. That commission was
+ *  placed and paid on 2026-08-28 and `SELL_CARGO_ALWAYS_EXCLUDE` in tools.ts was
+ *  emptied the same day on the Admiral's order, but this second, parallel list
+ *  was missed. For a week afterwards the briefing told every agent their ore was
+ *  "BoM-LOCKED (vault it, unsellable)" while the actual sell guard let it
+ *  through — 36,027 units fleet-wide, 12,167 of them Morg'Thar's. Injected state
+ *  outranks what the agent observes, so they vaulted ore they could have sold and
+ *  reported the lock back as fact.
+ *
+ *  Two lock lists could disagree, so now there is one source of truth: the live
+ *  `commission_requirements` table, which is what the craft guard already reads.
+ *  It is also scoped per agent — another agent's open commission must never
+ *  reserve your stock, because commissions consume only the commissioning
+ *  player's own storage. */
+function isLocked(itemId: string, profileId?: string): boolean {
+  if (!profileId) return false   // unknown caller: never invent a lock
+  try {
+    return getCommissionRequirement(itemId, profileId) > 0
+  } catch {
+    return false
+  }
+}
 
 interface EmpireQuote {
   empire: string
@@ -101,9 +126,13 @@ function changed(a: EmpireQuote | undefined, b: EmpireQuote | undefined): boolea
 }
 
 function maybeRefreshSnapshot(): void {
-  // Ore board: top sellable ores by value of a modest (70-unit) hold
+  // Ore board: top sellable ores by value of a modest (70-unit) hold.
+  // No lock filter here: this snapshot is global and has no agent context, while
+  // a commission reservation is per-agent and is surfaced on that agent's own
+  // cargo lines instead. The old hardcoded filter hid iron_ore and titanium_ore
+  // from every agent for a week after the commission they belonged to had closed.
   const ores = [...quotes.entries()]
-    .filter(([id]) => id.endsWith('_ore') && !LOCKED.has(id))
+    .filter(([id]) => id.endsWith('_ore'))
     .map(([id, arr]) => ({ item: id, q: arr[0] }))
     .filter((e) => e.q.bid >= 30 && e.q.depth >= 50)
     .sort((a, b) => b.q.bid * Math.min(b.q.depth, 70) - a.q.bid * Math.min(a.q.depth, 70))
@@ -158,15 +187,18 @@ export function stopGalaxyMarketCollector(): void {
  */
 /** @param opts.oreBoard render the galaxy-wide sellable-ore board (default true).
  *  Hunters carry no mining laser, so for them it is noise that reads as a plan. */
-export function galaxyMarketLines(cargoItemIds: string[], opts: { oreBoard?: boolean } = {}): string[] {
+export function galaxyMarketLines(
+  cargoItemIds: string[],
+  opts: { oreBoard?: boolean; profileId?: string } = {},
+): string[] {
   if (lastFetchOk === 0) return []
   const lines: string[] = []
   const cargoLines: string[] = []
   for (const id of [...new Set(cargoItemIds)]) {
     if (id.startsWith('package:')) continue
     const q = snapshot.get(id)
-    if (LOCKED.has(id)) {
-      cargoLines.push(`${id}: BoM-LOCKED (vault it, unsellable)`)
+    if (isLocked(id, opts.profileId)) {
+      cargoLines.push(`${id}: reserved by YOUR open commission (do not sell)`)
     } else if (q) {
       cargoLines.push(`${id}: ${q.empire} bids ${q.bid} x${q.depth}`)
     } else {

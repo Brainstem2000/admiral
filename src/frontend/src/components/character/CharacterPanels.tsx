@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import {
   FileText, ListTodo, Brain, BookOpen, Activity, TrendingUp, RefreshCw,
   Plug, Square, Anchor, SquarePen, Check, X,
-  MapPin, Coins, Heart, Shield, Fuel, Package, Cpu, Zap,
+  MapPin, Coins, Heart, Shield, Fuel, Package, Cpu, Zap, Radar,
 } from 'lucide-react'
 import type { Profile, LogEntry, LogType } from '@/types'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
@@ -12,7 +12,7 @@ import {
   FilterCheckbox, loadSavedFilters, persistFilters, formatTime,
 } from '@/components/log/log-shared'
 import { DossierCard } from './DossierCard'
-import { DISPLAY, Bar, Chip, ageOf, fmtCr } from './dossier-shared'
+import { DISPLAY, Bar, Chip, ageOf, fmtCr, LastKnownBanner, NeverSeen, parseTs } from './dossier-shared'
 
 const CONNECTION_MODE_LABELS: Record<string, string> = {
   http: 'HTTP v1',
@@ -538,6 +538,92 @@ export function FinancialSparkline({ profileId }: { profileId: string }) {
         <span className="text-[11px] text-muted-foreground/50 italic">
           {snaps == null ? 'Loading...' : 'No financial snapshots yet.'}
         </span>
+      )}
+    </DossierCard>
+  )
+}
+
+
+/** The situational briefing injected into this agent's prompt every turn.
+ *
+ *  Read-only on purpose: it is generated from live game state, fleet intel and
+ *  the playbook, not authored. It is shown because it was the one piece of
+ *  prompt state nobody could inspect — directive, TODO and memory are all
+ *  visible and editable here, while the briefing was only ever seen by the
+ *  agent. A stale lock list sat in it for a week telling every agent that
+ *  36,027 units of ore were unsellable, and it surfaced only because an agent
+ *  reported the contradiction back. Injected state outranks what the agent
+ *  observes, so it needs to be readable by the operator.
+ */
+export function BriefingCard({ profileId, connected }: { profileId: string; connected: boolean }) {
+  const [text, setText] = useState<string | null>(null)
+  const [stale, setStale] = useState(false)
+  const [at, setAt] = useState<string | null>(null)
+  const [never, setNever] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const idRef = useRef(profileId)
+
+  useEffect(() => { idRef.current = profileId; setText(null); setNever(false) }, [profileId])
+
+  const fetchBriefing = useCallback(async () => {
+    const target = profileId
+    setLoading(true)
+    try {
+      const resp = await fetch(`/api/profiles/${target}/briefing`)
+      if (idRef.current !== target) return
+      const d = await resp.json()
+      if (d?.never) { setNever(true); setText(null); return }
+      if (typeof d?.briefing === 'string') {
+        setText(d.briefing)
+        setStale(!!d.stale)
+        setAt(d.fetched_at ?? null)
+        setNever(false)
+      }
+    } catch { /* keep last */ } finally {
+      if (idRef.current === target) setLoading(false)
+    }
+  }, [profileId])
+
+  useEffect(() => {
+    fetchBriefing()
+    // The briefing refreshes every 60s server-side; only poll a live agent.
+    if (!connected) return
+    const t = setInterval(fetchBriefing, 60_000)
+    return () => clearInterval(t)
+  }, [connected, fetchBriefing])
+
+  const lineCount = text ? text.split('\n').filter(l => l.trim()).length : 0
+
+  return (
+    <DossierCard
+      title="Briefing (injected each turn)"
+      icon={<Radar size={12} />}
+      source="Server"
+      className="min-h-[140px]"
+      bodyClassName="p-0"
+      action={
+        <span className="flex items-center gap-2">
+          {lineCount > 0 && (
+            <span className="text-[9px] text-muted-foreground/50 tabular-nums">{lineCount} lines</span>
+          )}
+          <button onClick={fetchBriefing} disabled={loading}
+            className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
+            <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
+          </button>
+        </span>
+      }
+    >
+      {stale && <div className="px-3 pt-3"><LastKnownBanner at={at} /></div>}
+      {never && !text ? (
+        <NeverSeen what="briefing" />
+      ) : !text ? (
+        <div className="px-3 py-3 text-[11px] text-muted-foreground/50 italic">
+          {loading ? 'Loading briefing…' : 'No briefing captured yet'}
+        </div>
+      ) : (
+        <pre className="px-3 py-3 text-[10.5px] leading-relaxed whitespace-pre-wrap break-words text-foreground/85 max-h-[55vh] overflow-y-auto overscroll-contain font-mono">
+          {text}
+        </pre>
       )}
     </DossierCard>
   )

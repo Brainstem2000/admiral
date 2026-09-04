@@ -222,6 +222,33 @@ function replaySnapshot(c: Parameters<Parameters<typeof profiles.get>[1]>[0], id
   return c.json({ ...(snap.payload as object), stale: true, fetched_at: snap.fetched_at })
 }
 
+/** GET /api/profiles/:id/briefing — the situational briefing injected into this
+ *  agent's prompt every turn.
+ *
+ *  Worth surfacing because it is the one piece of prompt state nobody could read:
+ *  directive, TODO and memory are all visible and editable in the dashboard, but
+ *  the briefing is generated and was only ever seen by the agent. A stale lock
+ *  list sat in it for a week telling every agent their ore was unsellable, and
+ *  the only reason it surfaced is that an agent reported the contradiction back.
+ *  Injected state outranks what the agent observes, so it should be inspectable. */
+profiles.get('/:id/briefing', async (c) => {
+  const id = c.req.param('id')
+  const agent = agentManager.getAgent(id)
+  if (!agent || !agent.isConnected) return replaySnapshot(c, id, 'briefing')
+  try {
+    const { buildSituationalBriefing } = await import('../lib/briefing')
+    const briefing = buildSituationalBriefing(id)
+    // An empty string means the collector has not warmed yet — that is not a
+    // reading worth banking over a good one.
+    if (!briefing.trim()) return replaySnapshot(c, id, 'briefing')
+    const payload = { briefing, fetched_at: new Date().toISOString() }
+    saveAgentSnapshot(id, 'briefing', payload)
+    return c.json({ ...payload, stale: false })
+  } catch {
+    return replaySnapshot(c, id, 'briefing')
+  }
+})
+
 /** GET /api/profiles/:id/skills — live get_skills when connected, last known otherwise. */
 profiles.get('/:id/skills', async (c) => {
   const id = c.req.param('id')
