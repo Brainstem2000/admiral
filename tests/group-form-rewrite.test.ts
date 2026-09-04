@@ -80,3 +80,41 @@ describe('group action enumeration', () => {
     expect(libV2GroupActions('not_a_real_group')).toEqual([])
   })
 })
+
+/**
+ * The refusal message must hand back a CORRECTED CALL, not just a verb list.
+ *
+ * Cass Margin hit the actionless guard twice on 2026-09-04. It worked — no game
+ * calls were spent — but she read it as evidence of a broken server, logged
+ * "SHIPPING API BUG: All shipping accept/deliver calls fail", and started
+ * writing that into her memory. A false "the API is broken" belief is worse
+ * than the wasted call the guard saved, because memory outlives the turn.
+ *
+ * So the message now echoes the caller's own arguments inside a ready-to-run
+ * line, and says explicitly that nothing is broken.
+ */
+function refusalFor(group: string, args: Record<string, unknown>, verbs: string[]) {
+  const carried = Object.entries(args)
+    .filter(([k]) => k !== 'action')
+    .map(([k, v]) => `${k}="${String(v)}"`)
+    .join(', ')
+  return `${group}(action="<verb>"${carried ? ', ' + carried : ''})`
+}
+
+describe('actionless-call refusal message', () => {
+  test("carries the caller's own arguments into the corrected call", () => {
+    // Exactly what Cass sent: shipping(shipment_id=...) with no action.
+    const line = refusalFor('shipping', { shipment_id: 'fa1916f6374427f4b90334ef1df9a1c7' }, [])
+    expect(line).toBe('shipping(action="<verb>", shipment_id="fa1916f6374427f4b90334ef1df9a1c7")')
+  })
+
+  test('a bare call still yields a runnable shape', () => {
+    expect(refusalFor('shipping', {}, [])).toBe('shipping(action="<verb>")')
+  })
+
+  test('an existing action key is never duplicated into the example', () => {
+    const line = refusalFor('facility', { action: 'bogus', facility_id: 'f1' }, [])
+    expect(line).toBe('facility(action="<verb>", facility_id="f1")')
+    expect(line.match(/action=/g)?.length).toBe(1)
+  })
+})

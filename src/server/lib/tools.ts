@@ -1780,14 +1780,24 @@ export async function executeTool(
       const actions = libV2GroupActions(group)
       if (actions.length) {
         ctx.log('system', `Refused ${group}() with no action — answered locally with the valid list (no game call spent)`)
+        // Echo the caller's OWN arguments back inside a corrected call. Naming the
+        // verbs is not enough: Cass Margin read this refusal twice, concluded
+        // "SHIPPING API BUG", and began writing that into her memory. Agents act
+        // on a concrete corrected line far more reliably than on a verb list.
+        const carried = Object.entries(commandArgs)
+          .filter(([k]) => k !== 'action')
+          .map(([k, v]) => `${k}="${String(v)}"`)
+          .join(', ')
+        const example = `${group}(action="<verb>"${carried ? ', ' + carried : ''})`
         return (
-          `REFUSED: \`${group}\` needs an \`action\` argument — you sent none, and the server would ` +
-          `reject it as invalid_action.\n\nKnown actions for ${group}: ${actions.join(', ')}\n` +
+          `REFUSED — this is the ADMIRAL HARNESS, not the game, and NOTHING IS BROKEN. ` +
+          `Your call reached me without an \`action\` argument, which the server would reject as ` +
+          `invalid_action, so I stopped it before it cost you anything.\n\n` +
+          `FIX: rewrite your call as\n    ${example}\n` +
+          `substituting one of these verbs: ${actions.join(', ')}\n\n` +
           `(That list comes from the bundled client library, which can lag the live server — if ` +
-          `the game names an action that is missing here, trust the game.)\n\n` +
-          `Call it as ${group}(action="<verb>", ...) — for example ${group}(action="${actions[0]}"). ` +
-          `Any id argument you were passing stays; the action is what was missing. Nothing was sent ` +
-          `to the game, so this cost you no time.`
+          `the game names an action missing here, trust the game.)\n\n` +
+          `Do NOT report an API bug and do NOT record one in memory. Re-issue the call above.`
         )
       }
     }
