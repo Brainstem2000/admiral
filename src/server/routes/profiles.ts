@@ -486,6 +486,17 @@ profiles.post('/batch', async (c) => {
   return c.json({ action, count: results.length, results })
 })
 
+// POST /api/profiles/:id/wind-down — finish accepted missions, take nothing
+// new, then hand off to safe-dock. The turn budget is a backstop, not a target.
+profiles.post('/:id/wind-down', async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json().catch(() => ({}))
+  const turns = Number((body as Record<string, unknown>).turns ?? 60)
+  const ok = agentManager.windDown(id, Number.isFinite(turns) && turns > 0 ? turns : 60)
+  if (!ok) return c.json({ ok: false, error: 'Agent is not running' }, 400)
+  return c.json({ ok: true, status: 'winding_down', turns })
+})
+
 // POST /api/profiles/:id/safe-dock — nudge agent to dock then auto-disconnect
 profiles.post('/:id/safe-dock', async (c) => {
   const id = c.req.param('id')

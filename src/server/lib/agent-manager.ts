@@ -1,5 +1,6 @@
 import { Agent } from './agent'
 import { getProfile, addLogEntry } from './db'
+import { setWindDown } from './tools'
 
 const BACKOFF_BASE = 5_000      // 5 seconds
 const BACKOFF_MAX = 5 * 60_000  // 5 minutes
@@ -218,6 +219,7 @@ class AgentManager {
 
   async disconnect(profileId: string): Promise<void> {
     this.stopRequested.add(profileId)
+    setWindDown(profileId, false)
     this.resetBackoff(profileId)
 
     const agent = this.agents.get(profileId)
@@ -241,6 +243,24 @@ class AgentManager {
     }
   }
 
+  /** Wind down: finish accepted missions, take on nothing new, then dock.
+   *  Unlike safeDock this does NOT set stopRequested up front — the agent has
+   *  real work left and a backoff restart mid-wind-down is recoverable. The
+   *  stop flag is set when it hands off to safe-dock. */
+  windDown(profileId: string, turns = 60): boolean {
+    const agent = this.agents.get(profileId)
+    if (!agent?.isRunning) return false
+    agent.pendingWindDown = true
+    agent.windDownTurnsRemaining = turns
+    setWindDown(profileId, true)
+    agent.injectNudge(
+      'WIND DOWN: the Admiral is standing the fleet down. Finish and DELIVER the missions you have '
+      + 'already accepted, collect the rewards, then dock. Do not accept any new mission or contract — '
+      + 'those calls are refused. Ignore zero-reward distress calls; let them expire.',
+    )
+    return true
+  }
+
   safeDock(profileId: string): boolean {
     const agent = this.agents.get(profileId)
     if (!agent?.isRunning) return false
@@ -252,7 +272,7 @@ class AgentManager {
     return true
   }
 
-  getStatus(profileId: string): { connected: boolean; running: boolean; activity: string; gameState: SlimGameState; safeDocking: boolean } {
+  getStatus(profileId: string): { connected: boolean; running: boolean; activity: string; gameState: SlimGameState; safeDocking: boolean; windingDown: boolean } {
     const agent = this.agents.get(profileId)
     return {
       connected: agent?.isConnected ?? false,
@@ -260,6 +280,7 @@ class AgentManager {
       activity: agent?.activity ?? 'idle',
       gameState: slimGameState(agent?.gameState ?? null),
       safeDocking: agent?.pendingSafeDock ?? false,
+      windingDown: agent?.pendingWindDown ?? false,
     }
   }
 

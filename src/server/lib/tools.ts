@@ -485,7 +485,31 @@ export const memoryDirtyFlags = new Map<string, boolean>()
  * Without this these maps only ever grow, leaking memory across the lifetime of
  * the process as profiles connect/disconnect.
  */
+/** Profiles the operator has put into wind-down: finish accepted work, take on
+ *  nothing new. Held here rather than read off the Agent so BOTH command paths
+ *  — the LLM tool layer and the manual/API path — are gated by one check.
+ *  Prompt wording alone does not hold this; the fleet has the scar tissue. */
+const windDownProfiles = new Set<string>()
+
+export function setWindDown(profileId: string, on: boolean): void {
+  if (on) windDownProfiles.add(profileId)
+  else windDownProfiles.delete(profileId)
+}
+
+export function isWindingDown(profileId: string): boolean {
+  return windDownProfiles.has(profileId)
+}
+
+/** Commands that take on NEW obligations. Refused during wind-down.
+ *  Deliberately does NOT include delivery/completion verbs — the entire point
+ *  is to let the agent finish and turn in what it already holds. */
+const ACQUISITION_COMMANDS = new Set([
+  'accept_mission', 'accept_contract', 'accept_shipment',
+  'commission_ship', 'buy_ship', 'buy_ship_license',
+])
+
 export function cleanupProfileToolState(profileId: string): void {
+  windDownProfiles.delete(profileId)
   actionCooldowns.delete(profileId)
   memoryDirtyFlags.delete(profileId)
   recentFailures.delete(profileId)
@@ -1181,6 +1205,24 @@ export function checkDoctrineGuards(
    *  what the tool layer last observed; unknown means location-scoped gates stand down. */
   currentSystemId?: string | null,
 ): string | null {
+  // Wind-down: the operator is standing this agent down. Everything already
+  // accepted stays workable — only NEW obligations are refused, because the
+  // reward on work already paid for in fuel and travel is the whole reason to
+  // wind down rather than simply safe-dock.
+  if (windDownProfiles.has(profileId)) {
+    const bare = command.replace(/^spacemolt_/, '')
+    const action = String((commandArgs ?? {}).action ?? '')
+    const isAcquire = ACQUISITION_COMMANDS.has(bare)
+      || (bare === 'shipping' && action === 'accept')
+      || (bare === 'shipping_accept')
+    if (isAcquire) {
+      return `REFUSED: ${bare} — you are winding down on the Admiral's order. `
+        + 'Do not take on any new mission, contract or ship. Finish and deliver the missions you '
+        + 'have ALREADY accepted, collect those rewards, then dock. Zero-reward distress calls do '
+        + 'not count — let them expire. This is not a bug and the command is not broken.'
+    }
+  }
+
   // Wildlife hunts: LIFTED 2026-08-06. The original ban assumed targets did not
   // reliably spawn. The changelog says otherwise — herds gather where the ore or
   // gas is still RICH and thin out in mined-over fields (0.536.0), so agents were

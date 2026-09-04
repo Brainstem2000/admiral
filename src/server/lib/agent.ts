@@ -117,6 +117,14 @@ export class Agent {
   private _sessionExpired = false
   pendingSafeDock = false
   safeDockTurnsRemaining = 0
+  /** Wind-down: finish the missions already accepted, take on NOTHING new,
+   *  turn them in, then safe-dock. Distinct from safe-dock, which stops the
+   *  agent where it stands — winding down first is what recovers the reward
+   *  on work already paid for in fuel and travel. `accept_mission` and
+   *  contract acceptance are refused at the tool layer while this is set;
+   *  prompt wording alone does not hold (see WRAPUP_RESERVE_ROUNDS). */
+  pendingWindDown = false
+  windDownTurnsRemaining = 0
 
   /** Append the next turn's user message. Exactly one CURRENT STATE block is
    *  ever in the conversation: the previous carrier is rewritten in place to
@@ -732,6 +740,25 @@ export class Agent {
         return
       }
 
+      // Wind-down hands off to safe-dock the moment nothing rewarding is left
+      // to turn in. Checked live rather than from cache: the whole point is to
+      // stop as soon as the last payable objective clears.
+      if (this.pendingWindDown && !this.pendingSafeDock) {
+        this.windDownTurnsRemaining--
+        const outstanding = await this.payableMissionsRemaining()
+        if (outstanding === 0) {
+          this.log('system', 'Wind-down complete — no payable missions left. Docking.')
+          this.pendingWindDown = false
+          this.pendingSafeDock = true
+          this.safeDockTurnsRemaining = 15
+        } else if (this.windDownTurnsRemaining <= 0) {
+          this.log('system', `Wind-down turn budget exhausted (${outstanding} mission(s) still open) — docking anyway.`)
+          this.pendingWindDown = false
+          this.pendingSafeDock = true
+          this.safeDockTurnsRemaining = 15
+        }
+      }
+
       const nudgeParts: string[] = []
       if (pendingEvents) nudgeParts.push('## Events Since Last Action\n' + pendingEvents + '\n')
 
@@ -748,6 +775,15 @@ export class Agent {
       // Re-inject dock instruction every turn while safe-docking so the LLM doesn't lose track
       if (this.pendingSafeDock) {
         nudgeParts.push('## PRIORITY: DOCK IMMEDIATELY\nYour human operator has issued a shutdown order. Dock at the nearest safe station NOW. Do not do anything else — just dock. You have ' + this.safeDockTurnsRemaining + ' turns remaining before forced disconnect.')
+      } else if (this.pendingWindDown) {
+        nudgeParts.push(
+          '## PRIORITY: WIND DOWN\n'
+          + 'Your human operator is standing the fleet down. Finish the missions you have ALREADY accepted, '
+          + 'deliver them, and collect the rewards. Do NOT accept any new mission or contract — those calls '
+          + 'will be refused. Work the shortest route that closes out what you are holding, then dock.\n'
+          + 'Ignore zero-reward distress calls entirely; let them expire.\n'
+          + 'You have ' + this.windDownTurnsRemaining + ' turns before you are docked automatically.',
+        )
       } else {
         nudgeParts.push('Continue your mission.')
       }
@@ -1000,10 +1036,37 @@ export class Agent {
     }
   }
 
+  /** How many ACCEPTED missions still carry a credit reward.
+   *
+   *  Wind-down must not wait on the Wexler distress spam: those pay 0cr, the
+   *  fleet deliberately does not answer them, and there are dozens per agent
+   *  — counting them would keep an agent burning turns forever. Only missions
+   *  with a credit reward hold the wind-down open.
+   *
+   *  A failed read returns 0 (treat as done) rather than pinning the agent
+   *  open on a transport error; the turn budget is the backstop either way. */
+  private async payableMissionsRemaining(): Promise<number> {
+    if (!this.connection) return 0
+    try {
+      const r = await this.connection.execute('get_active_missions')
+      if (r.error) return 0
+      const raw = r.structuredContent ?? r.result
+      const text = typeof raw === 'string' ? raw : JSON.stringify(raw ?? '')
+      // Each mission block opens with '--- <title>' and lists 'Rewards: N,NNNcr'
+      // only when it actually pays credits.
+      const blocks = text.split('--- ').slice(1)
+      return blocks.filter((b) => /Rewards:\s*[\d,]+\s*cr/i.test(b)).length
+    } catch {
+      return 0
+    }
+  }
+
   async stop(): Promise<void> {
     this.running = false
     this.pendingSafeDock = false
     this.safeDockTurnsRemaining = 0
+    this.pendingWindDown = false
+    this.windDownTurnsRemaining = 0
     this.abortController?.abort()
     clearBriefingCache(this.profileId)
     cleanupProfileToolState(this.profileId)
