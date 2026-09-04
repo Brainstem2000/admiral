@@ -10,7 +10,7 @@ import type { GameConnection, CommandResult } from './connections/interface'
 import type { Profile } from '../../shared/types'
 import * as dbModule from './db'
 import { listObligations, getProfile, listPlaybook, getStorageSummaryForProfile, getNavIntel, getHuntIntel, getDb, getKnownLinks, getGalaxyMap } from './db'
-import type { ObligationRow } from './db'
+import type { ObligationRow, PlaybookEntry } from './db'
 import { galaxyMarketLines, directiveMarketLines } from './galaxy-market'
 
 const REFRESH_INTERVAL = 60_000 // 60 seconds
@@ -937,7 +937,38 @@ export function buildSituationalBriefing(profileId: string): string {
     const role = /miner/i.test(name) ? 'miner' : /trader|smuggler/i.test(name) ? 'trader'
       : /hauler/i.test(name) ? 'hauler' : /warrior/i.test(name) ? 'combat'
       : /prospector|explorer/i.test(name) ? 'explorer' : 'all'
-    const entries = listPlaybook(role).slice(0, 12)
+    // Class quotas inside the same 12-line budget.
+    //
+    // A plain slice(0,12) over the LAW-first ordering starved PATTERN
+    // completely: with 10 active LAWs the 12 slots filled with 10 LAWs and 2
+    // TERRAINs, so every PATTERN and the 2 oldest TERRAINs never reached a
+    // prompt. The fleet was curating entries nobody could read — "Dheneb + the
+    // Gudja pocket are lawless" (a safety fact) was cut every turn while
+    // "Jumps train piloting" was always in.
+    //
+    // Same length, better content: reserve slots per class, then let unused
+    // slots flow to whoever has entries left, freshest first.
+    const entries = (() => {
+      const all = listPlaybook(role)
+      const QUOTA: Record<string, number> = { LAW: 7, TERRAIN: 3, PATTERN: 2 }
+      const byClass: Record<string, PlaybookEntry[]> = { LAW: [], TERRAIN: [], PATTERN: [] }
+      for (const e of all) (byClass[e.class] ??= []).push(e)
+      const picked: PlaybookEntry[] = []
+      for (const cls of ['LAW', 'TERRAIN', 'PATTERN']) {
+        picked.push(...(byClass[cls] ?? []).slice(0, QUOTA[cls] ?? 0))
+      }
+      // Redistribute whatever a short class left behind.
+      if (picked.length < 12) {
+        const taken = new Set(picked)
+        for (const e of all) {
+          if (picked.length >= 12) break
+          if (!taken.has(e)) picked.push(e)
+        }
+      }
+      // Keep LAW-first reading order in the rendered block.
+      const rank: Record<string, number> = { LAW: 0, TERRAIN: 1, PATTERN: 2 }
+      return picked.slice(0, 12).sort((a, b) => (rank[a.class] ?? 3) - (rank[b.class] ?? 3))
+    })()
     if (entries.length > 0) {
       // == FLEET INTEL ==
       // Everything the fleet has learned about where the agent is standing and

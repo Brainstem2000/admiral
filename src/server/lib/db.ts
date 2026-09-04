@@ -1533,12 +1533,29 @@ export function setCommissionRequirements(shipClass: string, items: Array<{ item
  * rows, which stay fleet-wide) — another agent's commission never reserves your stock.
  */
 export function getCommissionRequirement(itemId: string, profileId?: string): number {
+  // A requirement only reserves stock while the ship is still UNBUILT.
+  //
+  // Nothing clears this table on delivery — setCommissionRequirements only
+  // replaces rows for the same ship_class — so a completed build leaves its
+  // bill behind forever. Juno Freight's caravan was delivered and parked at
+  // War Citadel on 2026-09-04 while her 13 requirement rows from that morning
+  // still stood; anything reading them would have told her that titanium_alloy,
+  // steel_plate and copper_wiring she owned were reserved. That is the same
+  // false-lock bug the hardcoded list in galaxy-market.ts caused, one layer
+  // down, so the check is made self-correcting rather than trusting a cleanup
+  // that has never run: owning the hull retires its bill.
+  const owned = `SELECT 1 FROM storage_ships ss
+                  WHERE ss.profile_id = commission_requirements.profile_id
+                    AND LOWER(ss.class) = LOWER(commission_requirements.ship_class)`
   const row = profileId
     ? db.query(
-        'SELECT MAX(quantity) AS q FROM commission_requirements WHERE item_id = ? AND (profile_id IS NULL OR profile_id = ?)',
+        `SELECT MAX(quantity) AS q FROM commission_requirements
+          WHERE item_id = ? AND (profile_id IS NULL OR profile_id = ?)
+            AND NOT EXISTS (${owned})`,
       ).get(String(itemId).toLowerCase(), profileId) as { q: number | null } | null
     : db.query(
-        'SELECT MAX(quantity) AS q FROM commission_requirements WHERE item_id = ?',
+        `SELECT MAX(quantity) AS q FROM commission_requirements
+          WHERE item_id = ? AND NOT EXISTS (${owned})`,
       ).get(String(itemId).toLowerCase()) as { q: number | null } | null
   return row?.q ?? 0
 }
