@@ -1,0 +1,93 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { margin: 0; background: hsl(213 16% 12%); color: hsl(213 27% 88%);
+           font-family: 'JetBrains Mono', monospace; }
+  </style>
+</helmet>
+
+<div style="display:flex; flex-direction:column; gap:22px; padding:42px 46px; background:hsl(213 16% 12%); min-height:100%; box-sizing:border-box;">
+
+  <div style="display:flex; align-items:baseline; gap:16px; border-bottom:1px solid hsl(217 17% 28%); padding-bottom:16px;">
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:24px; letter-spacing:0.06em; text-transform:uppercase; color:hsl(193 44% 67%);">Why Grit Was Shouting</span>
+    <span style="font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:hsl(213 14% 65%);">it was never Grit</span>
+  </div>
+
+  <span style="font-size:12.5px; line-height:1.85; color:hsl(213 27% 88%); max-width:84ch;">You asked why Grit Vane was producing walls of all-caps <span style="color:hsl(355 52% 64%);">CRITICAL</span>. Three fixes aimed at Grit did nothing, because the cause was in the prompt every agent shares.</span>
+
+  <div style="display:flex; flex-direction:column; gap:9px;">
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.14em; text-transform:uppercase; color:hsl(213 14% 65%);">The diagnosis chain</span>
+    <div id="chain" style="display:flex; flex-direction:column; gap:7px;"></div>
+  </div>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+    <div style="display:flex; flex-direction:column; gap:9px; padding:20px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(355 52% 64%);">
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:11px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(355 52% 64%);">Before — every agent, every turn</span>
+      <div style="font-size:11px; line-height:1.75; color:hsl(213 14% 72%); background:hsl(213 16% 10%); padding:14px; border:1px solid hsl(217 17% 24%); white-space:pre-wrap;">## Current Situation — LIVE GROUND TRUTH
+⚠️ AUTHORITATIVE: your memory/TODO is STALE.
+Never plan around a ship or location your
+live status does not confirm.</div>
+      <span style="font-size:11.5px; line-height:1.75; color:hsl(213 14% 65%);">Told in the register of an emergency, 60 seconds apart, forever. The agents answered in the register they were addressed in.</span>
+    </div>
+    <div style="display:flex; flex-direction:column; gap:9px; padding:20px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(92 28% 65%);">
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:11px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(92 28% 65%);">After — same facts, no alarm</span>
+      <div style="font-size:11px; line-height:1.75; color:hsl(213 14% 72%); background:hsl(213 16% 10%); padding:14px; border:1px solid hsl(217 17% 24%); white-space:pre-wrap;">## Current Situation (collected
+automatically, refreshed every 60s)
+This is the current reading. Where your
+memory or TODO disagrees, this is right
+and the note is out of date: act on this,
+and correct the note.</div>
+      <span style="font-size:11.5px; line-height:1.75; color:hsl(213 14% 65%);">Identical authority. No emergency framing. The agents stopped performing crisis and went back to work.</span>
+    </div>
+  </div>
+
+  <div style="display:flex; flex-direction:column; gap:11px;">
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.14em; text-transform:uppercase; color:hsl(213 14% 65%);">Share of turns opening with alarm framing</span>
+    <div id="bars" style="display:flex; flex-direction:column; gap:9px;"></div>
+    <span style="font-size:11px; color:hsl(213 14% 55%);">Post-fix figure is a single pooled reading across 129 turns; the detector itself had to be fixed twice first (see the clean-bills board).</span>
+  </div>
+
+</div>
+
+<script>
+const CHAIN = [
+  ["Rewrote Grit's TODO","no effect","bad"],
+  ["Rewrote Grit's memory","the words changed, the behaviour did not","bad"],
+  ["Clean boot — disconnect, rewrite, reconnect","worked, then decayed within the hour","warn"],
+  ["Read the shared execution prompt","found it — the harness was doing the shouting","good"],
+];
+document.getElementById('chain').innerHTML = CHAIN.map(([s,r,k],i) => {
+  const c = k==='good' ? 'hsl(92 28% 65%)' : k==='warn' ? 'hsl(40 71% 73%)' : 'hsl(355 52% 64%)';
+  return `<div style="display:flex; align-items:center; gap:14px; padding:12px 18px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid ${c};">
+    <span style="font-size:11px; color:hsl(213 14% 50%); min-width:22px;">${i+1}</span>
+    <span style="font-size:12px; color:hsl(213 27% 88%); min-width:340px;">${s}</span>
+    <span style="font-size:11.5px; color:${c};">${r}</span>
+  </div>`;
+}).join('');
+
+const BARS = [["Grit Vane",97,"before"],["Morg'Thar",70,"before"],["CyberSpock",33,"before"],["Fleet, after the fix",0,"after"]];
+document.getElementById('bars').innerHTML = BARS.map(([n,v,w]) => {
+  const after = w === 'after';
+  const c = after ? 'hsl(92 28% 65%)' : 'hsl(355 52% 64%)';
+  return `<div style="display:flex; align-items:center; gap:14px;">
+    <span style="font-size:11.5px; color:hsl(213 14% 68%); min-width:170px;">${n}</span>
+    <div style="flex:1; height:22px; background:hsl(213 16% 10%); border:1px solid hsl(217 17% 24%); position:relative;">
+      <div style="width:${Math.max(v,0.6)}%; height:100%; background:${c};"></div>
+    </div>
+    <span style="font-size:12px; font-variant-numeric:tabular-nums; color:${c}; min-width:96px; text-align:right;">${v}%${after?' / 129 turns':''}</span>
+  </div>`;
+}).join('');
+</script>
+</x-dc>
+</body>
+</html>

@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { margin: 0; background: hsl(213 16% 12%); color: hsl(213 27% 88%);
+           font-family: 'JetBrains Mono', monospace; }
+  </style>
+</helmet>
+
+<div style="display:flex; flex-direction:column; gap:22px; padding:42px 46px; background:hsl(213 16% 12%); min-height:100%; box-sizing:border-box;">
+
+  <div style="display:flex; align-items:baseline; gap:16px; border-bottom:1px solid hsl(217 17% 28%); padding-bottom:16px;">
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:24px; letter-spacing:0.06em; text-transform:uppercase; color:hsl(355 52% 64%);">Seven Clean Bills That Were Wrong</span>
+    <span style="font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:hsl(213 14% 65%);">the night's actual theme</span>
+  </div>
+
+  <span style="font-size:12.5px; line-height:1.85; color:hsl(213 27% 88%); max-width:82ch;">Every one of these reported <b style="color:hsl(92 28% 65%);">no problem</b> while a problem was running. None threw an error. The failure mode is not a tool that breaks — it is a tool that answers confidently about something it never actually measured.</span>
+
+  <div id="items" style="display:flex; flex-direction:column; gap:11px;"></div>
+
+  <div style="display:flex; flex-direction:column; gap:9px; padding:20px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(193 44% 67%);">
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(193 44% 67%);">What to check next time</span>
+    <span style="font-size:12px; line-height:1.85; color:hsl(213 27% 88%);">Before trusting a watcher's silence, make it report what it <i>matched</i>, not just what it flagged. A detector that scans 2,526 rows and finds nothing should say <span style="color:hsl(213 14% 65%);">"scanned 2,526, matched 0"</span> — the row count is the proof the query was alive. Four of the seven below would have been caught on sight by that one line.</span>
+  </div>
+
+</div>
+
+<script>
+const F = [
+  ["Fleet-health watch matched nothing for hours",
+   "log_entries.timestamp is SQLite datetime with a SPACE (\"2026-09-04 23:51:06\"). The query compared it against toISOString(), which uses a T. Space (0x20) sorts before T (0x54), so the range matched zero rows.",
+   "Silence read as health. Nobody was watching for hours."],
+  ["The alarm detector scored Grit at 0% while he did it constantly",
+   "It keyed on the literal strings CRITICAL and RECONCIL. Grit reworded to \"🎯 LIVE STATE CONFIRMED\" and kept going — 28 of 29 thoughts.",
+   "A false NEGATIVE: the behaviour was fixed in the detector's eyes only."],
+  ["Then the same detector flagged Ledger at 25% with zero alarms",
+   "The fix over-corrected and counted plain \"**TODO** - Verified:\" labels as banners. Ledger had ZERO alarm framing across 65 turns.",
+   "A false POSITIVE that nearly had us conclude the prompt fix had failed."],
+  ["The wind-down guard named a command that does not exist",
+   "ACQUISITION_COMMANDS listed buy_ship. The game's command is buy_listed_ship. The guard could never fire on the thing it was written to stop.",
+   "A guard that cannot match is indistinguishable from a guard that found nothing."],
+  ["\"Zibal's stock covers the gap comfortably\"",
+   "Read the quantity without checking a bid existed. best_buy was empty and buy_qty was 0 — nobody was bidding at all.",
+   "Realisable value is min(held, bid_depth) × best_bid. Depth is never safe to assume."],
+  ["Nova reported as docked when she was not",
+   "Her jump had failed with action_pending (mine). The status was read from a cached snapshot rather than the live result.",
+   "Corrected, and she was actually docked afterwards."],
+  ["33 dead orders read as outstanding work — and a 65,024 cr escrow that never existed",
+   "Found this morning. One iron_ore request re-sent 33 times in 74 minutes; four went to an agent holding zero iron_ore anywhere. Morg's \"65,024 cr escrowed at Iron Reach\" was disproven live: zero orders there, zero mining_laser_iii orders anywhere, real escrow 1,453 cr.",
+   "A fabricated fact became a fleet order that another agent spent turns trying to execute."],
+];
+document.getElementById('items').innerHTML = F.map(([t,d,c],i) => `
+  <div style="display:flex; gap:16px; padding:16px 20px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(355 52% 64%);">
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:20px; color:hsl(355 52% 64%); font-variant-numeric:tabular-nums; min-width:30px; line-height:1.2;">${String(i+1).padStart(2,'0')}</span>
+    <div style="display:flex; flex-direction:column; gap:6px;">
+      <span style="font-size:12.5px; font-weight:600; color:hsl(213 27% 92%);">${t}</span>
+      <span style="font-size:11.5px; line-height:1.7; color:hsl(213 14% 68%);">${d}</span>
+      <span style="font-size:11.5px; line-height:1.7; color:hsl(40 71% 73%);">→ ${c}</span>
+    </div>
+  </div>`).join('');
+</script>
+</x-dc>
+</body>
+</html>

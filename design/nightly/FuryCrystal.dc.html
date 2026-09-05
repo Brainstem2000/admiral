@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { margin: 0; background: hsl(213 16% 12%); color: hsl(213 27% 88%);
+           font-family: 'JetBrains Mono', monospace; }
+  </style>
+</helmet>
+
+<div style="display:flex; flex-direction:column; gap:24px; padding:42px 46px; background:hsl(213 16% 12%); min-height:100%; box-sizing:border-box;">
+
+  <div style="display:flex; align-items:baseline; gap:16px; border-bottom:1px solid hsl(217 17% 28%); padding-bottom:16px;">
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:24px; letter-spacing:0.06em; text-transform:uppercase; color:hsl(193 44% 67%);">Two Calls On The Ore</span>
+    <span style="font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:hsl(213 14% 65%);">one lock removed, one lock imposed</span>
+  </div>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px;">
+
+    <div style="display:flex; flex-direction:column; gap:12px; padding:22px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(92 28% 65%);">
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(92 28% 65%);">Unlocked — the BoM bug</span>
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:34px; color:hsl(92 28% 65%); font-variant-numeric:tabular-nums;">36,027</span>
+      <span style="font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:hsl(213 14% 65%);">units wrongly marked unsellable</span>
+      <span style="font-size:11.5px; line-height:1.8; color:hsl(213 27% 88%);">You asked why Morg was reporting titanium and iron as BoM-locked. A <b>hardcoded list</b> in <code style="color:hsl(193 44% 67%);">galaxy-market.ts</code> had told every agent for about a week that five ore types were reserved for a commission.</span>
+      <span style="font-size:11.5px; line-height:1.8; color:hsl(213 14% 65%);">It now derives from <code>commission_requirements</code> — and owning the hull retires its bill, so a delivered commission stops reserving stock. Juno's caravan was already built and still holding its own materials hostage.</span>
+    </div>
+
+    <div style="display:flex; flex-direction:column; gap:12px; padding:22px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(40 71% 73%);">
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(40 71% 73%);">Locked — your call</span>
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:34px; color:hsl(40 71% 73%); font-variant-numeric:tabular-nums;">7,222</span>
+      <span style="font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:hsl(213 14% 65%);">fury_crystal held off the market</span>
+      <span style="font-size:11.5px; line-height:1.8; color:hsl(213 27% 88%);">Nova was mid-liquidation when you said <i>we might need fury crystal for ship upgrades and commissions</i>. She had sold <b>376</b>; <b>5,109</b> went straight back into storage.</span>
+      <span style="font-size:11.5px; line-height:1.8; color:hsl(213 14% 65%);">You were right. It refines <b style="color:hsl(213 27% 88%);">3:1</b> into fury_alloy and is a build material in <b style="color:hsl(213 27% 88%);">47 crimson hulls</b> — including the Devastator Morg is commissioning.</span>
+    </div>
+
+  </div>
+
+  <div style="display:flex; flex-direction:column; gap:12px; padding:22px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%);">
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.14em; text-transform:uppercase; color:hsl(213 14% 65%);">The fury position, resolved to what it builds</span>
+    <div style="display:flex; align-items:center; gap:0; flex-wrap:wrap;">
+      <div style="display:flex; flex-direction:column; gap:4px; padding:16px 22px; background:hsl(213 16% 10%); border:1px solid hsl(217 17% 26%);">
+        <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:24px; color:hsl(40 71% 73%); font-variant-numeric:tabular-nums;">7,222</span>
+        <span style="font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:hsl(213 14% 65%);">fury_crystal</span>
+      </div>
+      <span style="padding:0 18px; font-size:15px; color:hsl(213 14% 50%);">──  3:1  ──▶</span>
+      <div style="display:flex; flex-direction:column; gap:4px; padding:16px 22px; background:hsl(213 16% 10%); border:1px solid hsl(217 17% 26%);">
+        <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:24px; color:hsl(193 44% 67%); font-variant-numeric:tabular-nums;">~2,407</span>
+        <span style="font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:hsl(213 14% 65%);">fury_alloy potential</span>
+      </div>
+      <span style="padding:0 18px; font-size:15px; color:hsl(213 14% 50%);">──────▶</span>
+      <div style="display:flex; flex-direction:column; gap:4px; padding:16px 22px; background:hsl(213 16% 10%); border:1px solid hsl(217 17% 26%);">
+        <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:24px; color:hsl(92 28% 65%); font-variant-numeric:tabular-nums;">47</span>
+        <span style="font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:hsl(213 14% 65%);">crimson hulls use it</span>
+      </div>
+      <div style="flex:1; min-width:180px; padding-left:26px;">
+        <span style="font-size:11.5px; line-height:1.8; color:hsl(213 14% 65%);">Only <b style="color:hsl(40 71% 73%);">48</b> fury_alloy is refined so far. The Devastator bill alone calls for <b style="color:hsl(213 27% 88%);">120</b> — so the refining, not the mining, is the constraint.</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="display:flex; flex-direction:column; gap:8px; padding:18px 20px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(193 44% 67%);">
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(193 44% 67%);">The pattern worth keeping</span>
+    <span style="font-size:12px; line-height:1.85; color:hsl(213 27% 88%);">Both of these were <b>stale reservations</b> — stock held back for a reason that had expired or was never checked. The first cost the fleet a week of unsellable ore. The second would have cost the Devastator. The fix in both cases was the same: derive the lock from live state, never from a list someone wrote once.</span>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

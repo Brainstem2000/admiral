@@ -1,0 +1,86 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { margin: 0; background: hsl(213 16% 12%); color: hsl(213 27% 88%);
+           font-family: 'JetBrains Mono', monospace; }
+  </style>
+</helmet>
+
+<div style="display:flex; flex-direction:column; gap:22px; padding:42px 46px; background:hsl(213 16% 12%); min-height:100%; box-sizing:border-box;">
+
+  <div style="display:flex; align-items:baseline; gap:16px; border-bottom:1px solid hsl(217 17% 28%); padding-bottom:16px;">
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:24px; letter-spacing:0.06em; text-transform:uppercase; color:hsl(193 44% 67%);">"Ledger Is Waiting On You"</span>
+    <span style="font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:hsl(213 14% 65%);">he wasn't · resolved this morning</span>
+  </div>
+
+  <div style="display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px;">
+    <div style="display:flex; flex-direction:column; gap:6px; padding:18px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%);">
+      <span style="font-size:10px; letter-spacing:0.13em; text-transform:uppercase; color:hsl(213 14% 65%);">Open orders</span>
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:28px; color:hsl(213 27% 88%); font-variant-numeric:tabular-nums;">42 <span style="font-size:16px; color:hsl(213 14% 55%);">→</span> <span style="color:hsl(92 28% 65%);">1</span></span>
+      <span style="font-size:10.5px; color:hsl(213 14% 65%);">41 cancelled with a reason</span>
+    </div>
+    <div style="display:flex; flex-direction:column; gap:6px; padding:18px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%);">
+      <span style="font-size:10px; letter-spacing:0.13em; text-transform:uppercase; color:hsl(213 14% 65%);">On Ledger's row</span>
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:28px; color:hsl(213 27% 88%); font-variant-numeric:tabular-nums;">4 <span style="font-size:16px; color:hsl(213 14% 55%);">→</span> <span style="color:hsl(92 28% 65%);">0</span></span>
+      <span style="font-size:10.5px; color:hsl(213 14% 65%);">he held 0 iron_ore anywhere</span>
+    </div>
+    <div style="display:flex; flex-direction:column; gap:6px; padding:18px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%);">
+      <span style="font-size:10px; letter-spacing:0.13em; text-transform:uppercase; color:hsl(213 14% 65%);">One request, re-sent</span>
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:28px; color:hsl(355 52% 64%); font-variant-numeric:tabular-nums;">33×</span>
+      <span style="font-size:10.5px; color:hsl(213 14% 65%);">in 74 minutes, to 7 agents</span>
+    </div>
+    <div style="display:flex; flex-direction:column; gap:6px; padding:18px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%);">
+      <span style="font-size:10px; letter-spacing:0.13em; text-transform:uppercase; color:hsl(213 14% 65%);">Escrow claimed</span>
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:28px; color:hsl(355 52% 64%); font-variant-numeric:tabular-nums;">65,024</span>
+      <span style="font-size:10.5px; color:hsl(92 28% 65%);">actual: 1,453 cr</span>
+    </div>
+  </div>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+    <div style="display:flex; flex-direction:column; gap:10px; padding:20px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(40 71% 73%);">
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(40 71% 73%);">What you were actually seeing</span>
+      <span style="font-size:11.5px; line-height:1.8; color:hsl(213 27% 88%);">Not a permission request — there is no Admiral-approval gate in the harness at all. Four <b>unanswered orders</b> addressed to Ledger, dated 2026-09-03, asking him to transfer iron_ore he has never held.</span>
+      <span style="font-size:11.5px; line-height:1.8; color:hsl(213 14% 65%);">Searched to confirm: 2,526 of his log rows over 26 hours, 3,730 fleet-wide rows over 8 hours, 180 faction chat messages, the faction role table. Zero requests. He has been mining darksteel in the Siege Breaker the whole time.</span>
+      <span style="font-size:11.5px; line-height:1.8; color:hsl(213 14% 65%);">The requester, CyberSpock, already had <b style="color:hsl(213 27% 88%);">475 iron_ore</b> at the destination station — with 1,940 more held there by two other agents.</span>
+    </div>
+    <div style="display:flex; flex-direction:column; gap:10px; padding:20px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(355 52% 64%);">
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(355 52% 64%);">The 65,024 cr that was not there</span>
+      <span style="font-size:11.5px; line-height:1.8; color:hsl(213 27% 88%);">You approved releasing it. There was nothing to release. Connected Morg game-only and read his orders at all six stations that hold them:</span>
+      <div style="font-size:11px; line-height:1.9; color:hsl(213 14% 72%); background:hsl(213 16% 10%); padding:13px 15px; border:1px solid hsl(217 17% 24%);">
+        <span style="color:hsl(355 52% 64%);">iron_reach_mining_colony</span> ······ 0 orders<br>
+        <span style="color:hsl(355 52% 64%);">mining_laser_iii</span> ·············· 0 anywhere<br>
+        <span style="color:hsl(92 28% 65%);">total credit escrow</span> ········· 1,453 cr
+      </div>
+      <span style="font-size:11.5px; line-height:1.8; color:hsl(213 14% 65%);">His 8 real orders — copper_ore and carbon_ore sells, ferrous_slug_case and basic_tow_rig buys — were left standing. The claim was a fact asserted about a station he was not docked at, which then became a fleet order CyberSpock spent turns chasing.</span>
+    </div>
+  </div>
+
+  <div style="display:flex; flex-direction:column; gap:11px; padding:20px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(92 28% 65%);">
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(92 28% 65%);">Fixed in the harness, not in a directive</span>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px;">
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <span style="font-size:12px; font-weight:600; color:hsl(213 27% 92%);">Re-asks now refresh, not multiply</span>
+        <span style="font-size:11.5px; line-height:1.8; color:hsl(213 14% 65%);"><code style="color:hsl(193 44% 67%);">createFleetOrder</code> fingerprints an order by its verb plus every identifier in the description. A matching open order from the same sender to the same recipient is updated in place — and the target is <b>not</b> re-nudged, so a chased request no longer interrupts them again.</span>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <span style="font-size:12px; font-weight:600; color:hsl(213 27% 92%);">Stale orders expire on the prune cycle</span>
+        <span style="font-size:11.5px; line-height:1.8; color:hsl(213 14% 65%);"><code style="color:hsl(193 44% 67%);">expireStaleFleetOrders</code> closes anything open past 7 days with a recorded reason, alongside the existing log and snapshot pruning. Chained orders are exempt — their later legs sit open by design.</span>
+      </div>
+    </div>
+    <span style="font-size:11px; color:hsl(213 14% 55%); border-top:1px solid hsl(217 17% 24%); padding-top:11px;">Covered by <code>tests/fleet-order-dedupe.test.ts</code> — 7 assertions, including the four verbatim descriptions from the incident collapsing to one intent.</span>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Chakra+Petch:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { margin: 0; background: hsl(213 16% 12%); color: hsl(213 27% 88%);
+           font-family: 'JetBrains Mono', monospace; }
+  </style>
+</helmet>
+
+<div style="display:flex; flex-direction:column; gap:24px; padding:42px 46px; background:hsl(213 16% 12%); min-height:100%; box-sizing:border-box;">
+
+  <div style="display:flex; align-items:baseline; gap:16px; border-bottom:1px solid hsl(217 17% 28%); padding-bottom:16px;">
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:24px; letter-spacing:0.06em; text-transform:uppercase; color:hsl(193 44% 67%);">The Hull Program</span>
+    <span style="font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:hsl(213 14% 65%);">5 of 6 delivered · ~935,000 cr</span>
+  </div>
+
+  <div style="display:flex; flex-direction:column; gap:10px;">
+    <div style="display:grid; grid-template-columns:1.1fr 1.1fr 0.9fr 0.7fr 1.6fr; font-size:10px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(213 14% 65%); padding:0 4px 6px;">
+      <span>Agent</span><span>Hull</span><span style="text-align:right;">Price</span><span style="text-align:right;">Tax</span><span>Funding</span>
+    </div>
+    <div id="hulls" style="display:flex; flex-direction:column; gap:8px;"></div>
+  </div>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+    <div style="display:flex; flex-direction:column; gap:10px; padding:20px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(193 44% 67%);">
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(193 44% 67%);">The fleet funded itself</span>
+      <span style="font-size:11.5px; line-height:1.8; color:hsl(213 27% 88%);">Grit Vane gifted <b style="color:hsl(193 44% 67%);">490,656 cr</b> to cover Ledger's Siege Breaker — the largest single intra-fleet transfer to date. Vera bought hers outright. No treasury draw was needed for any of the five.</span>
+      <span style="font-size:11.5px; line-height:1.8; color:hsl(213 14% 65%);">This was the point of funding as a group rather than topping up wallets: the agent with cash pays, the agent who needs the hull flies it.</span>
+    </div>
+    <div style="display:flex; flex-direction:column; gap:10px; padding:20px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(40 71% 73%);">
+      <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(40 71% 73%);">Not bought</span>
+      <span style="font-size:11.5px; line-height:1.8; color:hsl(213 27% 88%);"><b>Zibal — Repo Man.</b> Cancelled by your call. His Cobble still does the job his missions need, and the hull did not pay for itself against his run profile.</span>
+      <span style="font-size:11.5px; line-height:1.8; color:hsl(213 14% 65%);"><b style="color:hsl(213 27% 88%);">Morg'Thar</b> was restored to his 1,450-cargo War Wagon rather than re-hulled. His path runs through the Devastator commission, not a listing.</span>
+    </div>
+  </div>
+
+  <div style="display:flex; flex-direction:column; gap:9px; padding:18px 20px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(355 52% 64%);">
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(355 52% 64%);">Recorded against the program — the ships table is one hull behind</span>
+    <span style="font-size:11.5px; line-height:1.8; color:hsl(213 27% 88%);">Admiral's <code style="color:hsl(193 44% 67%);">storage_ships</code> still lists Ledger's active hull as <code>theoria</code>, stamped 2026-09-04 22:25. The live game has him in the <code style="color:hsl(92 28% 65%);">siege_breaker</code> he bought hours later — hull 500, cargo 450, mining darksteel right now. The row only refreshes on a ship query, and he has been mining, not docking. Ship-match and the ship-analysis pane both read this table.</span>
+  </div>
+
+</div>
+
+<script>
+const H = [
+  ["Grit Vane","maul",null,null,"self-funded","done"],
+  ["Bob Comet","war_wagon",257256,10290,"self-funded","done"],
+  ["Rook Vance","bonanza",21500,107,"self-funded","done"],
+  ["Ledger Voss","siege_breaker",462530,6937,"gift from Grit Vane — 490,656 cr","done"],
+  ["Vera Lane","bulk_terms",null,null,"self-funded","done"],
+  ["Zibal Prospector","repo_man",null,null,"cancelled by the Admiral","cut"],
+];
+const n = v => v === null ? '—' : v.toLocaleString();
+document.getElementById('hulls').innerHTML = H.map(([a,h,p,t,f,s]) => {
+  const cut = s === 'cut';
+  const accent = cut ? 'hsl(355 52% 64%)' : 'hsl(92 28% 65%)';
+  return `<div style="display:grid; grid-template-columns:1.1fr 1.1fr 0.9fr 0.7fr 1.6fr; align-items:center; padding:13px 4px 13px 14px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid ${accent}; font-size:12px; ${cut?'opacity:0.66;':''}">
+    <span style="color:hsl(213 27% 88%);">${a}</span>
+    <span style="color:${cut?'hsl(213 14% 60%)':'hsl(193 44% 67%)'}; ${cut?'text-decoration:line-through;':''}">${h}</span>
+    <span style="text-align:right; font-variant-numeric:tabular-nums; color:hsl(213 14% 72%);">${n(p)}</span>
+    <span style="text-align:right; font-variant-numeric:tabular-nums; color:hsl(213 14% 55%);">${n(t)}</span>
+    <span style="padding-left:16px; font-size:11px; color:${cut?'hsl(355 52% 64%)':'hsl(213 14% 65%)'};">${f}</span>
+  </div>`;
+}).join('');
+</script>
+</x-dc>
+</body>
+</html>

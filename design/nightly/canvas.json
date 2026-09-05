@@ -1,0 +1,34 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html",        "x": 0,    "y": 0,    "w": 1120, "h": 880,  "title": "Overnight brief" },
+    { "file": "Hulls.dc.html",       "x": 1240, "y": 0,    "w": 1080, "h": 900,  "title": "The hull program" },
+    { "file": "FuryCrystal.dc.html", "x": 0,    "y": 1020, "w": 1120, "h": 820,  "title": "Two calls on the ore" },
+    { "file": "PromptFix.dc.html",   "x": 1240, "y": 1020, "w": 1080, "h": 940,  "title": "Why Grit was shouting" },
+    { "file": "FalseClean.dc.html",  "x": 0,    "y": 1980, "w": 1120, "h": 1120, "title": "Seven clean bills" },
+    { "file": "Cleanup.dc.html",     "x": 1240, "y": 1980, "w": 1080, "h": 940,  "title": "Ledger, resolved" }
+  ],
+  "annotations": [
+    {
+      "id": "brief",
+      "x": -430,
+      "y": 0,
+      "w": 310,
+      "text": "Nightly report — night of 2026-09-04 into 09-05, read out at 10:25 CT.\n\nEvery figure here was read live from data/admiral.db or from the game itself, not carried over from the plan.\n\nThe hull program and fury crystal boards close out work you approved earlier. The clean-bills board is the one to keep."
+    },
+    {
+      "id": "note-false-clean",
+      "x": -430,
+      "y": 1980,
+      "w": 310,
+      "text": "The reusable page.\n\nSeven tools and stored records reported no problem while a problem was running. Not one threw an error.\n\nThe cheap defence is at the bottom of that board: make watchers report what they matched, not only what they flagged."
+    },
+    {
+      "id": "note-cleanup",
+      "x": 2400,
+      "y": 1980,
+      "w": 300,
+      "text": "Your question this morning, answered and closed.\n\nLedger was never blocked. 41 dead orders cleared, the fabricated escrow disproven, and the duplicate-order bug fixed in the harness with tests."
+    }
+  ],
+  "launch": { "view": "canvas" }
+}
