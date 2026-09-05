@@ -4,10 +4,21 @@ export type LedgerKind =
   | 'mission_reward' | 'fuel' | 'repair' | 'dock_fee' | 'combat'
   | 'insurance' | 'commission'
   | 'deposit' | 'withdraw' | 'transfer' | 'gift_sent' | 'gift_received' | 'trade' | 'freight' | 'escrow' | 'other'
-  // A wallet movement the harness saw but could not attribute to an explicit
-  // amount field — booked so that every credit is accounted for rather than
-  // silently lost. Station rent (auto-deducted ~every 17 min) and commission
-  // refunds land here.
+  // Residual rows: a wallet movement the harness saw but no explicit amount
+  // field explained. Booked so every credit is accounted for rather than lost.
+  //
+  // These carry the real action when the amount is consistent with what that
+  // action declared about itself — see lib/ledger-attribution.ts. The tax and
+  // fee kinds below exist because that is what most residuals actually are.
+  | 'sales_tax' | 'purchase_tax' | 'craft_fee' | 'ship_purchase'
+  | 'mission_bond' | 'mission_penalty'
+  // A movement that merely OVERLAPPED the command being run. One row stamped
+  // `refuel` carried +2,019,719 while its payload read cost: 48 — a commission
+  // refund landing during a top-up. Calling that "fuel" would have booked two
+  // million credits of refunds as fuel spend.
+  | 'coincident'
+  // Nothing to attribute it to at all — no command was recorded. Station rent
+  // (auto-deducted ~every 17 min) lands here.
   | 'unattributed'
   // Posted by scripts/repair-escrow-ledger.ts to reverse the phantom escrow
   // rows the old reconciler manufactured on every freight delivery.

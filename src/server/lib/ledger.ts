@@ -1,4 +1,5 @@
 import { getDb, listProfiles, consumeFreshMarketDepth } from './db'
+import { classifyResidual } from './ledger-attribution'
 import type { LedgerEntry, LedgerKind, LedgerSummary, ReconcileWindow } from '../../shared/ledger-types'
 
 type R = Record<string, unknown>
@@ -123,8 +124,14 @@ export class LedgerCollector {
           const explained = rows.reduce((s, row) => s + row.amount, 0)
           const residual = (after - prev) - explained
           if (residual !== 0) {
+            // Name the action when the movement is consistent with what that
+            // action declared, rather than stamping every residual
+            // `unattributed` while source_command already held the answer.
+            // Not blindly, though: a row reading {"action":"refuel","cost":48}
+            // once carried +2,019,719, a commission refund that merely landed
+            // during a top-up. See ledger-attribution.ts.
             this.insert(profileId, {
-              kind: 'unattributed',
+              kind: classifyResidual(action, residual, r as Record<string, unknown>),
               amount: residual,
               counterparty: action || null,
               balance_after: after,
