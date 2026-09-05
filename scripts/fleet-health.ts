@@ -96,11 +96,43 @@ async function sweep(): Promise<void> {
       // counting it flagged him at 25% on a run with ZERO alarm framing in 65
       // turns. Excluding it keeps the signal on what actually costs output: a
       // bold banner announcing state as an event.
-      const banner = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND type='llm_thought' AND timestamp>?
+      //
+      // THIRD REVISION, and the reason is worth keeping. Counting every
+      // bold-opening thought is a formatting metric, not a behavioural one:
+      // on 2026-09-05 it held Morg'Thar at 46-67% while he was dock -> sell_cargo
+      // -> view_market -> get_missions -> jump, a perfectly good trade loop, and
+      // his "banners" were things like "**Analysis of Alzirr mission board:**".
+      // Flagging an agent for writing in bold is the same false-positive shape
+      // as counting his "**TODO**" labels was.
+      //
+      // Ritual restatement means the SAME preamble turn after turn — that is
+      // what costs output and buries real alarms. So measure repetition: take
+      // each banner's opening text and find the most-repeated one. Twenty
+      // different bold headers is a writing style; the same header twenty times
+      // is the loop.
+      const banners = (db.query(`SELECT summary FROM log_entries WHERE profile_id=? AND type='llm_thought' AND timestamp>?
         AND (summary LIKE '**%' OR summary LIKE '[%] **%')
-        AND summary NOT LIKE '**TODO**%' AND summary NOT LIKE '[%] **TODO**%'`, p.id, wider)
-      const pct = Math.round((100 * banner) / total)
-      announce(`banner:${p.id}`, `[fleet] ${n}: ${pct}% of thoughts open with a banner header (${banner}/${total} in 25min) — ritual restatement loop, rewrite TODO/memory in plain sentences`, pct >= 25)
+        AND summary NOT LIKE '**TODO**%' AND summary NOT LIKE '[%] **TODO**%'`).all(p.id, wider) as Array<{ summary: string }>)
+      const tally = new Map<string, number>()
+      for (const b of banners) {
+        // Normalise away the macro prefix and the volatile numbers inside a
+        // banner ("CYCLE 171", "hull 87/90") so the same ritual with a changing
+        // counter still groups as one.
+        const head = String(b.summary ?? '')
+          .replace(/^\[[^\]]*\]\s*/, '')
+          .split('\n')[0]
+          .slice(0, 70)
+          .replace(/\d+/g, '#')
+          .toLowerCase()
+          .trim()
+        if (head) tally.set(head, (tally.get(head) ?? 0) + 1)
+      }
+      let worstText = '', worst = 0
+      for (const [k, v] of tally) if (v > worst) { worst = v; worstText = k }
+      const pct = Math.round((100 * worst) / total)
+      announce(`banner:${p.id}`,
+        `[fleet] ${n}: same banner repeated ${worst}/${total} thoughts in 25min (${pct}%) — ritual restatement loop: "${worstText.slice(0, 48)}"`,
+        worst >= 8 && pct >= 25)
     }
   }
   db.close()
