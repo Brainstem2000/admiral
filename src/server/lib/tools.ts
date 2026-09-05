@@ -2,7 +2,7 @@ import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
-import { updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
+import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -1607,8 +1607,14 @@ export function captureFromCommandResult(command: string, resultData: unknown, p
     } else if (bare === 'list_ships' && Array.isArray(d?.ships)) {
       replaceShipsForProfile(profileId, d!.ships as never[])
     } else if (bare === 'get_ship' && Array.isArray(d?.modules)) {
-      const shipId = String((d as Record<string, unknown>).ship_id ?? (d as Record<string, unknown>).id ?? 'active')
+      // get_ship nests the hull under `ship`; reading only the top level meant
+      // every module manifest was filed against the literal id "active".
+      const shipObj = (d as Record<string, unknown>).ship as Record<string, unknown> | undefined
+      const shipId = String(shipObj?.id ?? (d as Record<string, unknown>).ship_id ?? (d as Record<string, unknown>).id ?? 'active')
       recordShipModules(profileId, shipId, d!.modules as never[])
+      // This is the fleet's most-called command and it names the hull the agent
+      // is ACTUALLY in — the only thing that keeps storage_ships from drifting.
+      if (shipObj?.class_id) recordActiveShip(profileId, shipId, String(shipObj.class_id))
     } else if ((bare === 'shipping_list' || bare === 'shipping') && Array.isArray(d?.shipments)) {
       const rows = (d!.shipments as Array<Record<string, unknown>>).map((s) => {
         const c = (s.contract ?? s) as Record<string, unknown>

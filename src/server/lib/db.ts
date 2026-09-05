@@ -1912,6 +1912,42 @@ export function replaceShipsForProfile(profileId: string, ships: Array<{
   tx()
 }
 
+/**
+ * Correct the ACTIVE hull from a get_ship reading.
+ *
+ * storage_ships was written only by `list_ships`, which agents call 23 times a
+ * week against `get_ship`'s 550. So the table recorded whatever hull an agent
+ * happened to be flying the last time it enumerated its ships, and drifted
+ * silently after every swap. On 2026-09-05 it had Ledger Voss in a `theoria`
+ * while he flew a Siege Breaker, and Morg'Thar in a 1,450-cargo `war_wagon`
+ * while he was in a 60-cargo scout — and a haul plan was written against that
+ * phantom War Wagon before anyone checked the live game.
+ *
+ * A stale row here is worse than an empty one: ship-match, the refit planner and
+ * the dashboard all read it and report confidently from it.
+ *
+ * Any other row still claiming `__active__` is DELETED rather than relocated —
+ * a get_ship result says which ship you are in, not where the previous one was
+ * parked, and inventing a station would trade one wrong record for another.
+ * `list_ships` remains the authority on stored hulls and will restore it.
+ */
+export function recordActiveShip(profileId: string, shipId: string, classId: string): void {
+  if (!shipId || shipId === 'active') return   // nothing identifying to key on
+  const tx = db.transaction(() => {
+    db.query(`DELETE FROM storage_ships WHERE profile_id = ? AND station_id = '__active__' AND ship_id != ?`)
+      .run(profileId, shipId)
+    db.query(`INSERT INTO storage_ships (profile_id, station_id, ship_id, class, updated_at)
+              VALUES (?, '__active__', ?, ?, datetime('now'))
+              ON CONFLICT(profile_id, station_id, ship_id)
+              DO UPDATE SET class = excluded.class, updated_at = excluded.updated_at`)
+      .run(profileId, shipId, classId ?? '')
+    // The same hull cannot also be sitting in storage somewhere.
+    db.query(`DELETE FROM storage_ships WHERE profile_id = ? AND ship_id = ? AND station_id != '__active__'`)
+      .run(profileId, shipId)
+  })
+  tx()
+}
+
 /** Replace the fitted-module manifest for a profile's active ship from a get_ship result. */
 export function recordShipModules(profileId: string, shipId: string, modules: Array<{
   name?: string; slot?: string; cpu_usage?: number; power_usage?: number
