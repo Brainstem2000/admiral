@@ -1142,7 +1142,18 @@ ${(() => {
 })()}${(() => {
   if (getPreference('situational_briefing') === 'off' || !profileId) return ''
   const sitBriefing = buildSituationalBriefing(profileId)
-  return sitBriefing ? `## Current Situation — LIVE GROUND TRUTH (auto-collected, refreshed every 60s — DO NOT re-query this data)\n⚠️ AUTHORITATIVE: if your Agent Memory or TODO List disagrees with anything below — your ACTIVE SHIP, location, fuel, credits, or cargo — then THIS briefing is correct and your memory/TODO is STALE. Trust this, act on it, and update your memory/TODO to match. Never plan around a ship or location your live status does not confirm.\n${sitBriefing}\n\n` : ''
+  // Tone matters here, and it is measurable. This block used to open
+  // "⚠️ AUTHORITATIVE", shout STALE, and end on "Never plan around..." — and
+  // agents mirrored it back every single turn: Grit Vane opened 97% of his
+  // thoughts with a banner header ("🚨 CRITICAL STATE RECONCILIATION"), Morg
+  // 70%, and CyberSpock 33% on the LOCAL gpt-oss-120b, which is what ruled out
+  // a per-model quirk and pointed here. Restating an emergency every turn costs
+  // output on every turn and buries a real warning when one comes.
+  //
+  // The RULE is unchanged — the briefing still outranks memory and TODO, which
+  // is what stops an agent planning around a ship it no longer flies. Only the
+  // volume is different.
+  return sitBriefing ? `## Current Situation (collected automatically, refreshed every 60s — no need to re-query it)\nThis is the current reading. Where your memory or TODO disagrees with it about your ship, location, fuel, credits or cargo, this is right and the note is out of date: act on this, and correct the note. Plan only around the ship and location shown here.\n${sitBriefing}\n\n` : ''
 })()}${(() => {
   if (getPreference('situational_briefing') === 'off') return ''
   // Inject TODO inline to save read_todo round-trips
