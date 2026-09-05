@@ -2291,6 +2291,33 @@ export async function executeTool(
         errMsg += `\n\n💡 HINT: Valid catalog types are: "ships", "skills", "recipes", "items". Use catalog(type="items") for materials/resources, catalog(type="recipes") for crafting recipes.`
       }
       if (errCode === 'invalid_payload') {
+        // The game names both the rejected key and the accepted ones:
+        //   "Unknown parameter(s): id. Valid parameters: wreck_id, item_id, module_id, quantity"
+        // Morg'Thar retried a malformed loot(id=...) five times in six minutes on
+        // 2026-09-05 while that sentence sat in front of him. Rather than add another
+        // per-command rename, hand back the corrected CALL — the same treatment the
+        // actionless-call refusal already gives — carrying his own argument values.
+        const m = /Unknown parameter\(s\):\s*([^.]+)\.\s*Valid parameters:\s*([^.\n]+)/i.exec(String(errMsg))
+        if (m) {
+          const bad = m[1].split(',').map(x => x.trim()).filter(Boolean)
+          const valid = m[2].split(',').map(x => x.trim()).filter(Boolean)
+          const sent: Record<string, unknown> = (commandArgs ?? {}) as Record<string, unknown>
+          const fixed: Record<string, unknown> = {}
+          for (const [k, v] of Object.entries(sent)) if (valid.includes(k)) fixed[k] = v
+          for (const b of bad) {
+            // Map a rejected key onto a valid one only when the choice is unambiguous:
+            // a single valid parameter ending in the same suffix (id -> wreck_id when
+            // wreck_id is the only *_id accepted). Never guess between several.
+            const cands = valid.filter(v2 => v2 === `${b}` || v2.endsWith(`_${b}`))
+            if (cands.length === 1) fixed[cands[0]] = sent[b]
+          }
+          const shown = Object.entries(fixed).map(([k, v]) =>
+            `${k}=${typeof v === 'string' ? JSON.stringify(v) : String(v)}`).join(', ')
+          errMsg += `\n\n💡 ${deepBare}() does not accept ${bad.map(b => `"${b}"`).join(', ')}.`
+            + ` It accepts: ${valid.join(', ')}.`
+            + (shown ? `\n   Corrected call: ${deepBare}(${shown})` : '')
+            + `\n   Retrying the same parameter name will fail identically.`
+        }
         if (deepBare === 'view_market' || deepBare === 'market_view_market') {
           errMsg += `\n\n💡 HINT: view_market accepts only "item_id" and "category" parameters. There is no "scope" or "search" parameter. Use catalog(search="...", type="items") to search items first, then view_market(item_id="exact_id") to see market data. For galaxy-wide trade intel, use intel_query_trade_intel(item_id="...").`
         }
