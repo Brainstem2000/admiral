@@ -91,8 +91,14 @@ async function sweep(): Promise<void> {
       // The tell is a thought OPENING with a bold banner — `**`, optionally
       // after a macro prefix like "[mine_until_full 3 mines, cargo 12/120] ".
       // Ordinary reasoning starts with a sentence.
+      // A bare "**TODO** - Verified: <one line>" is a compact, useful note, not a
+      // ritual alarm — Ledger Voss writes it while labelling his TODO update, and
+      // counting it flagged him at 25% on a run with ZERO alarm framing in 65
+      // turns. Excluding it keeps the signal on what actually costs output: a
+      // bold banner announcing state as an event.
       const banner = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND type='llm_thought' AND timestamp>?
-        AND (summary LIKE '**%' OR summary LIKE '[%] **%')`, p.id, wider)
+        AND (summary LIKE '**%' OR summary LIKE '[%] **%')
+        AND summary NOT LIKE '**TODO**%' AND summary NOT LIKE '[%] **TODO**%'`, p.id, wider)
       const pct = Math.round((100 * banner) / total)
       announce(`banner:${p.id}`, `[fleet] ${n}: ${pct}% of thoughts open with a banner header (${banner}/${total} in 25min) — ritual restatement loop, rewrite TODO/memory in plain sentences`, pct >= 25)
     }
