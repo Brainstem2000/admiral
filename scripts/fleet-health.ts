@@ -47,10 +47,19 @@ function sweep(): void {
     // is then re-injected. Costs output tokens every turn and buries real alarms.
     const total = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND type='llm_thought' AND timestamp>?`, p.id, wider)
     if (total >= 20) {
-      const alarm = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND type='llm_thought' AND timestamp>?
-        AND (summary LIKE '%CRITICAL%' OR summary LIKE '%🚨%' OR summary LIKE '%RECONCIL%')`, p.id, wider)
-      const pct = Math.round((100 * alarm) / total)
-      if (pct >= 20) console.log(`[fleet] ${n}: ${pct}% of thoughts are alarm-framed (${alarm}/${total} in 25min) — style loop, rewrite the TODO plainly`)
+      // Match the SHAPE, not a word list. The first version keyed on
+      // CRITICAL/RECONCIL/🚨 and Grit Vane simply moved to
+      // "**🎯 LIVE STATE CONFIRMED — CYCLE 171 STARTING**": identical ritual
+      // preamble every turn, zero detections. A keyword watcher that an agent
+      // can reword its way around is a false negative dressed as a clean bill.
+      //
+      // The tell is a thought OPENING with a bold banner — `**`, optionally
+      // after a macro prefix like "[mine_until_full 3 mines, cargo 12/120] ".
+      // Ordinary reasoning starts with a sentence.
+      const banner = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND type='llm_thought' AND timestamp>?
+        AND (summary LIKE '**%' OR summary LIKE '[%] **%')`, p.id, wider)
+      const pct = Math.round((100 * banner) / total)
+      if (pct >= 25) console.log(`[fleet] ${n}: ${pct}% of thoughts open with a banner header (${banner}/${total} in 25min) — ritual restatement loop, rewrite TODO/memory in plain sentences`)
     }
   }
   db.close()

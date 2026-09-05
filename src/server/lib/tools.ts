@@ -2013,6 +2013,24 @@ export async function executeTool(
   // argument) goes out live, untouched.
   let remapNote = ''
   let fleetRecord = ''
+
+  // Route planning: attach what the fleet ALREADY KNOWS about the destination.
+  //
+  // The briefing carries station intel only for the current system and one jump
+  // out, so an agent planning a two-jump move is blind to a destination the
+  // fleet surveyed long ago. Cass Margin flew two jumps to Stillwater to
+  // discover it has no stations, then set course for Bharani — both already
+  // recorded has_station=0 in fleet_intel_systems before she left. This is the
+  // "do NOT re-scout this" data failing to reach the one decision that needed
+  // it. Informational, never a block: a miner heading to a belt has no use for
+  // a station, and only the agent knows its intent.
+  {
+    const bareCmd = command.replace(/^spacemolt_/, '').replace(GROUP_PREFIX_RX, '')
+    if (bareCmd === 'find_route' || bareCmd === 'fleet_route') {
+      const dest = commandArgs?.target_system ?? commandArgs?.id ?? commandArgs?.to
+      if (typeof dest === 'string' && dest.trim()) fleetRecord = fleetRecordLine(dest)
+    }
+  }
   if ((deepBare === 'get_system' || deepBare === 'get_poi') && commandArgs) {
     const keys = deepBare === 'get_system'
       ? ['system_id', 'id', 'system', 'system_name', 'target_system', 'name']
