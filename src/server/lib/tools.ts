@@ -3171,11 +3171,35 @@ function makeMacroNarrator(ctx: ToolContext, macro: string, reason?: string, min
 const lastDestinations = new Map<string, { system: string; at: number; workedSince: boolean }>()
 const DESTINATION_COMMIT_MS = 4 * 60_000
 
-/** Commands that count as actually working a system rather than passing through. */
+/** Commands that count as actually working a system rather than passing through.
+ *
+ *  MISSING ENTRIES ARE THE DANGEROUS FAILURE HERE. A gate that refuses a
+ *  productive agent is worse than no gate: it burns the turns it exists to save
+ *  and teaches agents to fight the harness. Nova Reyes was blocked six times in
+ *  thirty minutes on 2026-09-05 running her ordinary earning circuit — mine at
+ *  Bharani, sell at The Crucible, deposit at Iron Reach — because the two
+ *  commands that end each leg were absent: `sell_cargo` (the macro agents
+ *  actually sell with; only bare `sell` was listed) and `deposit` (not listed at
+ *  all). She was on cycle 29 with a 225,995cr wallet while being told she had
+ *  "done nothing" at stations where she had just sold and banked ore.
+ *
+ *  So this errs toward inclusion: anything that changes state at a station or in
+ *  space counts. Passing through means arriving and leaving, nothing more. */
 const WORK_COMMANDS = new Set([
-  'scan', 'get_nearby', 'get_wrecks', 'mine', 'mine_until_full', 'attack', 'loot',
-  'salvage_wreck', 'dock', 'view_market', 'analyze_market', 'buy', 'sell',
-  'accept_mission', 'complete_mission', 'get_missions', 'survey', 'salvage',
+  // presence / reconnaissance
+  'scan', 'get_nearby', 'get_wrecks', 'survey', 'dock',
+  // extraction and combat
+  'mine', 'mine_until_full', 'attack', 'loot', 'salvage', 'salvage_wreck',
+  // trade
+  'view_market', 'analyze_market', 'buy', 'sell', 'sell_cargo',
+  'create_sell_order', 'create_buy_order', 'cancel_order',
+  // storage — the end of nearly every hauling leg
+  'deposit', 'withdraw', 'deposit_items', 'withdraw_items',
+  'faction_deposit_items', 'faction_withdraw_items', 'send_gift',
+  // station services
+  'refuel', 'repair', 'craft', 'reload', 'install_mod', 'uninstall_mod',
+  // missions
+  'accept_mission', 'complete_mission', 'get_missions',
 ])
 
 function noteDestinationWork(profileId: string, command: string): void {
