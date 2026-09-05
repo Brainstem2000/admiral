@@ -2850,7 +2850,7 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
       const orderId = crypto.randomUUID()
       const chainId = args.chain_id ? String(args.chain_id) : null
       const nextOrders = args.next_orders ? String(args.next_orders) : null
-      createFleetOrder({
+      const { deduped } = createFleetOrder({
         id: orderId,
         from_profile_id: ctx.profileId,
         to_profile_id: target.id,
@@ -2861,8 +2861,16 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
         next_orders: nextOrders,
       })
 
-      // Nudge the target agent if they're running
       const chainTag = chainId ? ` (chain: ${chainId})` : ''
+      // A re-ask refreshed a request already sitting in their inbox — say so and
+      // do NOT nudge again. Re-nudging is what turned one iron_ore request into 33
+      // orders and seven interrupted agents on 2026-09-03.
+      if (deduped) {
+        ctx.log('system', `Fleet order to ${target.name} refreshed (already open): [${args.type}] ${args.description}${chainTag}`)
+        return `${target.name} already has this exact request open — refreshed it rather than sending a duplicate. They have not actioned it yet; chasing it again will not change that. If it is blocked, ask them why or take it up with the Admiral.`
+      }
+
+      // Nudge the target agent if they're running
       const orderMsg = `Fleet order from ${ctx.profileName}: [${args.type}] ${args.description}${chainTag}`
       agentManager.nudge(target.id, `## Fleet Order Received\n${orderMsg}\nUse read_fleet_orders(action="inbox") to see details and accept/complete orders.`)
 

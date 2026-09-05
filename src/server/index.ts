@@ -138,9 +138,9 @@ backfillSystemsFromStations()
 // tables don't grow without bound.
 function runPrune() {
   try {
-    const { logs, snapshots, intel, ledger, events, history } = pruneOldData()
-    if (logs || snapshots || intel || ledger || events || history) {
-      console.log(`[Prune] removed ${logs} log rows, ${snapshots} snapshots, ${intel} intel rows, ${ledger} ledger rows, ${events} events, ${history} state-history rows`)
+    const { logs, snapshots, intel, ledger, events, history, orders } = pruneOldData()
+    if (logs || snapshots || intel || ledger || events || history || orders) {
+      console.log(`[Prune] removed ${logs} log rows, ${snapshots} snapshots, ${intel} intel rows, ${ledger} ledger rows, ${events} events, ${history} state-history rows, expired ${orders} fleet orders`)
     }
   } catch (err) {
     console.warn('[Prune] failed:', err)

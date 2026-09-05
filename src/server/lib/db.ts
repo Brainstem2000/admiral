@@ -1395,7 +1395,7 @@ export function pruneOldData(opts?: {
   intelDays?: number
   ledgerDays?: number
   maxLogRows?: number
-}): { logs: number; snapshots: number; intel: number; ledger: number; events: number; history: number } {
+}): { logs: number; snapshots: number; intel: number; ledger: number; events: number; history: number; orders: number } {
   const logDays = opts?.logDays ?? 90
   const snapshotDays = opts?.snapshotDays ?? 30
   const intelDays = opts?.intelDays ?? 7
@@ -1494,7 +1494,10 @@ export function pruneOldData(opts?: {
   // without a fresh verification flip to 'stale' (LAWs persist until a patch).
   stalePlaybookSweep()
 
-  return { logs, snapshots, intel: m + s + kz + si + wr, ledger, events, history }
+  // An order left open for days is not a live request — it is stale state the
+  // recipient re-reads on every boot. Expire on the same cycle as the tables.
+  const orders = expireStaleFleetOrders()
+  return { logs, snapshots, intel: m + s + kz + si + wr, ledger, events, history, orders }
 }
 
 // --- Preferences CRUD ---
@@ -2807,11 +2810,73 @@ export interface FleetOrder {
   updated_at: string
 }
 
-export function createFleetOrder(order: Pick<FleetOrder, 'id' | 'from_profile_id' | 'to_profile_id' | 'type' | 'description' | 'params'> & { chain_id?: string | null; next_orders?: string | null }): void {
-  getDb().query(
+/**
+ * Intent key for a fleet order: the sender's verb plus every snake_case identifier
+ * in the description (item ids, station ids), order-insensitive.
+ *
+ * This exists because a re-ask used to mint a NEW row every time. On 2026-09-03
+ * CyberSpock asked seven agents for iron_ore and, getting no reply, re-sent — 33
+ * orders in 74 minutes for ONE request, four of them to an agent holding zero
+ * iron_ore at any station. They were still open two days later, and every one of
+ * them showed on its recipient's row as work outstanding. Collapsing on intent
+ * makes a re-ask refresh the standing request instead of adding to a pile.
+ */
+export function fleetOrderFingerprint(type: string, description: string): string {
+  const text = description.toLowerCase()
+  const ids = [...new Set(text.match(/[a-z][a-z0-9]*(?:_[a-z0-9]+)+/g) ?? [])].sort()
+  const verb = (text.match(/[a-z]+/) ?? [''])[0]
+  // No identifiers to key on (free-text order) — fall back to the opening words,
+  // which is still enough to catch a verbatim re-send.
+  const body = ids.length > 0 ? ids.join(',') : (text.match(/[a-z0-9]+/g) ?? []).slice(0, 6).join(',')
+  return `${type.toLowerCase()}|${verb}|${body}`
+}
+
+/**
+ * Create a fleet order, or refresh the open one that already carries the same
+ * intent from the same sender to the same recipient. Returns the row's id and
+ * whether it was a refresh, so the caller can skip re-nudging the target for
+ * something already in their inbox.
+ */
+export function createFleetOrder(order: Pick<FleetOrder, 'id' | 'from_profile_id' | 'to_profile_id' | 'type' | 'description' | 'params'> & { chain_id?: string | null; next_orders?: string | null }): { id: string; deduped: boolean } {
+  const db = getDb()
+  const fp = fleetOrderFingerprint(order.type, order.description)
+  const open = db.query(
+    `SELECT id, type, description FROM fleet_orders
+     WHERE from_profile_id = ? AND to_profile_id = ? AND status IN ('pending', 'accepted')`
+  ).all(order.from_profile_id, order.to_profile_id) as Array<{ id: string; type: string; description: string }>
+  const match = open.find(o => fleetOrderFingerprint(o.type, o.description) === fp)
+  if (match) {
+    // Newest wording wins — the re-ask is usually the clearer one.
+    db.query(
+      `UPDATE fleet_orders SET description = ?, params = ?, updated_at = datetime('now') WHERE id = ?`
+    ).run(order.description, order.params, match.id)
+    return { id: match.id, deduped: true }
+  }
+  db.query(
     `INSERT INTO fleet_orders (id, from_profile_id, to_profile_id, type, description, params, chain_id, next_orders)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(order.id, order.from_profile_id, order.to_profile_id, order.type, order.description, order.params, order.chain_id ?? null, order.next_orders ?? null)
+  return { id: order.id, deduped: false }
+}
+
+/**
+ * Cancel fleet orders left open past `days`. An order nobody answered for days is
+ * not a live request — it is a stale one the recipient re-reads on every boot and
+ * plans around. Reason is recorded (see cancelFleetOrder) so the audit trail keeps
+ * the why. Chained orders are exempt: a chain's later legs sit open by design
+ * until their predecessor completes.
+ */
+export function expireStaleFleetOrders(days = 7): number {
+  const db = getDb()
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ')
+  const stale = db.query(
+    `SELECT id FROM fleet_orders
+     WHERE status IN ('pending', 'accepted') AND chain_id IS NULL AND created_at < ?`
+  ).all(cutoff) as Array<{ id: string }>
+  for (const o of stale) {
+    cancelFleetOrder(o.id, `Auto-expired: open ${days}+ days with no completion. Re-issue if still needed.`)
+  }
+  return stale.length
 }
 
 export function getFleetOrders(opts: {
