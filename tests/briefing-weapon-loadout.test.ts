@@ -132,14 +132,18 @@ describe('briefing weapon loadout', () => {
     // A blank-id line is exactly the regression this guards against.
     expect(b).not.toMatch(/ids:\s*$/m)
     expect(b).not.toContain('crimson_berserker_plating')
-    // A partly-loaded ship must read as "you can fight", naming the guns that
-    // are ready. "1/3 need reload" was read by gpt-oss as "I am unarmed":
-    // Morg'Thar crossed six systems on 2026-09-02 reporting "all 7 weapons need
-    // reload" while his Fury Cannon held 996 of 1,000 rounds, and engaged nothing.
-    expect(b).toContain('WEAPON READINESS: YOU CAN FIGHT')
-    expect(b).toContain('2/3 weapon(s) LOADED')
-    expect(b).toContain('NOT a reason to skip a target')
-    expect(b).toMatch(/ready: .*(fury_cannon|mass_driver)/)
+    // Every gun here has rounds — fury_cannon 999/1000, mass_drivers 7/10 and
+    // 10/10 — so the ship is combat ready, and the two below full are not a
+    // reason to go shopping.
+    //
+    // This assertion used to expect "2/3 weapon(s) LOADED", which counted only
+    // the FULL magazines. That conflation is the bug fixed on 2026-09-05: it
+    // told Morg'Thar ALL MAGAZINES EMPTY while his autocannon held 493 of 500.
+    // "Loaded" has to mean "can fire", or a gun 7 rounds short reads as unarmed.
+    expect(b).toContain('WEAPON READINESS: COMBAT READY')
+    expect(b).toContain('all 3 fitted weapon(s) have rounds loaded')
+    expect(b).toContain('NOT a reason to reload or shop for ammo')
+    expect(b).not.toContain('MAGAZINES EMPTY')
   })
 
   test('a ship with every magazine empty is told plainly not to attack', async () => {

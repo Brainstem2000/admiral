@@ -808,7 +808,7 @@ export function buildSituationalBriefing(profileId: string): string {
         // Group identical guns so seven weapons read as three lines, not seven.
         const byKind = new Map<string, {
           n: number; ammo: string; lo: number; hi: number
-          maxLo: number; maxHi: number; knownCaps: number; ready: number; ids: string[]
+          maxLo: number; maxHi: number; knownCaps: number; ready: number; full: number; ids: string[]
         }>()
         for (const w of weapons) {
           // lib_v2's get_ship names the instance `module_id`, the class `type_id`,
@@ -824,16 +824,25 @@ export function buildSituationalBriefing(profileId: string): string {
           const key = `${kind}|${ammo}`
           const e = byKind.get(key) ?? {
             n: 0, ammo, lo: Infinity, hi: 0,
-            maxLo: Infinity, maxHi: 0, knownCaps: 0, ready: 0, ids: [],
+            maxLo: Infinity, maxHi: 0, knownCaps: 0, ready: 0, full: 0, ids: [],
           }
           e.n++; e.lo = Math.min(e.lo, cur); e.hi = Math.max(e.hi, cur)
+          // READY means "this gun can fire", which is the only question the
+          // readiness line answers. It is NOT "this gun is topped up".
+          // Conflating the two told Morg'Thar on 2026-09-05 that ALL MAGAZINES
+          // WERE EMPTY while his autocannon held 493 of 500 rounds, because 493
+          // is not >= 499. He then spent turns every turn reconciling a
+          // contradiction the briefing had invented, and wrote the conflict into
+          // his own memory as a standing lesson.
+          if (cur > 0) e.ready++
           if (Number.isFinite(cap) && cap > 0) {
             e.knownCaps++
             e.maxLo = Math.min(e.maxLo, cap)
             e.maxHi = Math.max(e.maxHi, cap)
-            // One missing round in a 1,000-round magazine is operationally full;
-            // it must not turn a combat-ready ship into an ammo-shopping mission.
-            if (cur >= cap - 1) e.ready++
+            // Separately: one missing round in a 1,000-round magazine is
+            // operationally full, so it must not send a combat-ready ship
+            // shopping for ammo.
+            if (cur >= cap - 1) e.full++
           }
           if (id) e.ids.push(id)
           byKind.set(key, e)
@@ -850,10 +859,21 @@ export function buildSituationalBriefing(profileId: string): string {
         }
         const knownWeapons = [...byKind.values()].reduce((n, e) => n + e.knownCaps, 0)
         const readyWeapons = [...byKind.values()].reduce((n, e) => n + e.ready, 0)
+        const fullWeapons = [...byKind.values()].reduce((n, e) => n + e.full, 0)
         if (knownWeapons === weapons.length) {
-          if (readyWeapons === weapons.length) {
+          if (fullWeapons === weapons.length) {
             lines.push('WEAPON READINESS: COMBAT READY — every fitted weapon is full or effectively full. Do not reload or shop for ammo before acting; cargo ammo is spare stock.')
-          } else if (readyWeapons > 0) {
+          } else if (readyWeapons === weapons.length) {
+            // Every gun can fire; some are simply not topped up. That is a
+            // combat-ready ship, and saying "N are empty" about a gun holding
+            // 493 of 500 rounds is what sent Morg'Thar looking for ammo.
+            const short = weapons.length - fullWeapons
+            lines.push(
+              `WEAPON READINESS: COMBAT READY — all ${weapons.length} fitted weapon(s) have rounds loaded and can fire now. ` +
+              `${short} ${short === 1 ? 'is' : 'are'} below a full magazine, which is NOT a reason to reload or shop for ammo before acting. ` +
+              `Top up only when you are already at ammo you hold.`,
+            )
+          } else if (readyWeapons > 0) {   // some guns have rounds, some are dry
             // Name the guns that CAN fire and say combat is on. "6/7 need
             // reload" was read as "I am unarmed": Morg'Thar crossed six
             // corridor systems on 2026-09-02 writing "all 7 weapons need
