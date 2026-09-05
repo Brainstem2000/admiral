@@ -19,7 +19,7 @@
 <div style="display:flex; flex-direction:column; gap:22px; padding:42px 46px; background:hsl(213 16% 12%); min-height:100%; box-sizing:border-box;">
 
   <div style="display:flex; align-items:baseline; gap:16px; border-bottom:1px solid hsl(217 17% 28%); padding-bottom:16px;">
-    <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:24px; letter-spacing:0.06em; text-transform:uppercase; color:hsl(355 52% 64%);">Seven Clean Bills That Were Wrong</span>
+    <span style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size:24px; letter-spacing:0.06em; text-transform:uppercase; color:hsl(355 52% 64%);">Ten Clean Bills That Were Wrong</span>
     <span style="font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:hsl(213 14% 65%);">the night's actual theme</span>
   </div>
 
@@ -29,7 +29,8 @@
 
   <div style="display:flex; flex-direction:column; gap:9px; padding:20px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(193 44% 67%);">
     <span style="font-family:'Chakra Petch',sans-serif; font-weight:600; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:hsl(193 44% 67%);">What to check next time</span>
-    <span style="font-size:12px; line-height:1.85; color:hsl(213 27% 88%);">Before trusting a watcher's silence, make it report what it <i>matched</i>, not just what it flagged. A detector that scans 2,526 rows and finds nothing should say <span style="color:hsl(213 14% 65%);">"scanned 2,526, matched 0"</span> — the row count is the proof the query was alive. Four of the seven below would have been caught on sight by that one line.</span>
+    <span style="font-size:12px; line-height:1.85; color:hsl(213 27% 88%);">Before trusting a watcher's silence, make it report what it <i>matched</i>, not just what it flagged. A detector that scans 2,526 rows and finds nothing should say <span style="color:hsl(213 14% 65%);">"scanned 2,526, matched 0"</span> — the row count is the proof the query was alive. Four of these would have been caught on sight by that one line.</span>
+    <span style="font-size:12px; line-height:1.85; color:hsl(213 27% 88%);">The three added after publication are the Admiral's own, not an agent's. Two were a total produced from a query that was never asked what it excluded; the third was a stored record nobody re-read against the live game. The pattern does not spare the person auditing it.</span>
   </div>
 
 </div>
@@ -55,8 +56,17 @@ const F = [
    "Her jump had failed with action_pending (mine). The status was read from a cached snapshot rather than the live result.",
    "Corrected, and she was actually docked afterwards."],
   ["33 dead orders read as outstanding work — and a 65,024 cr escrow that never existed",
-   "Found this morning. One iron_ore request re-sent 33 times in 74 minutes; four went to an agent holding zero iron_ore anywhere. Morg's \"65,024 cr escrowed at Iron Reach\" was disproven live: zero orders there, zero mining_laser_iii orders anywhere, real escrow 1,453 cr.",
+   "One iron_ore request re-sent 33 times in 74 minutes; four went to an agent holding zero iron_ore anywhere. Morg's \"65,024 cr escrowed at Iron Reach\" was disproven live: zero orders there, zero mining_laser_iii orders anywhere, real escrow 1,453 cr.",
    "A fabricated fact became a fleet order that another agent spent turns trying to execute."],
+  ["The commission feasibility pass read one table and called the build impossible",
+   "It summed storage_inventory — personal storage — and reported 9 of 24 Devastator lines covered, ~2M cr of buying and three dead ends. It never touched the faction vaults, which hold 21,798 items. Counting those: 19 of 24 covered, with weapon_core 220, hull_plating 195 and shield_emitter 172 already sitting at War Citadel.",
+   "Mine. A confident total from a query that was never asked what it did not cover."],
+  ["A price quoted twice without checking the ratio",
+   "titanium_alloy was reported as \"buyable at 2,500, ~45,000 cr closes it\". Its base value is 100 — that ask is 25x, eight times outside the fleet's own 3x overpay cap. Smelting it from ore costs a few hundred credits.",
+   "Also mine. The number was read; the ratio it belonged to was not."],
+  ["The Admiral's own ship records were a hull behind, for two agents",
+   "storage_ships listed Ledger's active hull as `theoria` while he flew a Siege Breaker, and Morg's as a 1,450-cargo War Wagon while he was in a 120-cargo Catalogue — which broke a haul plan written for the wrong ship. The rows only refresh on a ship query.",
+   "A stored record and a live reading disagreed, and nothing in the harness noticed."],
 ];
 document.getElementById('items').innerHTML = F.map(([t,d,c],i) => `
   <div style="display:flex; gap:16px; padding:16px 20px; background:hsl(217 16% 15.5%); border:1px solid hsl(217 17% 28%); border-left:3px solid hsl(355 52% 64%);">
