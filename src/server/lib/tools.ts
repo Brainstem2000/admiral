@@ -2281,9 +2281,22 @@ export async function executeTool(
       }
       if (errCode === 'invalid_target') {
         const target = commandArgs?.target_id || commandArgs?.target || ''
-        if (!target && (deepBare === 'scan' || deepBare === 'attack')) {
+        // `target` means a spatial entity for some commands and an enum for
+        // others. view(target="storage") returned the right error — 'Cannot view
+        // another player's storage. Use target="self" or target="faction"' — and
+        // then this hint told Ledger Voss on 2026-09-05 that "storage" was "not
+        // at your current location" and to run get_nearby() to find it. He went
+        // looking for a player named storage, concluded the station had no
+        // faction lockbox, and wrote a plan to mine 200 steel_plate and build one
+        // that already existed.
+        //
+        // When the game has already named the accepted values, it said it better
+        // than any hint here can. Say nothing.
+        const gameNamedTheOptions = /use\s+target\s*=|valid\s+(targets?|values?)/i.test(String(errMsg))
+        const ENTITY_TARGET = new Set(['scan', 'attack', 'hail', 'follow', 'board', 'tractor', 'inspect'])
+        if (!target && ENTITY_TARGET.has(deepBare)) {
           errMsg += `\n\n💡 HINT: ${deepBare}() requires a target_id. Use get_nearby() first to see players/NPCs at your location, then ${deepBare}(target_id="their_id").`
-        } else {
+        } else if (!gameNamedTheOptions && ENTITY_TARGET.has(deepBare)) {
           errMsg += `\n\n💡 HINT: Target "${target}" is not at your current location. Use get_nearby() to see who is here. The target may have left or you may have the wrong ID.`
         }
       }
