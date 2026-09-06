@@ -102,3 +102,34 @@ describe('formatting survives the removal', () => {
     expect(r.text).toBe('## Plan\n\n- Buy the boards')
   })
 })
+
+describe('mission state is injected too — recording it is the same bug', () => {
+  /**
+   * `get_status` returns missions.active[] with ids, objectives and progress
+   * every turn. Morg'Thar also wrote them into his TODO, completed one, re-read
+   * the note four minutes later and announced "MY TODO IS FROM A COMPLETELY
+   * DIFFERENT SESSION" — then HALTed and asked the Admiral for guidance he did
+   * not need (2026-09-06). Same shape as the location mismatch, one field short.
+   */
+  test('a mission slot tally is dropped', () => {
+    const r = scrubLiveState('## STATUS\nMISSIONS HELD: 5/5 FULL\n- keep hunting')
+    expect(r.text).not.toContain('5/5')
+    expect(r.text).toContain('keep hunting')
+  })
+
+  test('a per-mission progress readout is dropped', () => {
+    const r = scrubLiveState('Active missions: Grazer Cull 2/8, Lucrative Sideline 0/3')
+    expect(r.removed.length).toBe(1)
+    expect(r.text.trim()).toBe('')
+  })
+
+  test('but a PLAN about missions survives', () => {
+    const plan = 'Take a crimson delivery when a mission slot frees up'
+    expect(scrubLiveState(plan).text).toContain(plan)
+  })
+
+  test('and so does a rule with a threshold', () => {
+    const rule = 'Missions: never hold more than one I cannot finish'
+    expect(scrubLiveState(rule).text).toContain(rule)
+  })
+})
