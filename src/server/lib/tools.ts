@@ -1749,6 +1749,13 @@ export async function executeTool(
   if (MACRO_TOOLS.has(name)) {
     ctx.log('tool_call', `${name}(${formatArgs(args)})`)
     const summary = await executeMacroTool(name, args, ctx, reason)
+    // A REFUSED macro performed no game action. Two things followed from
+    // treating it like one: it armed the action cooldown, rate-limiting the
+    // agent for something it never did; and it logged the refusal a second
+    // time, truncated to 200 chars, on top of the full text the guard already
+    // wrote. The duplicate also doubled every guard-block alarm — the
+    // 4-in-6-minutes threshold tripped at two real refusals.
+    if (isDoctrineRefusal(summary)) return summary
     // A macro just performed real game actions: refresh passive awareness and
     // arm the normal cooldown so the next direct action is properly paced.
     actionCooldowns.set(ctx.profileId, { timestamp: Date.now(), wasPending: false })
@@ -3267,6 +3274,13 @@ function noteDestinationWork(profileId: string, command: string): void {
   if (!WORK_COMMANDS.has(bare)) return
   const cur = lastDestinations.get(profileId)
   if (cur) cur.workedSince = true
+}
+
+/** The marker every doctrine guard's refusal starts with. One definition, so the
+ *  tool layer, the macro layer and scripts/fleet-health.ts cannot disagree about
+ *  what counts as a block. */
+export function isDoctrineRefusal(text: string): boolean {
+  return text.startsWith('BLOCKED by Admiral doctrine') || text.startsWith('REFUSED')
 }
 
 function destinationRefusal(prevSystem: string, target: string, elapsedMs: number): string {
