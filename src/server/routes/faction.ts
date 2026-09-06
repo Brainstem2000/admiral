@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { agentManager } from '../lib/agent-manager'
-import { listProfiles } from '../lib/db'
+import { listProfiles, getDb } from '../lib/db'
 
 /**
  * Faction-level view: overview (treasury, members/roles, personnel, fuel) plus
@@ -119,6 +119,31 @@ faction.get('/', async (c) => {
         aggregate_note: aggregateNote,
         hinted_total_items: hintedTotal,
         stations: [...stations.values()],
+        // WHICH stations we can actually DEPOSIT at. A remote read succeeds at
+        // every station holding our ledgered stock, so "unlocked" above means
+        // only "we can see it" — deposits are refused with no_faction_storage
+        // anywhere we do not own a lockbox. Showing six readable stations as if
+        // all six accepted deposits is the mistake that had an agent planning to
+        // mine 200 steel_plate for a lockbox that already existed elsewhere.
+        deposit_stations: (() => {
+          try {
+            return (getDb().query(
+              `SELECT DISTINCT station_id FROM fleet_intel_facilities
+                WHERE owned = 1 AND facility_type IN ('faction_lockbox','faction_warehouse')`
+            ).all() as Array<{ station_id: string }>).map(r => r.station_id)
+          } catch { return [] }
+        })(),
+        // What an open commission is still waiting on, so the vault page can
+        // show at a glance whether the fleet's shared stock covers the builds
+        // it is being stockpiled for. Faction storage is where ship-build
+        // supplies live, so "is this item wanted" is the question that matters.
+        build_needs: (() => {
+          try {
+            return getDb().query(
+              `SELECT item_id, SUM(quantity) AS needed FROM commission_requirements GROUP BY item_id`
+            ).all() as Array<{ item_id: string; needed: number }>
+          } catch { return [] }
+        })(),
       },
     }
     cache = { at: Date.now(), body }
