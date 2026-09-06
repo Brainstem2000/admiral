@@ -30,7 +30,7 @@ import { test, expect, describe } from 'bun:test'
 // Mirrors WORK_COMMANDS and the bare-name normalisation in tools.ts.
 const WORK_COMMANDS = new Set([
   'scan', 'get_nearby', 'get_wrecks', 'survey', 'dock',
-  'mine', 'mine_until_full', 'attack', 'loot', 'salvage', 'salvage_wreck',
+  'mine', 'mine_until_full', 'attack', 'loot', 'salvage', 'salvage_wreck', 'hunt_here',
   'view_market', 'analyze_market', 'buy', 'sell', 'sell_cargo',
   'create_sell_order', 'create_buy_order', 'cancel_order',
   'deposit', 'withdraw', 'deposit_items', 'withdraw_items',
@@ -78,6 +78,36 @@ describe("Nova's earning circuit is never called idle", () => {
     expect(countsAsWork('storage_deposit_items')).toBe(true)
     expect(countsAsWork('market_view_market')).toBe(true)
     expect(countsAsWork('spacemolt_storage_deposit_items')).toBe(true)
+  })
+})
+
+describe('macros credit work too — they run on a different code path', () => {
+  // MACRO_TOOLS are dispatched before the game-command executor that calls
+  // noteDestinationWork, so listing them in WORK_COMMANDS was not enough on its
+  // own. Nova Reyes was blocked leaving The Crucible on 2026-09-05 ten seconds
+  // after a successful sell_cargo there; her entire earning loop is macros, so
+  // the gate blocked her all day while she worked every stop correctly.
+  const MACROS = ['mine_until_full', 'sell_cargo', 'hunt_here', 'goto_system']
+  const creditsWork = (macro: string) => macro !== 'goto_system' && countsAsWork(macro)
+
+  test('selling a hold at a station is work', () => {
+    expect(creditsWork('sell_cargo')).toBe(true)
+  })
+
+  test('mining a belt is work', () => {
+    expect(creditsWork('mine_until_full')).toBe(true)
+  })
+
+  test('hunting at a POI is work', () => {
+    expect(creditsWork('hunt_here')).toBe(true)
+  })
+
+  test('but travelling is not — that is what the gate exists to stop', () => {
+    expect(creditsWork('goto_system')).toBe(false)
+  })
+
+  test('every macro except goto_system credits work', () => {
+    expect(MACROS.filter(creditsWork).sort()).toEqual(['hunt_here', 'mine_until_full', 'sell_cargo'])
   })
 })
 

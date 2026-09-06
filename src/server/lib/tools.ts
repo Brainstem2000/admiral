@@ -3211,8 +3211,9 @@ const DESTINATION_COMMIT_MS = 4 * 60_000
 const WORK_COMMANDS = new Set([
   // presence / reconnaissance
   'scan', 'get_nearby', 'get_wrecks', 'survey', 'dock',
-  // extraction and combat
-  'mine', 'mine_until_full', 'attack', 'loot', 'salvage', 'salvage_wreck',
+  // extraction and combat — hunt_here is a macro and was missing entirely,
+  // so an agent that cleared a POI of creatures had still "done nothing" there
+  'mine', 'mine_until_full', 'attack', 'loot', 'salvage', 'salvage_wreck', 'hunt_here',
   // trade
   'view_market', 'analyze_market', 'buy', 'sell', 'sell_cargo',
   'create_sell_order', 'create_buy_order', 'cancel_order',
@@ -3322,6 +3323,17 @@ async function executeMacroTool(name: string, args: Record<string, unknown>, ctx
       return refusal
     }
   }
+  // Macros are dispatched here, BEFORE the game-command executor that credits
+  // destination work — so mining a belt or selling a hold never cleared the
+  // destination gate. Nova Reyes was blocked re-routing out of The Crucible on
+  // 2026-09-05 ten seconds after a successful sell_cargo there, and had been
+  // blocked the same way all day: her whole earning loop is macros. Adding the
+  // macro names to WORK_COMMANDS did nothing on its own, because this path
+  // returns before noteDestinationWork is reached.
+  //
+  // goto_system is deliberately excluded — travelling is the thing the gate
+  // exists to stop, not work at a destination.
+  if (name !== 'goto_system') noteDestinationWork(ctx.profileId, name)
   try {
     switch (name) {
       case 'mine_until_full': return await macroMineUntilFull(args, ctx, reason)
