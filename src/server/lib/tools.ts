@@ -3,7 +3,7 @@ import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
 import { scrubLiveState, scrubNotice } from './note-hygiene'
-import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor, refuseAbandon, noteAbandon } from './mission-guard'
+import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor, refuseAbandon, noteAbandon, knownTitle, isRefusedMissionTitle } from './mission-guard'
 import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
@@ -1307,9 +1307,14 @@ export function checkDoctrineGuards(
     // Dropping one contract is judgement; dropping eight in three hours while
     // completing none is a loop. See mission-guard.ts.
     if (bare === 'abandon_mission' || bare.endsWith('_abandon_mission')) {
-      const churn = refuseAbandon(profileId)
+      // Resolve the title so a doctrine-refused mission is exempt from the
+      // churn limit — dropping one is obedience, not churn, and it must not
+      // count toward the limit either.
+      const abandonId = String(commandArgs?.mission_id ?? commandArgs?.id ?? '')
+      const abandonTitle = abandonId ? knownTitle(abandonId) : undefined
+      const churn = refuseAbandon(profileId, Date.now(), abandonTitle)
       if (churn) return churn
-      noteAbandon(profileId)
+      if (!(abandonTitle && isRefusedMissionTitle(abandonTitle))) noteAbandon(profileId)
     }
     if ((bare === 'jettison' || bare.endsWith('_jettison')) && getPreference('jettison_gate') !== 'off') {
       const items = Array.isArray(commandArgs?.items)

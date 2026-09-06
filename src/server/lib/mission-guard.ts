@@ -96,6 +96,16 @@ export function refusalText(title: string): string {
  * simply waiting restores the ability to drop a genuinely bad contract.
  */
 const abandons = new Map<string, number[]>()
+/** Titles the fleet refuses outright are ALWAYS droppable — the churn guard must
+ *  never trap an agent inside a mission doctrine forbids. Distress calls are
+ *  AUTO-ASSIGNED to nearby ships (per the game's own docs), so `refuseAccept`
+ *  never sees them: on 2026-09-06 Cass Margin and Vera Lane were both handed
+ *  "Distress: Wexler R1P-JL in Rasalgethi" without either calling
+ *  accept_mission. Blocking the abandon as well would be the worst of both. */
+export function isAlwaysDroppable(title: string): boolean {
+  return isRefusedMissionTitle(title)
+}
+
 const ABANDON_WINDOW_MS = 60 * 60_000
 const ABANDON_LIMIT = 3
 
@@ -110,7 +120,11 @@ export function recentAbandons(profileId: string, now = Date.now()): number {
 }
 
 /** Refusal text when an agent is churning through contracts, or null to allow. */
-export function refuseAbandon(profileId: string, now = Date.now()): string | null {
+export function refuseAbandon(profileId: string, now = Date.now(), title?: string): string | null {
+  // Never trap an agent inside a mission doctrine forbids. Wexler distress
+  // calls are auto-assigned, so an agent can be handed one while already at the
+  // churn limit — and then be blocked from obeying the order to drop it.
+  if (title && isAlwaysDroppable(title)) return null
   const n = recentAbandons(profileId, now)
   if (n < ABANDON_LIMIT) return null
   return (

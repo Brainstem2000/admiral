@@ -19,7 +19,7 @@
  * for the agent, not something the harness should pre-empt.
  */
 import { test, expect, describe } from 'bun:test'
-import { isRefusedMissionTitle, noteMissionTitles, refuseAccept, acceptSideEffect, knownTitle } from '../src/server/lib/mission-guard'
+import { isRefusedMissionTitle, noteMissionTitles, refuseAccept, acceptSideEffect, knownTitle, isAlwaysDroppable } from '../src/server/lib/mission-guard'
 
 const BOARD = `Missions at The Crucible Garrison (3):
 --- Distress: Wexler EQC-0M in Fumalsamakah [7d3fe44b93c591d43cfa96926fcf36bc] (distress_response, difficulty 5) ---
@@ -179,5 +179,29 @@ describe('abandon-churn guard', () => {
     }
     expect(blocked).toBeGreaterThan(0)
     expect(recentAbandons(P, T0 + 40 * 60_000)).toBe(3)
+  })
+})
+
+describe('auto-assigned distress calls', () => {
+  /**
+   * The accept guard cannot see these. The game auto-assigns distress
+   * investigations to every ship in the system — Cass Margin and Vera Lane were
+   * both handed "Distress: Wexler R1P-JL in Rasalgethi" on 2026-09-06 without
+   * either one calling accept_mission. So the refusal has to be recognisable
+   * from the TITLE alone, wherever the mission came from, and dropping one must
+   * never be blocked by the abandon-churn guard.
+   */
+  test('the auto-assigned title is still recognised as refused', () => {
+    expect(isRefusedMissionTitle('Distress: Wexler R1P-JL in Rasalgethi')).toBe(true)
+  })
+  test('and is therefore always droppable, whatever the churn count', () => {
+    expect(isAlwaysDroppable('Distress: Wexler R1P-JL in Rasalgethi')).toBe(true)
+  })
+  test('an ordinary distress call from someone else is not refused', () => {
+    expect(isRefusedMissionTitle('Distress: Halloran K2 in Bharani')).toBe(false)
+    expect(isAlwaysDroppable('Distress: Halloran K2 in Bharani')).toBe(false)
+  })
+  test('a Wexler contract that is not a rescue is not refused', () => {
+    expect(isRefusedMissionTitle('Wexler Freight: haul 40 steel_plate')).toBe(false)
   })
 })
