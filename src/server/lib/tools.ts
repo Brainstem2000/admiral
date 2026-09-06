@@ -2,6 +2,7 @@ import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
+import { scrubLiveState, scrubNotice } from './note-hygiene'
 import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
@@ -2865,20 +2866,29 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
       return `Credentials saved successfully for ${creds.username}.`
     }
     case 'update_todo': {
-      ctx.todo = String(args.content)
+      // See note-hygiene.ts: a note that records injected live state is stale by
+      // the next turn, and reconciling that self-inflicted contradiction is what
+      // consumed Morg'Thar's entire 2026-09-05.
+      const scrub = scrubLiveState(String(args.content))
+      ctx.todo = scrub.text
       updateProfile(ctx.profileId, { todo: ctx.todo })
-      ctx.log('system', 'TODO list updated')
-      return 'TODO list updated.'
+      ctx.log('system', scrub.removed.length
+        ? `TODO list updated (${scrub.removed.length} live-state line(s) stripped)`
+        : 'TODO list updated')
+      return 'TODO list updated.' + (scrub.removed.length ? scrubNotice(scrub.removed) : '')
     }
     case 'read_todo': {
       return ctx.todo || '(empty TODO list)'
     }
     case 'update_memory': {
-      ctx.memory = String(args.content)
+      const scrubM = scrubLiveState(String(args.content))
+      ctx.memory = scrubM.text
       updateProfile(ctx.profileId, { memory: ctx.memory })
       memoryDirtyFlags.set(ctx.profileId, true)
-      ctx.log('system', 'Memory updated')
-      return 'Memory updated.'
+      ctx.log('system', scrubM.removed.length
+        ? `Memory updated (${scrubM.removed.length} live-state line(s) stripped)`
+        : 'Memory updated')
+      return 'Memory updated.' + (scrubM.removed.length ? scrubNotice(scrubM.removed) : '')
     }
     case 'read_memory': {
       return ctx.memory || '(empty memory)'
