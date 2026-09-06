@@ -87,7 +87,13 @@ async function sweep(): Promise<void> {
     // framing ("CRITICAL STATE RECONCILIATION") against 1-2% for fleetmates on
     // the SAME model — a style loop through his own TODO, which he rewrites and
     // is then re-injected. Costs output tokens every turn and buries real alarms.
-    const total = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND type='llm_thought' AND timestamp>?`, p.id, wider)
+    // Own thoughts only. makeMacroNarrator logs "[mine_until_full 59 mines, ...]"
+    // as an llm_thought, so Bob Comet showed 71 "thoughts" against 3 tool calls
+    // while inside one mine_until_full that filled 1,319 of 1,550 cargo. Counting
+    // those made the fleet's best miner look paralysed.
+    const total = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND type='llm_thought'
+      AND summary NOT LIKE '[%' AND timestamp>?`, p.id, wider)
+    const calls = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND type='tool_call' AND timestamp>?`, p.id, wider)
     if (total >= 20) {
       // Match the SHAPE, not a word list. The first version keyed on
       // CRITICAL/RECONCIL/🚨 and Grit Vane simply moved to
@@ -160,9 +166,21 @@ async function sweep(): Promise<void> {
         if (v > worst) { worst = v; worstText = k }
       }
       const pct = Math.round((100 * worst) / total)
+      // FIFTH REVISION. A ritual banner on an agent who is ACTING is verbosity,
+      // not paralysis, and calling it a "loop" sends the Admiral to the wrong
+      // agent. Measured 2026-09-06 02:20: Grit Vane repeated a 42-char header on
+      // 19 of 59 thoughts while running 36 tool calls and closing 27 turns —
+      // "DONE: Cycle 8 sold titanium+iron (7,420cr)". He was the alarm's target
+      // and one of the fleet's best earners at the time.
+      //
+      // What the alarm is actually FOR is an agent narrating instead of doing.
+      // So it now requires both: the repeated banner AND fewer than half as many
+      // actions as thoughts. Under that rule no agent in the fleet fired at
+      // 02:20, which is the correct answer — every one of them was working.
+      const narratingNotDoing = calls * 2 < total
       announce(`banner:${p.id}`,
-        `[fleet] ${n}: same banner repeated ${worst}/${total} thoughts in 25min (${pct}%) — ritual restatement loop: "${worstText.slice(0, 48)}"`,
-        worst >= 8 && pct >= 25)
+        `[fleet] ${n}: ${worst}/${total} thoughts open with the same banner and only ${calls} actions in 25min — narrating instead of acting: "${worstText.slice(0, 48)}"`,
+        worst >= 8 && pct >= 25 && narratingNotDoing)
     }
   }
   db.close()

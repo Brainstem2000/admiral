@@ -160,3 +160,46 @@ describe('v4: a short heading is a label, not a ritual', () => {
     expect(counts('**a long and distinctive analysis heading**', 2, 30)).toBe(false)
   })
 })
+
+
+describe('v5: a banner on a working agent is verbosity, not paralysis', () => {
+  /**
+   * Mirrors the final rule in scripts/fleet-health.ts. `total` counts only the
+   * agent's OWN thoughts — macro-narrator lines are prefixed "[" and excluded,
+   * because Bob Comet showed 71 "thoughts" against 3 tool calls while inside a
+   * single mine_until_full that filled 1,319 of 1,550 cargo. Counting narration
+   * made the fleet's best miner read as paralysed.
+   */
+  const fires = (banner: string, worst: number, total: number, calls: number) =>
+    banner.length >= MIN_BANNER_CHARS && worst >= 8 &&
+    Math.round((100 * worst) / total) >= 25 && calls * 2 < total
+
+  const GRIT = '**current state verified (authoritative):**'
+
+  test("Grit's real case stays quiet: 19/59 banners but 36 actions", () => {
+    expect(fires(GRIT, 19, 59, 36)).toBe(false)
+  })
+
+  test('the same banner on an agent who has stopped acting DOES fire', () => {
+    expect(fires(GRIT, 19, 59, 4)).toBe(true)
+  })
+
+  test('the threshold is half as many actions as thoughts', () => {
+    expect(fires(GRIT, 19, 59, 29)).toBe(true)    // 29*2 = 58 < 59
+    expect(fires(GRIT, 19, 59, 30)).toBe(false)   // 30*2 = 60 >= 59
+  })
+
+  test("Bob's macro narration must not count as thinking", () => {
+    // 3 own thoughts + 66 narrator echoes. With echoes counted he looks stuck;
+    // with them excluded there are too few thoughts to judge at all.
+    const ownThoughts = 3
+    expect(ownThoughts >= 20).toBe(false)          // below the floor: no alarm either way
+    const withEchoes = 69
+    expect(fires(GRIT, 19, withEchoes, 3)).toBe(true)   // what the old counting would have done
+  })
+
+  test('acting hard while writing plainly is silent on every axis', () => {
+    expect(fires('short', 19, 59, 4)).toBe(false)       // banner too short
+    expect(fires(GRIT, 2, 59, 4)).toBe(false)           // not repeated
+  })
+})
