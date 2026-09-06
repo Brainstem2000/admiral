@@ -40,7 +40,15 @@ async function factionAt(stationId: string): Promise<Map<string, number>> {
     body: JSON.stringify({ command: 'view_faction_storage', args: { station_id: stationId }, silent: true }),
     signal: AbortSignal.timeout(90_000),
   })
-  const data = await res.json() as unknown
+  const full = await res.json() as Record<string, unknown>
+  // Scope to the STORAGE LISTING only. A game response also carries
+  // `notifications` and `session`, and those blocks can hold cargo payloads —
+  // walking the whole envelope counted whatever deposit notification happened
+  // to be pending as faction stock, so this reported fluorine_gas at 87 when
+  // faction storage held 44. An instrument that is intermittently high is
+  // worse than one that is consistently wrong: it looks like progress.
+  const sc = (full.structuredContent ?? full.result ?? full) as Record<string, unknown>
+  const data: unknown = (sc && typeof sc === 'object' && 'items' in sc) ? sc.items : sc
   const walk = (o: unknown): void => {
     if (Array.isArray(o)) { for (const v of o) walk(v); return }
     if (o && typeof o === 'object') {
