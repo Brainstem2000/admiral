@@ -48,6 +48,23 @@ const mkt = await feed('https://game.spacemolt.com/api/market', 'market.json', 1
 const db = new Database('data/admiral.db', { readonly: true })
 
 const ships: any[] = Array.isArray(cat.ships) ? cat.ships : Object.values(cat.ships)
+const allItems: any[] = Array.isArray(cat.items) ? cat.items : Object.values(cat.items ?? {})
+const itemById = new Map<string, any>(allItems.filter(i => i?.id).map(i => [i.id, i]))
+/** How a raw is actually pulled out of the ground. Getting this wrong sent two
+ *  miners to a uranium belt with Mining Laser IIIs: uranium_ore is
+ *  `extracted_by: rad` and needs a Rad Harvester, a different utility module
+ *  entirely. "Mine it" is not an instruction until you know which tool. */
+const EXTRACTOR: Record<string, string> = {
+  rad: 'rad_harvester_*  (radioactive deposits — a mining laser will NOT pull this)',
+  gas: 'gas_harvester_*  (gas clouds)',
+  ice: 'ice_harvester_*  (ice fields)',
+  mining: 'mining_laser_*  (asteroid belts)',
+}
+function howToGet(id: string): string {
+  const by = itemById.get(id)?.extracted_by
+  if (by) return `${by} — fit ${EXTRACTOR[by] ?? by + '_harvester'}`
+  return 'not extractable — hunted, salvaged or a drop'
+}
 const recipes: any[] = Array.isArray(cat.recipes) ? cat.recipes : Object.values(cat.recipes)
 
 const outputsOf = (r: any): string[] =>
@@ -150,7 +167,10 @@ for (const [id, q] of [...buy].sort((a, b) => ask(b[0]) * b[1] - ask(a[0]) * a[1
 }
 console.log(`  ${'subtotal'.padEnd(24)} ${' '.repeat(5)}  ${' '.repeat(8)} ${n(spend).padStart(9)}\n`)
 console.log('MINE / HUNT / GATHER (no seller at the needed quantity):')
-for (const [id, q] of [...mine].sort((a, b) => b[1] - a[1]))
-  console.log(`  ${id.padEnd(24)} ${String(q).padStart(5)}   ${ask(id) ? `ask ${n(ask(id))} but depth only ${depth(id)}` : 'no ask anywhere'}`)
+for (const [id, q] of [...mine].sort((a, b) => b[1] - a[1])) {
+  const sup2 = offers(id).sort((a, b) => a.best_ask - b.best_ask)[0]
+  console.log(`  ${id.padEnd(24)} ${String(q).padStart(5)}   ${sup2 ? `best ask ${n(sup2.best_ask)} in ${sup2.empire} but depth only ${sup2.ask_quantity_at_best}` : 'no ask in any empire'}`)
+  console.log(`  ${' '.repeat(24)}         ${howToGet(id)}`)
+}
 console.log(`\nCRAFT (${make.size} steps, cheapest recipe chosen per item):`)
 for (const [id, m] of make) console.log(`  ${id.padEnd(24)} x${String(m.qty).padStart(4)}  via ${[...m.rids].join(' | ')}`)
