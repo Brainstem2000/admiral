@@ -1339,7 +1339,19 @@ export async function completeWithRetry(
       }
 
       const delay = RETRY_BASE_DELAY * Math.pow(2, attempt)
-      log('error', `LLM error (attempt ${attempt + 1}/${MAX_RETRIES}): ${lastError.message}`, JSON.stringify({
+      // Match the classification the give-up path already uses. An empty or
+      // overloaded response is transient — the caller logs the FINAL one as a
+      // benign 'system' note precisely so it does not "skew error-rate
+      // monitoring" — but every intermediate attempt was still written at
+      // 'error', which is the same pollution one layer up. On 2026-09-05 that
+      // put Vera Lane at 6 and Nova Reyes at 4 "errors" in half an hour and
+      // tripped the fleet-health alert twice, for a condition the harness
+      // itself had already decided was not a fault. A watcher that fires on
+      // known-benign retries teaches its reader to ignore it.
+      const transient = /empty response|overloaded/i.test(lastError.message)
+      log(transient ? 'system' : 'error',
+        `LLM ${transient ? 'transient' : 'error'} (attempt ${attempt + 1}/${MAX_RETRIES}): ${lastError.message}`,
+        JSON.stringify({
         model: { name: (model as any).name || 'unknown', contextWindow: model.contextWindow },
         messageCount: context.messages.length,
         estimatedTokens: totalMessageTokens(context.messages, cpt),
