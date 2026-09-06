@@ -551,13 +551,31 @@ export class LedgerCollector {
   }
 
   /** Wallet balance when the result echoes it. NOT vault/faction credits (those are pools, not the wallet). */
+  /** True when a payload's top-level `credits` belongs to the FACTION, not the player.
+   *
+   *  view_faction_storage answers with {"action":"view_faction_storage",
+   *  "credits":256300, "faction_id":..., "faction_name":"Stellar Alliance"} —
+   *  256,300 being the faction treasury. Reading that as a wallet made the
+   *  ledger think Morg'Thar's balance had fallen from 1.4M to 256,300, so it
+   *  booked a -1,143,949 residual to reconcile, then +1,143,791 back ten minutes
+   *  later on the next command that reported his real balance. Neither movement
+   *  happened. Fleet-wide this manufactured 31 rows and 2,193,600 of fictional
+   *  credit movement across seven agents. */
+  private static isFactionScoped(r: R): boolean {
+    return r.faction_id !== undefined || r.faction_tag !== undefined || r.faction_name !== undefined
+  }
+
   private static readBalance(r: R): number | null {
     const player = (r.player && typeof r.player === 'object') ? (r.player as R) : null
     // Top-level `credits` is the wallet in SpaceMolt responses (get_cargo, travel,
     // trade results); player.credits/wallet alone matched 0 of 10,535 live rows.
     // wallet_remaining is send_gift's name for the post-action wallet — last so it
     // can never shadow an authoritative read on results that carry both.
-    return (player ? num(player.credits) : null) ?? num(r.wallet) ?? num(r.credits) ?? num(r.wallet_remaining)
+    //
+    // `player.credits` stays trusted even on a faction payload: it is explicitly
+    // the player's. Only the ambiguous TOP-LEVEL `credits` is refused there.
+    const topLevelCredits = LedgerCollector.isFactionScoped(r) ? null : num(r.credits)
+    return (player ? num(player.credits) : null) ?? num(r.wallet) ?? topLevelCredits ?? num(r.wallet_remaining)
   }
 
   private static fillCounterparties(r: R): string | null {

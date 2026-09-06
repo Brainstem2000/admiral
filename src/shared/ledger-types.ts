@@ -17,6 +17,12 @@ export type LedgerKind =
   // refund landing during a top-up. Calling that "fuel" would have booked two
   // million credits of refunds as fuel spend.
   | 'coincident'
+  // A residual that never happened: the ledger read a balance that was not the
+  // player's wallet (view_faction_storage reports the FACTION treasury in a
+  // field called `credits`) and booked the difference, then booked it back.
+  // Kept rather than deleted — financial history gets correcting entries, never
+  // deletions — but excluded from spend analysis.
+  | 'phantom_balance'
   // Nothing to attribute it to at all — no command was recorded. Station rent
   // (auto-deducted ~every 17 min) lands here.
   | 'unattributed'
