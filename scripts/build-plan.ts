@@ -91,10 +91,45 @@ const supplier = (id: string, qty: number) =>
 const ask = (id: string) => offers(id).sort((a, b) => a.best_ask - b.best_ask)[0]?.best_ask ?? 0
 const depth = (id: string) => Math.max(0, ...offers(id).map(r => r.ask_quantity_at_best ?? 0))
 
-const stockQ = db.query('SELECT COALESCE(SUM(quantity),0) q FROM storage_inventory WHERE item_id = ?')
+// SCOPE. `SUM(quantity)` over the whole table answers "does the fleet own this
+// somewhere", which is NOT the question a build asks. Storage is per-agent AND
+// per-station: you can only withdraw YOUR goods at the station you are docked at.
+// Unscoped, this script reported the Juggernaut as "BUY subtotal 0" while the
+// agent tasked with building it held 0 of 180 circuit_board, 0 of 491 silicon_ore
+// and 24 of 6,902 fury_crystal — every one of them someone else's, most of them
+// belonging to agents who are docked and offline. The same summing error sent
+// Rook Vance to War Citadel for "13 free rad_harvester_i" he could not touch.
+//   --for <agent>      count only that agent's storage (name prefix, case-insensitive)
+//   --at <station_id>  count only that station
+// Default stays fleet-wide, which is the right frame for "can the fleet do this
+// at all" — but the header says which frame is in force, because a bare number
+// with no frame is how this went wrong every previous time.
+const argOf = (flag: string): string | null => {
+  const i = Bun.argv.indexOf(flag)
+  return i > 0 && Bun.argv[i + 1] ? Bun.argv[i + 1] : null
+}
+const forAgent = argOf('--for')
+const atStation = argOf('--at')
+
+let scopeProfileId: string | null = null
+let scopeAgentName: string | null = null
+if (forAgent) {
+  const row = db.query('SELECT id, name FROM profiles WHERE lower(name) LIKE ?')
+                .get(forAgent.toLowerCase() + '%') as any
+  if (!row) { console.error(`no such agent: ${forAgent}`); process.exit(1) }
+  scopeProfileId = row.id
+  scopeAgentName = row.name
+}
+
+const where = ['item_id = ?']
+const bindExtra: string[] = []
+if (scopeProfileId) { where.push('profile_id = ?'); bindExtra.push(scopeProfileId) }
+if (atStation) { where.push('station_id = ?'); bindExtra.push(atStation) }
+const stockQ = db.query(
+  `SELECT COALESCE(SUM(quantity),0) q FROM storage_inventory WHERE ${where.join(' AND ')}`)
 const stockCache = new Map<string, number>()
 const stock = (id: string) => {
-  if (!stockCache.has(id)) stockCache.set(id, (stockQ.get(id) as any).q as number)
+  if (!stockCache.has(id)) stockCache.set(id, (stockQ.get(id, ...bindExtra) as any).q as number)
   return stockCache.get(id)!
 }
 
@@ -151,12 +186,21 @@ function plan(id: string, qty: number, seen = new Set<string>()) {
   for (const i of (best.inputs ?? best.materials ?? [])) plan(i.item_id, i.quantity * runs, next)
 }
 
-const hull = ships.find(s => s.id === Bun.argv[2])
-if (!hull) { console.error(`no such hull: ${Bun.argv[2]}`); process.exit(1) }
+const hullArg = Bun.argv.slice(2).find(a => !a.startsWith('--')
+  && a !== forAgent && a !== atStation)
+const hull = ships.find(s => s.id === hullArg)
+if (!hull) { console.error(`no such hull: ${hullArg}`); process.exit(1) }
 for (const m of hull.build_materials) plan(m.item_id, m.quantity)
 
 const n = (x: number) => Math.round(x).toLocaleString('en-US')
-console.log(`=== ${hull.name} — shipyard tier ${hull.shipyard_tier}, min crew ${hull.minimum_crew} ===\n`)
+const scopeLabel = scopeAgentName
+  ? `stock counted: ${scopeAgentName} only${atStation ? ` at ${atStation}` : ''}`
+  : atStation
+    ? `stock counted: all agents at ${atStation}`
+    : 'stock counted: FLEET-WIDE across every agent and station — '
+      + 'a build needs it in ONE hold at ONE yard, so re-run with --for <agent> before tasking anyone'
+console.log(`=== ${hull.name} — shipyard tier ${hull.shipyard_tier}, min crew ${hull.minimum_crew} ===`)
+console.log(`    ${scopeLabel}\n`)
 let spend = 0
 console.log('BUY (market depth actually covers it):')
 for (const [id, q] of [...buy].sort((a, b) => ask(b[0]) * b[1] - ask(a[0]) * a[1])) {
