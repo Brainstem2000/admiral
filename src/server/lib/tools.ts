@@ -8,7 +8,7 @@ import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getF
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
-import { invalidateBriefingCache, collectTargets } from './briefing'
+import { invalidateBriefingCache, collectTargets, hopsFrom } from './briefing'
 import { resolveAgentRole } from './role'
 import { safeTruncate } from './text-safe'
 import { codexLookup, codexChain, priceAdvisory, codexGet } from './catalog'
@@ -3305,6 +3305,32 @@ function departureWaiver(ctx: ToolContext): string | null {
   return null
 }
 
+/**
+ * Is `target` a leg on the way to `committed` — i.e. strictly closer to it than
+ * where the agent is standing now?
+ *
+ * Without this the gate blocked agents from reaching their OWN declared
+ * destination. On 2026-09-06 Rook Vance committed to krynn to collect a rad
+ * harvester, and every leg of the route there — propus, the_telescope — was
+ * refused as "re-routing to X without having done anything there". He worked it
+ * out himself ("the macro is fixated on my original krynn destination") and
+ * burned eight refusals trying to get around it. `checkRawJumpCommit` already
+ * had the equivalent guard (it only refuses when you are standing IN the
+ * committed system); the goto_system path never got one.
+ */
+function movesTowardCommitment(ctx: ToolContext, target: string, committed: string): boolean {
+  if (!target || !committed || target === committed) return false
+  const here = currentLocation(ctx).systemId
+  if (!here) return false
+  try {
+    const d = hopsFrom(committed, 12)
+    const dHere = d.get(here)
+    const dTarget = d.get(target)
+    if (dHere === undefined || dTarget === undefined) return false   // unknown graph: gate stands
+    return dTarget < dHere
+  } catch { return false }
+}
+
 /** Returns a refusal string when the agent is re-routing without having worked
  *  the system it just travelled to, or null to allow. */
 function checkDestinationCommit(ctx: ToolContext, target: string): string | null {
@@ -3314,6 +3340,10 @@ function checkDestinationCommit(ctx: ToolContext, target: string): string | null
   const prev = lastDestinations.get(profileId)
 
   if (prev && prev.system !== target && !prev.workedSince && now - prev.at < DESTINATION_COMMIT_MS) {
+    // An en-route leg is not a diversion. Return WITHOUT rewriting the
+    // commitment, so it keeps pointing at the final destination rather than
+    // resetting to each waypoint (which would make the gate meaningless).
+    if (movesTowardCommitment(ctx, target, prev.system)) return null
     const waiver = departureWaiver(ctx)
     if (!waiver) return destinationRefusal(prev.system, target, now - prev.at)
     ctx.log('system', `Destination gate waived (${waiver}) — leaving ${prev.system} for ${target}`)
