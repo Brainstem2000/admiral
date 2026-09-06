@@ -111,3 +111,73 @@ MAYDAY: stranded with 4/120 fuel. Accepted.`
     expect(acceptSideEffect('--- Emergency Rations [94aaf] (delivery) --- accepted', {})).toBeNull()
   })
 })
+
+/**
+ * Abandon-churn: dropping one bad contract is judgement, dropping every contract
+ * is a loop.
+ *
+ * On 2026-09-05 Morg'Thar accepted 8 missions and abandoned 8 in three hours,
+ * completing none. His Crimson reputation sat on its baseline of 20 the whole
+ * time, hours after being told to raise it, and he made 22 route calls in the
+ * final hour. Four nudges and two directive rewrites did not change it, so the
+ * fourth abandon inside an hour is refused.
+ *
+ * The window rolls rather than latching: this is a floor on commitment, not a
+ * ban. He was right to drop a delivery whose pickup was 24 hops away, and that
+ * judgement stays available.
+ */
+import { refuseAbandon, noteAbandon, recentAbandons, resetAbandons } from '../src/server/lib/mission-guard'
+
+describe('abandon-churn guard', () => {
+  const P = 'morg-test'
+  const T0 = 1_757_000_000_000
+
+  test('the first three drops are allowed — that is judgement', () => {
+    resetAbandons(P)
+    for (let i = 0; i < 3; i++) {
+      expect(refuseAbandon(P, T0 + i * 1000)).toBeNull()
+      noteAbandon(P, T0 + i * 1000)
+    }
+    expect(recentAbandons(P, T0 + 3000)).toBe(3)
+  })
+
+  test('the fourth inside the hour is refused', () => {
+    resetAbandons(P)
+    for (let i = 0; i < 3; i++) noteAbandon(P, T0 + i * 1000)
+    const r = refuseAbandon(P, T0 + 4000)
+    expect(r).toContain('BLOCKED by Admiral doctrine')
+    expect(r).toContain('abandoned 3 missions')
+  })
+
+  test('it tells the agent what to do instead of only saying no', () => {
+    resetAbandons(P)
+    for (let i = 0; i < 3; i++) noteAbandon(P, T0 + i * 1000)
+    const r = refuseAbandon(P, T0 + 4000)!
+    expect(r).toContain('FINISH A CONTRACT BEFORE DROPPING ANOTHER')
+    expect(r).toContain('faction chat')
+  })
+
+  test('the window rolls — an hour later dropping is allowed again', () => {
+    resetAbandons(P)
+    for (let i = 0; i < 3; i++) noteAbandon(P, T0 + i * 1000)
+    expect(refuseAbandon(P, T0 + 61 * 60_000)).toBeNull()
+  })
+
+  test('one agent churning never restricts another', () => {
+    resetAbandons()
+    for (let i = 0; i < 5; i++) noteAbandon('morg', T0 + i * 1000)
+    expect(refuseAbandon('morg', T0 + 6000)).toBeTruthy()
+    expect(refuseAbandon('nova', T0 + 6000)).toBeNull()
+  })
+
+  test("Morg's actual rate — 8 in three hours — is caught", () => {
+    resetAbandons(P)
+    let blocked = 0
+    for (let i = 0; i < 8; i++) {
+      const t = T0 + i * 5 * 60_000          // one every five minutes
+      if (refuseAbandon(P, t)) blocked++; else noteAbandon(P, t)
+    }
+    expect(blocked).toBeGreaterThan(0)
+    expect(recentAbandons(P, T0 + 40 * 60_000)).toBe(3)
+  })
+})

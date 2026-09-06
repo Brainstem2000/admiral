@@ -79,3 +79,52 @@ export function refusalText(title: string): string {
     `Crimson reputation as well as credits, and the reward line tells you which.`
   )
 }
+
+/**
+ * Abandon-churn guard.
+ *
+ * Dropping one contract is a judgement call — Morg'Thar was right to drop a
+ * delivery whose pickup was 24 hops away. Dropping eight in three hours while
+ * completing none is not judgement, it is a loop: accept, re-plan, abandon,
+ * re-route. He did exactly that on 2026-09-05 and earned nothing, his Crimson
+ * reputation still sitting on its baseline of 20 hours after being told to raise
+ * it.
+ *
+ * Prose did not hold it and neither did four nudges, so the fourth abandon
+ * inside an hour is refused. The agent is told to finish something first. This
+ * is a floor on commitment, not a ban: the window rolls, so completing work or
+ * simply waiting restores the ability to drop a genuinely bad contract.
+ */
+const abandons = new Map<string, number[]>()
+const ABANDON_WINDOW_MS = 60 * 60_000
+const ABANDON_LIMIT = 3
+
+export function noteAbandon(profileId: string, now = Date.now()): void {
+  const arr = (abandons.get(profileId) ?? []).filter(t => now - t < ABANDON_WINDOW_MS)
+  arr.push(now)
+  abandons.set(profileId, arr)
+}
+
+export function recentAbandons(profileId: string, now = Date.now()): number {
+  return (abandons.get(profileId) ?? []).filter(t => now - t < ABANDON_WINDOW_MS).length
+}
+
+/** Refusal text when an agent is churning through contracts, or null to allow. */
+export function refuseAbandon(profileId: string, now = Date.now()): string | null {
+  const n = recentAbandons(profileId, now)
+  if (n < ABANDON_LIMIT) return null
+  return (
+    `BLOCKED by Admiral doctrine: you have abandoned ${n} missions in the last hour and completed none. ` +
+    `Dropping one bad contract is judgement; dropping every contract is a loop — you accept, re-plan, ` +
+    `abandon and re-route, and finish nothing.\n\n` +
+    `FINISH A CONTRACT BEFORE DROPPING ANOTHER. Pick the one you are closest to completing, fly its ` +
+    `route without re-evaluating alternatives, and complete it. If it is genuinely impossible — the ` +
+    `target does not exist, or the route leaves safe space — say so in faction chat with the reason, ` +
+    `and work the one you can finish instead. This limit lifts as the hour rolls forward.`
+  )
+}
+
+/** Test seam: forget a profile's abandon history. */
+export function resetAbandons(profileId?: string): void {
+  if (profileId) abandons.delete(profileId); else abandons.clear()
+}

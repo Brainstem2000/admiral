@@ -36,7 +36,7 @@ const WORK_COMMANDS = new Set([
   'deposit', 'withdraw', 'deposit_items', 'withdraw_items',
   'faction_deposit_items', 'faction_withdraw_items', 'send_gift',
   'refuel', 'repair', 'craft', 'reload', 'install_mod', 'uninstall_mod',
-  'accept_mission', 'complete_mission', 'get_missions',
+  'accept_mission', 'complete_mission',
 ])
 
 function countsAsWork(command: string): boolean {
@@ -108,6 +108,23 @@ describe('macros credit work too — they run on a different code path', () => {
 
   test('every macro except goto_system credits work', () => {
     expect(MACROS.filter(creditsWork).sort()).toEqual(['hunt_here', 'mine_until_full', 'sell_cargo'])
+  })
+})
+
+describe('reading a mission board is not working the system', () => {
+  // The step an agent takes immediately before leaving. Counting it cleared the
+  // destination commitment at every stop, so Morg'Thar could dock, read, and
+  // re-route indefinitely — 8 accepted, 8 abandoned, 0 completed in three hours.
+  test('get_missions does not clear the destination commitment', () => {
+    expect(countsAsWork('get_missions')).toBe(false)
+  })
+
+  test('but accepting a contract does', () => {
+    expect(countsAsWork('accept_mission')).toBe(true)
+  })
+
+  test('and completing one certainly does', () => {
+    expect(countsAsWork('complete_mission')).toBe(true)
   })
 })
 

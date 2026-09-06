@@ -3,7 +3,7 @@ import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
 import { scrubLiveState, scrubNotice } from './note-hygiene'
-import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor } from './mission-guard'
+import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor, refuseAbandon, noteAbandon } from './mission-guard'
 import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
@@ -1303,6 +1303,13 @@ export function checkDoctrineGuards(
     if (bare === 'accept_mission' || bare.endsWith('_accept_mission')) {
       const refusal = refuseAccept(commandArgs)
       if (refusal) { ctx.log('tool_result', refusal); return refusal }
+    }
+    // Dropping one contract is judgement; dropping eight in three hours while
+    // completing none is a loop. See mission-guard.ts.
+    if (bare === 'abandon_mission' || bare.endsWith('_abandon_mission')) {
+      const churn = refuseAbandon(ctx.profileId)
+      if (churn) { ctx.log('tool_result', churn); return churn }
+      noteAbandon(ctx.profileId)
     }
     if ((bare === 'jettison' || bare.endsWith('_jettison')) && getPreference('jettison_gate') !== 'off') {
       const items = Array.isArray(commandArgs?.items)
@@ -3243,8 +3250,15 @@ const WORK_COMMANDS = new Set([
   'faction_deposit_items', 'faction_withdraw_items', 'send_gift',
   // station services
   'refuel', 'repair', 'craft', 'reload', 'install_mod', 'uninstall_mod',
-  // missions
-  'accept_mission', 'complete_mission', 'get_missions',
+  // missions — ACCEPTING or COMPLETING one is work. READING the board is not:
+  // that is the reconnaissance an agent does immediately before leaving, and
+  // counting it cleared the destination commitment every time. Morg'Thar spent
+  // 2026-09-05 docking, reading a board, and re-routing — 8 missions accepted,
+  // 8 abandoned, 0 completed, 22 route calls in one hour — and the gate never
+  // fired because get_missions had marked every stop as worked. Adding it was
+  // my own change earlier that day; it made the gate toothless for the exact
+  // behaviour the gate exists to stop.
+  'accept_mission', 'complete_mission',
 ])
 
 function noteDestinationWork(profileId: string, command: string): void {
