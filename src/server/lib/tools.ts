@@ -2592,7 +2592,7 @@ export async function executeTool(
       } catch { /* never break game execution */ }
       // Invalidate briefing cache — action changed game state; trigger async refresh
       invalidateBriefingCache(ctx.profileId, ctx.connection)
-      return truncateResult(pendingResult, deepBare) + (fleetRecord ? `\n\n${fleetRecord}` : '')
+      return truncateResult(pendingResult, deepBare) + missionIndexFor(pendingResult, resultData, deepBare) + (fleetRecord ? `\n\n${fleetRecord}` : '')
     }
 
     // Passively collect fleet intel from game results (resultData: see note above —
@@ -2682,7 +2682,7 @@ export async function executeTool(
     const topOff = !isQuery && deepBare === 'dock' ? await autoTopOffAfterDock(ctx) : ''
 
     // The fleet record rides OUTSIDE the cap so a long map cannot cut it.
-    return truncateResult(result, deepBare) + topOff + (fleetRecord ? `\n\n${fleetRecord}` : '')
+    return truncateResult(result, deepBare) + missionIndexFor(result, resultData, deepBare) + topOff + (fleetRecord ? `\n\n${fleetRecord}` : '')
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     const errMsg = `Error executing ${command}: ${msg}`
@@ -4391,6 +4391,39 @@ const RESULT_CHAR_CAPS: Record<string, number> = {
 function truncateResult(text: string, deepCommand?: string): string {
   const cap = (deepCommand && RESULT_CHAR_CAPS[deepCommand]) || MAX_RESULT_CHARS
   return safeTruncate(text, cap, '\n\n... (truncated)')
+}
+
+/**
+ * A truncated mission board hides the ids of everything past the cut, and a
+ * mission you cannot name is a mission you cannot accept.
+ *
+ * The War Citadel board renders at 14,037 characters against a 12,000 cap, so
+ * its tail is dropped silently. Morg'Thar hit this at The Crucible Garrison on
+ * 2026-09-05: he could see "Shipyard Supply: railgun_ii [delivery] 26785cr" in
+ * the summary and tried four different spellings of its id, every one answered
+ * mission_not_found, because the detailed entry carrying the real id had been
+ * cut off. He reported it as a blocker and moved on — correctly — but a 26,785cr
+ * crimson-to-crimson delivery was sitting there unreachable.
+ *
+ * structuredContent carries every mission with its id regardless of how long the
+ * text is, so when the text is cut, append a compact index built from it. The
+ * agent then has a name for everything on the board.
+ */
+function missionIndexFor(text: string, resultData: unknown, deepCommand?: string): string {
+  if (deepCommand !== 'get_missions' && deepCommand !== 'get_active_missions') return ''
+  const cap = (deepCommand && RESULT_CHAR_CAPS[deepCommand]) || MAX_RESULT_CHARS
+  if (text.length <= cap) return ''          // nothing was lost
+  const d = resultData as Record<string, unknown> | undefined
+  const arr = (d?.missions ?? d?.available ?? d?.active) as Array<Record<string, unknown>> | undefined
+  if (!Array.isArray(arr) || arr.length === 0) return ''
+  const lines = arr.map(m => {
+    const id = String(m.mission_id ?? m.id ?? m.template_id ?? '').trim()
+    const title = String(m.title ?? m.name ?? '').trim()
+    return id ? `  ${id}  ${title}`.trimEnd() : ''
+  }).filter(Boolean)
+  if (!lines.length) return ''
+  return `\n\nEVERY MISSION ID ON THIS BOARD (the listing above was cut at ${cap} characters,`
+    + ` so some entries lost their detail — accept by the id below):\n${lines.join('\n')}`
 }
 
 function truncate(text: string, max: number): string {
