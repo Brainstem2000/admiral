@@ -56,11 +56,23 @@ const yieldOf = (r: any, id: string): number =>
   r.output_quantity ?? (r.outputs ?? []).find((o: any) => o.item_id === id)?.quantity ?? 1
 const recipesFor = (id: string) => recipes.filter(r => outputsOf(r).includes(id))
 
-const rows = Array.isArray(mkt) ? mkt : (mkt.items ?? Object.values(mkt))
-const M = new Map<string, any>()
-for (const r of rows as any[]) if (r?.item_id ?? r?.id) M.set(r.item_id ?? r.id, r)
-const depth = (id: string) => M.get(id)?.ask_quantity_at_best ?? 0
-const ask = (id: string) => M.get(id)?.best_ask ?? 0
+// The feed carries ONE ROW PER EMPIRE and prices differ enormously between them
+// (power_cell: 4,583 in crimson, 30,900 in nebula). Collapsing by last-write picked
+// an arbitrary empire and quoted power_cell at 8,120. Keep the cheapest row that
+// actually has depth, and report which empire it is in.
+const rows: any[] = Array.isArray(mkt) ? mkt : (mkt.items ?? Object.values(mkt))
+const byItem = new Map<string, any[]>()
+for (const r of rows) {
+  const id = r?.item_id ?? r?.id
+  if (id) byItem.set(id, [...(byItem.get(id) ?? []), r])
+}
+const offers = (id: string) => (byItem.get(id) ?? []).filter(r => r.best_ask > 0)
+/** Cheapest empire whose best-ask depth covers `qty`, or null. */
+const supplier = (id: string, qty: number) =>
+  offers(id).filter(r => (r.ask_quantity_at_best ?? 0) >= qty)
+            .sort((a, b) => a.best_ask - b.best_ask)[0] ?? null
+const ask = (id: string) => offers(id).sort((a, b) => a.best_ask - b.best_ask)[0]?.best_ask ?? 0
+const depth = (id: string) => Math.max(0, ...offers(id).map(r => r.ask_quantity_at_best ?? 0))
 
 const stockQ = db.query('SELECT COALESCE(SUM(quantity),0) q FROM storage_inventory WHERE item_id = ?')
 const stockCache = new Map<string, number>()
@@ -73,37 +85,44 @@ const stock = (id: string) => {
 function cost(id: string, qty: number, seen = new Set<string>()): number {
   const net = Math.max(0, qty - stock(id))
   if (net === 0) return 0
-  if (ask(id) && depth(id) >= net) return ask(id) * net          // buyable outright
-  if (seen.has(id)) return Infinity                              // recipe cycle (wrap/unwrap): never choosable
+  // Buying COMPETES with crafting — it does not pre-empt it. Preferring a
+  // purchase the moment depth allowed bought fury_alloy x96 for 1,920,000
+  // while 6,270 fury_crystal sat in storage and the craft cost nothing.
+  const sup = supplier(id, net)
+  const buyCost = sup ? sup.best_ask * net : Infinity
+  if (seen.has(id)) return buyCost                               // recipe cycle: only a purchase escapes it
   const rs = recipesFor(id)
-  if (!rs.length) return net * 5_000                             // must be mined/hunted: heavy but finite
   const next = new Set(seen).add(id)
-  return Math.min(...rs.map(r => {
+  // An item with NO recipe is a raw: mineable, so give it a heavy but finite
+  // price. An item whose every recipe is cyclic is NOT mineable and must stay
+  // Infinity — collapsing that to the same penalty let wrap/unwrap loops price
+  // at 5,000/unit and beat the real chain (breed_plutonium).
+  if (!rs.length) return Math.min(buyCost, net * 5_000)
+  const craftCost = Math.min(...rs.map(r => {
     const runs = Math.ceil(net / yieldOf(r, id))
     return (r.inputs ?? r.materials ?? []).reduce(
       (s: number, i: any) => s + cost(i.item_id, i.quantity * runs, next), 0)
   }))
+  return Math.min(buyCost, craftCost)
 }
 
 const buy = new Map<string, number>(), mine = new Map<string, number>(), make = new Map<string, string>()
 function plan(id: string, qty: number, seen = new Set<string>()) {
   const net = Math.max(0, qty - stock(id))
   if (net === 0) return
-  if (ask(id) && depth(id) >= net) { buy.set(id, (buy.get(id) ?? 0) + net); return }
-  if (seen.has(id)) { mine.set(id, (mine.get(id) ?? 0) + net); return }
-  const rs = recipesFor(id).filter(r => Number.isFinite(
-    (r.inputs ?? r.materials ?? []).reduce((s: number, i: any) =>
-      s + cost(i.item_id, i.quantity * Math.ceil(net / yieldOf(r, id)), new Set(seen).add(id)), 0)))
-  if (!rs.length) { mine.set(id, (mine.get(id) ?? 0) + net); return }
+  const sup = supplier(id, net)
+  const buyCost = sup ? sup.best_ask * net : Infinity
   const next = new Set(seen).add(id)
-  const best = rs.reduce((a, b) => {
-    const c = (r: any) => {
-      const runs = Math.ceil(net / yieldOf(r, id))
-      return (r.inputs ?? r.materials ?? []).reduce(
-        (s: number, i: any) => s + cost(i.item_id, i.quantity * runs, next), 0)
-    }
-    return c(a) <= c(b) ? a : b
-  })
+  const priced = (seen.has(id) ? [] : recipesFor(id)).map(r => ({
+    r,
+    c: (r.inputs ?? r.materials ?? []).reduce((s: number, i: any) =>
+      s + cost(i.item_id, i.quantity * Math.ceil(net / yieldOf(r, id)), next), 0),
+  })).filter(x => Number.isFinite(x.c)).sort((a, b) => a.c - b.c)
+  if (!priced.length || priced[0].c > buyCost) {
+    if (sup) { buy.set(id, (buy.get(id) ?? 0) + net); return }
+    mine.set(id, (mine.get(id) ?? 0) + net); return
+  }
+  const best = priced[0].r
   // An item reached down two branches is planned twice with different `seen` sets,
   // so it can legitimately resolve via different recipes. Record every one — an
   // earlier version kept only the last write and displayed `armor_plate via
@@ -124,8 +143,10 @@ console.log(`=== ${hull.name} — shipyard tier ${hull.shipyard_tier}, min crew 
 let spend = 0
 console.log('BUY (market depth actually covers it):')
 for (const [id, q] of [...buy].sort((a, b) => ask(b[0]) * b[1] - ask(a[0]) * a[1])) {
-  spend += ask(id) * q
-  console.log(`  ${id.padEnd(24)} ${String(q).padStart(5)} @${n(ask(id)).padStart(7)} = ${n(ask(id) * q).padStart(9)}  (depth ${depth(id)})`)
+  const sup = supplier(id, q) ?? offers(id).sort((a, b) => a.best_ask - b.best_ask)[0]
+  const px = sup?.best_ask ?? 0
+  spend += px * q
+  console.log(`  ${id.padEnd(24)} ${String(q).padStart(5)} @${n(px).padStart(7)} = ${n(px * q).padStart(9)}  in ${sup?.empire ?? '?'} (depth ${sup?.ask_quantity_at_best ?? 0})`)
 }
 console.log(`  ${'subtotal'.padEnd(24)} ${' '.repeat(5)}  ${' '.repeat(8)} ${n(spend).padStart(9)}\n`)
 console.log('MINE / HUNT / GATHER (no seller at the needed quantity):')
