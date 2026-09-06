@@ -12,6 +12,7 @@ import { resolveAgentRole, renderPromptForRole, type AgentRole } from './role'
 import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
+import { isCodeDefect } from './swallow'
 import { allTools, toolsForRole, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest, reputationLockedSystemIds } from './tools'
 import { directiveForbidsSystem } from './directive-rules'
 import { runAgentTurn, VOLATILE_STATE_HEADER, VOLATILE_STATE_END, type CompactionState } from './loop'
@@ -649,7 +650,17 @@ export class Agent {
       } catch (err) {
         if (!this.running) break
         if (this.restartRequested) continue
-        this.log('error', `Turn error: ${err instanceof Error ? err.message : String(err)}`)
+        // Record the STACK. Twenty-nine turns died to `ctx is not defined`
+        // across three agents over two days and every one of them logged a bare
+        // one-line message, so the only way to find the site was to re-read the
+        // file. A defect in our own code is also called out by name: it is not
+        // the game misbehaving, and it will not fix itself on the next turn.
+        this.log(
+          'error',
+          `Turn error: ${err instanceof Error ? err.message : String(err)}`
+            + (isCodeDefect(err) ? '  [ADMIRAL DEFECT — bug in our code, not the game]' : ''),
+          err instanceof Error ? (err.stack ?? err.message) : String(err),
+        )
         // Still count down safe dock on errors so timeout isn't bypassed
         if (this.pendingSafeDock) {
           this.safeDockTurnsRemaining--

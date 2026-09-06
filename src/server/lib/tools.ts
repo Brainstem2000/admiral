@@ -1276,7 +1276,7 @@ export function checkDoctrineGuards(
     const bare = command.replace(/^spacemolt_/, '').replace(/^ship_/, '')
     if (bare === 'commission_ship' && getPreference('duplicate_commission_gate') !== 'off') {
       const shipClass = String(commandArgs?.ship_class ?? commandArgs?.id ?? '').trim().toLowerCase()
-      const prior = (shipCommissions.get(ctx.profileId) ?? [])
+      const prior = (shipCommissions.get(profileId) ?? [])
         .filter(c => Date.now() - c.at < DUPLICATE_COMMISSION_WINDOW_MS)
       const dup = prior.find(c => c.shipClass === shipClass)
       if (shipClass && dup) {
@@ -1302,14 +1302,14 @@ export function checkDoctrineGuards(
     // because a nudge saying so was read, acknowledged and skipped.
     if (bare === 'accept_mission' || bare.endsWith('_accept_mission')) {
       const refusal = refuseAccept(commandArgs)
-      if (refusal) { ctx.log('tool_result', refusal); return refusal }
+      if (refusal) return refusal
     }
     // Dropping one contract is judgement; dropping eight in three hours while
     // completing none is a loop. See mission-guard.ts.
     if (bare === 'abandon_mission' || bare.endsWith('_abandon_mission')) {
-      const churn = refuseAbandon(ctx.profileId)
-      if (churn) { ctx.log('tool_result', churn); return churn }
-      noteAbandon(ctx.profileId)
+      const churn = refuseAbandon(profileId)
+      if (churn) return churn
+      noteAbandon(profileId)
     }
     if ((bare === 'jettison' || bare.endsWith('_jettison')) && getPreference('jettison_gate') !== 'off') {
       const items = Array.isArray(commandArgs?.items)

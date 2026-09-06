@@ -1,5 +1,6 @@
 import { getDb, listProfiles, consumeFreshMarketDepth } from './db'
 import { classifyResidual } from './ledger-attribution'
+import { swallow } from './swallow'
 import type { LedgerEntry, LedgerKind, LedgerSummary, ReconcileWindow } from '../../shared/ledger-types'
 
 type R = Record<string, unknown>
@@ -57,8 +58,8 @@ export class LedgerCollector {
         .replace(/^(?:market|storage|social|intel|faction|faction_admin|salvage|catalog|ship|battle|transfer|facility|auth)_/, '')
       const action = str(r.action) || bare
 
-      const rows = this.mapResult(action, r, args, outer)
-      // Read the pre-insert balance BEFORE booking these rows. lastBookedBalance
+      const rows = this.mapResult(profileId, action, r, args, outer)
+      // Read the pre-insert balance BEFORE booking these rows. balanceAnchor
       // takes the newest row by id, so calling it after the loop returns the row
       // we just wrote — see the shipping-escrow residual below, where that made
       // `prev` equal `after` and produced an escrow row of exactly -explained on
@@ -147,7 +148,7 @@ export class LedgerCollector {
         const recipient = str(r.recipient) || str(r.target) || str(args?.recipient)
         if (credits && recipient) this.mirrorFleetGift(profileName, recipient, credits, command)
       }
-    } catch { /* ledger must never break game execution */ }
+    } catch (e) { swallow('ledger.processCommandResult', e) /* must never break game execution */ }
   }
 
   /**
@@ -226,11 +227,11 @@ export class LedgerCollector {
           }, 'notification', data)
         }
       }
-    } catch { /* ledger must never break game execution */ }
+    } catch (e) { swallow('ledger.processNotifications', e) /* must never break game execution */ }
   }
 
   /** Map a command result to zero or more ledger rows. Field names verified against live results. */
-  private static mapResult(action: string, r: R, args?: R, outer?: R): LedgerRow[] {
+  private static mapResult(profileId: string, action: string, r: R, args?: R, outer?: R): LedgerRow[] {
     const balance = this.readBalance(r) ?? (outer ? this.readBalance(outer) : null)
     const rows: LedgerRow[] = []
 
@@ -450,7 +451,7 @@ export class LedgerCollector {
         // approximation than an invisible transfer.
         const after = num(r.your_credits) ?? balance
         if (after === null) break
-        const prev = LedgerCollector.lastBookedBalance(profileId)
+        const prev = LedgerCollector.balanceAnchor(profileId)
         if (prev === null) break
         const delta = after - prev
         if (delta === 0) break
@@ -472,8 +473,9 @@ export class LedgerCollector {
    * The balance the wallet should hold BEFORE this command's rows — the anchor
    * the universal residual capture measures against.
    *
-   * `lastBookedBalance` only sees rows carrying a balance_after, so any row
-   * inserted without one is invisible to it. `mirrorFleetGift` is exactly that
+   * Reading the newest anchored balance alone is not enough: it only sees rows
+   * carrying a balance_after, so any row inserted without one is invisible to
+   * it. `mirrorFleetGift` is exactly that
    * case: it credits the RECIPIENT from the SENDER's command and cannot know
    * the recipient's wallet, so it books no balance. The recipient's next
    * command then saw a wallet 50,000 higher than the last anchored row and the
@@ -492,19 +494,8 @@ export class LedgerCollector {
         'SELECT COALESCE(SUM(amount_signed), 0) AS s FROM financial_ledger WHERE profile_id = ? AND id > ?'
       ).get(profileId, row.id) as { s: number } | undefined
       return row.balance_after + Number(since?.s ?? 0)
-    } catch {
-      return null
-    }
-  }
-
-  /** Most recent booked wallet balance for a profile, or null if none exists. */
-  private static lastBookedBalance(profileId: string): number | null {
-    try {
-      const row = getDb().query(
-        'SELECT balance_after FROM financial_ledger WHERE profile_id = ? AND balance_after IS NOT NULL ORDER BY id DESC LIMIT 1'
-      ).get(profileId) as { balance_after: number } | undefined
-      return typeof row?.balance_after === 'number' ? row.balance_after : null
-    } catch {
+    } catch (e) {
+      swallow('ledger.balanceAnchor', e)
       return null
     }
   }
@@ -534,7 +525,7 @@ export class LedgerCollector {
         amount: Math.abs(credits),
         counterparty: senderName,
       }, `${sourceCommand}~mirror`, { mirrored_from: senderName, credits })
-    } catch { /* ledger must never break game execution */ }
+    } catch (e) { swallow('ledger.mirrorFleetGift', e) /* must never break game execution */ }
   }
 
   /** Listing fee is booked separately from escrow (kind 'other', same order_id). */
@@ -612,7 +603,7 @@ export class LedgerCollector {
       }, 'deposit', { gift: true, target, credits })
       const sender = listProfiles().find(p => p.id === profileId)
       this.mirrorFleetGift(sender?.username || sender?.name || profileId, target, credits, 'deposit')
-    } catch { /* ledger must never break game execution */ }
+    } catch (e) { swallow('ledger.bookGift', e) /* must never break game execution */ }
   }
 
   private static insert(profileId: string, row: LedgerRow, sourceCommand: string, raw: unknown): void {
@@ -660,7 +651,7 @@ export class LedgerCollector {
       return getDb().query(
         `SELECT * FROM financial_ledger WHERE ${conditions.join(' AND ')} ORDER BY id DESC LIMIT ?`
       ).all(...params, limit) as LedgerEntry[]
-    } catch { return [] }
+    } catch (e) { swallow('ledger.getEntries', e); return [] }
   }
 
   static getSummary(opts: { profileId: string; since?: string; kind?: string; itemId?: string }): LedgerSummary {
@@ -694,7 +685,7 @@ export class LedgerCollector {
       `).all(...params) as LedgerEntry[]
 
       return { income: totals.income, expense: totals.expense, net: totals.net, by_kind, top_expenses }
-    } catch { return empty }
+    } catch (e) { swallow('ledger.getSummary', e); return empty }
   }
 
   /**
@@ -740,6 +731,6 @@ export class LedgerCollector {
         })
       }
       return windows
-    } catch { return [] }
+    } catch (e) { swallow('ledger.reconcile', e); return [] }
   }
 }

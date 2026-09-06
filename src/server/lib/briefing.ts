@@ -8,7 +8,6 @@
  */
 import type { GameConnection, CommandResult } from './connections/interface'
 import type { Profile } from '../../shared/types'
-import * as dbModule from './db'
 import { listObligations, getProfile, listPlaybook, getStorageSummaryForProfile, getNavIntel, getHuntIntel, getDb, getKnownLinks, getGalaxyMap } from './db'
 import type { ObligationRow, PlaybookEntry } from './db'
 import { galaxyMarketLines, directiveMarketLines } from './galaxy-market'
@@ -567,14 +566,11 @@ function fmtExpiry(m: Record<string, unknown>): string {
  *  "ACTIVE RENTAL" nag sent one hunter on 88 facility queries in a day. */
 const RENT_LAPSE_HOURS = 72
 
-/** Whether an obligation row is lapsed. Defers to the db layer's own helper
- *  when it exists (the intel side owns the lapse rule), and always treats a
- *  non-active status or a long-silent row as lapsed regardless. */
+/** Whether an obligation row is lapsed. The rule lives here: an earlier version
+ *  also deferred to a `db.isObligationLapsed` that was never written, so every
+ *  build warned "will always be undefined" — a permanent warning that hides the
+ *  next real one. */
 function isObligationLapsed(o: ObligationRow, now: number): boolean {
-  const helper = (dbModule as unknown as { isObligationLapsed?: (row: ObligationRow) => boolean }).isObligationLapsed
-  if (typeof helper === 'function') {
-    try { if (helper(o)) return true } catch { /* fall through to the local rule */ }
-  }
   if (o.status !== 'active') return true
   const staleH = (now - Date.parse(o.last_seen)) / 3_600_000
   return Number.isFinite(staleH) && staleH > RENT_LAPSE_HOURS
