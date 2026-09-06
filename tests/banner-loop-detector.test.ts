@@ -21,8 +21,23 @@
  * banner accounted for 18 of 33 thoughts (fires); during his normal trade loop
  * the most repeated banner appeared 3 times in 39 (quiet), where the old rule
  * cried wolf at 74%.
+ *
+ * v4 — the fourth false positive, and the last agent-specific carve-out. The
+ * v2 patch excluded the literal '**TODO**'; Ledger Voss writes
+ * '**TODO (updated)**' and sailed straight past it, grouping 10 of 10 thoughts
+ * on an 18-character heading while 9 of the 10 BODIES were distinct. He was
+ * installing a rad harvester and mining uranium at the time.
+ *
+ * A repeated HEADING is not a repeated preamble. Measured on 2026-09-06:
+ * Ledger's key 18 chars (label), Grit's real ritual ~45, Morg's 54. So the
+ * repeated text must be substantial to count — which retires the carve-out
+ * instead of adding a third one. That is the same lesson as the guard-block
+ * and narration detectors: match the behaviour, not the formatting.
  */
 import { test, expect, describe } from 'bun:test'
+
+/** A banner shorter than this is a label, not a ritual — see v4 above. */
+const MIN_BANNER_CHARS = 30
 
 /** Mirrors the detector in scripts/fleet-health.ts. */
 function detect(thoughts: string[]): { worst: number; pct: number; fires: boolean; text: string } {
@@ -110,5 +125,38 @@ describe('both thresholds must be met, so short runs cannot trip it', () => {
 
   test('many repeats diluted across a huge run does not fire', () => {
     expect(detect([...ritual(9), ...plain(200)]).fires).toBe(false)
+  })
+})
+
+
+describe('v4: a short heading is a label, not a ritual', () => {
+  /** Mirrors the length filter in scripts/fleet-health.ts. */
+  const counts = (key: string, repeats: number, total: number) =>
+    key.length >= MIN_BANNER_CHARS && repeats >= 8 && Math.round((100 * repeats) / total) >= 25
+
+  test("Ledger's real case stays quiet: 18-char heading, 10 of 10 thoughts", () => {
+    expect(counts('**todo (updated)**', 10, 10)).toBe(false)
+  })
+
+  test("the old '**TODO**' carve-out missed the variant that actually fired", () => {
+    const excluded = (s: string) => s.startsWith('**TODO**')      // v2 rule
+    expect(excluded('**TODO (updated)**')).toBe(false)            // slipped through
+    const widened = (s: string) => s.startsWith('**TODO')         // v4 rule
+    expect(widened('**TODO (updated)**')).toBe(true)
+  })
+
+  test("Grit's genuine ritual still fires", () => {
+    expect(counts('**live state confirmed — cycle # starting**', 18, 33)).toBe(true)
+  })
+
+  test("Morg's ceremony would fire once it repeats enough", () => {
+    const k = '**reading current state now — this is authoritative.**'
+    expect(k.length).toBeGreaterThanOrEqual(MIN_BANNER_CHARS)
+    expect(counts(k, 4, 23)).toBe(false)    // 4 repeats: below threshold, correctly quiet
+    expect(counts(k, 10, 23)).toBe(true)    // sustained: fires
+  })
+
+  test('length alone is not enough — repetition still has to be there', () => {
+    expect(counts('**a long and distinctive analysis heading**', 2, 30)).toBe(false)
   })
 })

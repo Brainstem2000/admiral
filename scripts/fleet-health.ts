@@ -127,7 +127,7 @@ async function sweep(): Promise<void> {
       // An agent's own repeated banner has no prefix and is still caught.
       const banners = (db.query(`SELECT summary FROM log_entries WHERE profile_id=? AND type='llm_thought' AND timestamp>?
         AND summary LIKE '**%'
-        AND summary NOT LIKE '**TODO**%'`).all(p.id, wider) as Array<{ summary: string }>)
+        AND summary NOT LIKE '**TODO%'`).all(p.id, wider) as Array<{ summary: string }>)
       const tally = new Map<string, number>()
       for (const b of banners) {
         // Normalise away the macro prefix and the volatile numbers inside a
@@ -141,8 +141,24 @@ async function sweep(): Promise<void> {
           .trim()
         if (head) tally.set(head, (tally.get(head) ?? 0) + 1)
       }
+      // FOURTH REVISION. A repeated HEADING is not a repeated preamble.
+      // Ledger Voss opens his notes "**TODO (updated)**" on its own line and
+      // puts real, changing state underneath: measured 2026-09-06, that key
+      // grouped 10 of 10 thoughts while 9 of the 10 BODIES were distinct — he
+      // was mid-campaign, installing a rad harvester and mining uranium. The
+      // key was 18 characters. Grit Vane's genuine ritual
+      // ("**LIVE STATE CONFIRMED — CYCLE ### STARTING**") ran ~45, and
+      // Morg'Thar's ("**reading current state now — this is authoritative.**")
+      // 54. A short heading costs a handful of tokens and buries nothing;
+      // requiring real length separates a label from a ceremony without
+      // needing another agent-specific exclusion — which is what the
+      // '**TODO**' carve-out was, and it missed '**TODO (updated)**'.
+      const MIN_BANNER_CHARS = 30
       let worstText = '', worst = 0
-      for (const [k, v] of tally) if (v > worst) { worst = v; worstText = k }
+      for (const [k, v] of tally) {
+        if (k.length < MIN_BANNER_CHARS) continue
+        if (v > worst) { worst = v; worstText = k }
+      }
       const pct = Math.round((100 * worst) / total)
       announce(`banner:${p.id}`,
         `[fleet] ${n}: same banner repeated ${worst}/${total} thoughts in 25min (${pct}%) — ritual restatement loop: "${worstText.slice(0, 48)}"`,
