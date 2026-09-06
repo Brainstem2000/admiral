@@ -3,6 +3,7 @@ import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
 import { scrubLiveState, scrubNotice } from './note-hygiene'
+import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor } from './mission-guard'
 import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
@@ -1297,6 +1298,12 @@ export function checkDoctrineGuards(
   // Jettison: nothing with a bid is worthless.
   {
     const bare = command.replace(/^spacemolt_/, '').replace(/^ship_/, '')
+    // A Wexler rescue is unpaid charity — see mission-guard.ts. Blocked here
+    // because a nudge saying so was read, acknowledged and skipped.
+    if (bare === 'accept_mission' || bare.endsWith('_accept_mission')) {
+      const refusal = refuseAccept(commandArgs)
+      if (refusal) { ctx.log('tool_result', refusal); return refusal }
+    }
     if ((bare === 'jettison' || bare.endsWith('_jettison')) && getPreference('jettison_gate') !== 'off') {
       const items = Array.isArray(commandArgs?.items)
         ? (commandArgs.items as Array<Record<string, unknown>>)
@@ -2391,6 +2398,20 @@ export async function executeTool(
     // so a failed dock cannot clear the destination commitment.
     observeTacticalResult(ctx.profileId, command, commandArgs, resultData, resp.notifications)
     noteDestinationWork(ctx.profileId, command)
+    // Cache mission titles from every board read so a later accept can be matched
+    // by its opaque id, and catch a refused mission the cache had not seen.
+    noteMissionTitles(result)
+    {
+      const bareCmd = command.replace(/^spacemolt_/, '').replace(/^(?:mission|social)_/, '')
+      if (bareCmd === 'accept_mission') {
+        const hit = acceptSideEffect(result, commandArgs)
+        if (hit) {
+          result += `\n\n${refusalTextFor(hit.title)}\n`
+            + `This mission was accepted before the guard saw it. ABANDON IT NOW: `
+            + `abandon_mission(mission_id="${hit.id}").`
+        }
+      }
+    }
 
     // A specific-item market read should answer the question the agent is
     // actually asking: "can I buy this here?" Raw best_buy/best_sell fields
