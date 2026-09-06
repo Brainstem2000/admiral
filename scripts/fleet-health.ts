@@ -110,16 +110,23 @@ async function sweep(): Promise<void> {
       // each banner's opening text and find the most-repeated one. Twenty
       // different bold headers is a writing style; the same header twenty times
       // is the loop.
+      // ONLY WHAT THE AGENT WROTE THIS TURN COUNTS. makeMacroNarrator logs
+      // `[goto_system hop 7/14 → x] <intent>` where <intent> is captured ONCE
+      // when the macro starts and replayed verbatim on every hop — so a 14-hop
+      // journey emits 14 identical lines that the agent wrote once. Counting
+      // them flagged Vera Lane at 30% on 2026-09-05 while she was progressing
+      // cleanly through hops 5,6,7,8,9; 21 of her 30 "thoughts" were the
+      // narrator echoing her. The macro-prefixed form is excluded outright.
+      // An agent's own repeated banner has no prefix and is still caught.
       const banners = (db.query(`SELECT summary FROM log_entries WHERE profile_id=? AND type='llm_thought' AND timestamp>?
-        AND (summary LIKE '**%' OR summary LIKE '[%] **%')
-        AND summary NOT LIKE '**TODO**%' AND summary NOT LIKE '[%] **TODO**%'`).all(p.id, wider) as Array<{ summary: string }>)
+        AND summary LIKE '**%'
+        AND summary NOT LIKE '**TODO**%'`).all(p.id, wider) as Array<{ summary: string }>)
       const tally = new Map<string, number>()
       for (const b of banners) {
         // Normalise away the macro prefix and the volatile numbers inside a
         // banner ("CYCLE 171", "hull 87/90") so the same ritual with a changing
         // counter still groups as one.
         const head = String(b.summary ?? '')
-          .replace(/^\[[^\]]*\]\s*/, '')
           .split('\n')[0]
           .slice(0, 70)
           .replace(/\d+/g, '#')

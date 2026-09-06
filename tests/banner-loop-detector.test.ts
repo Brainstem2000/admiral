@@ -27,13 +27,12 @@ import { test, expect, describe } from 'bun:test'
 /** Mirrors the detector in scripts/fleet-health.ts. */
 function detect(thoughts: string[]): { worst: number; pct: number; fires: boolean; text: string } {
   const total = thoughts.length
-  const banners = thoughts.filter(s =>
-    (s.startsWith('**') || /^\[[^\]]*\]\s*\*\*/.test(s))
-    && !s.startsWith('**TODO**') && !/^\[[^\]]*\]\s*\*\*TODO\*\*/.test(s))
+  // Only what the agent wrote THIS turn: a macro-prefixed line is the harness's
+  // narrator replaying an intent the agent stated once.
+  const banners = thoughts.filter(s => s.startsWith('**') && !s.startsWith('**TODO**'))
   const tally = new Map<string, number>()
   for (const b of banners) {
-    const head = b.replace(/^\[[^\]]*\]\s*/, '').split('\n')[0].slice(0, 70)
-      .replace(/\d+/g, '#').toLowerCase().trim()
+    const head = b.split('\n')[0].slice(0, 70).replace(/\d+/g, '#').toLowerCase().trim()
     if (head) tally.set(head, (tally.get(head) ?? 0) + 1)
   }
   let text = '', worst = 0
@@ -64,9 +63,20 @@ describe('the same preamble every turn is the loop', () => {
     expect(detect(ritual(12)).text).toContain('ground truth from current state')
   })
 
-  test('a macro prefix does not split one ritual into many', () => {
-    const withPrefix = ritual(10).map((t, i) => `[mine_until_full ${i} mines, cargo ${i}/120] ${t}`)
-    expect(detect(withPrefix).fires).toBe(true)
+  test('the harness narrating its own macro is not the agent repeating itself', () => {
+    // FOURTH false positive, introduced by the third fix. makeMacroNarrator logs
+    // `[goto_system hop 7/14 -> x] <intent>` where <intent> is captured ONCE at
+    // macro start and replayed on every hop, so a 14-hop journey emits 14
+    // identical lines the agent wrote once. That flagged Vera Lane at 30% on
+    // 2026-09-05 while she progressed cleanly through hops 5,6,7,8,9 — 21 of
+    // her 30 "thoughts" were the narrator echoing her.
+    const echoes = Array.from({ length: 14 }, (_, i) =>
+      `[goto_system hop ${i + 1}/14 → sys_${i}] **ANALYSIS:** I'm mid-route to Haven.`)
+    expect(detect(echoes).fires).toBe(false)
+  })
+
+  test("but the agent's own repeated banner, with no prefix, still fires", () => {
+    expect(detect([...ritual(18), ...plain(15)]).fires).toBe(true)
   })
 })
 
