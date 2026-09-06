@@ -68,8 +68,15 @@ async function sweep(): Promise<void> {
     const errs = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND type='error' AND timestamp>?`, p.id, recent)
     announce(`err:${p.id}`, `[fleet] ${n}: ${errs} errors in 6min`, errs >= 3)
 
+    // A refusal is a tool_result that STARTS with the marker. Matching the words
+    // anywhere in any row counted the agent THINKING about a guard: Morg quotes his
+    // own directive ("the harness REFUSES a fourth abandon") in llm_thought every
+    // turn, which fired this alarm five times in one evening while nothing was
+    // actually blocked. A watcher that cries wolf gets switched off, which is worse
+    // than no watcher — so match the event, never the narration about it.
     const blocked = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND timestamp>?
-      AND (summary LIKE '%BLOCKED%' OR summary LIKE '%REFUSED%')`, p.id, recent)
+      AND type='tool_result'
+      AND (summary LIKE 'BLOCKED by Admiral doctrine%' OR summary LIKE 'REFUSED%')`, p.id, recent)
     announce(`blocked:${p.id}`, `[fleet] ${n}: ${blocked} guard blocks in 6min — likely looping on a refused call`, blocked >= 4)
 
     const now = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND timestamp>?`, p.id, recent)
