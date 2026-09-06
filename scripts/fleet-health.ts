@@ -74,10 +74,19 @@ async function sweep(): Promise<void> {
     // turn, which fired this alarm five times in one evening while nothing was
     // actually blocked. A watcher that cries wolf gets switched off, which is worse
     // than no watcher — so match the event, never the narration about it.
-    const blocked = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND timestamp>?
-      AND type='tool_result'
-      AND (summary LIKE 'BLOCKED by Admiral doctrine%' OR summary LIKE 'REFUSED%')`, p.id, recent)
-    announce(`blocked:${p.id}`, `[fleet] ${n}: ${blocked} guard blocks in 6min — likely looping on a refused call`, blocked >= 4)
+    // A guard block is normal operation, not an incident — the gates fire across
+    // the fleet all day and the agent adapts. What matters is the SAME refusal
+    // hammered repeatedly, which is a loop. Measured 2026-09-06: this alarm fired
+    // on five agents in one night and was actionable once. CyberSapper tripped a
+    // jettison gate and an abandon gate in the same window while completing 88
+    // missions — two different guards catching two different mistakes, which is
+    // the system working. Morg'Thar hit the same destination refusal four times
+    // in 23 seconds, which is not.
+    const worstRepeat = (db.query(`SELECT COUNT(*) c FROM log_entries
+      WHERE profile_id=? AND timestamp>? AND type='tool_result'
+        AND (summary LIKE 'BLOCKED by Admiral doctrine%' OR summary LIKE 'REFUSED%')
+      GROUP BY substr(summary, 1, 60) ORDER BY c DESC LIMIT 1`).get(p.id, recent) as { c: number } | undefined)?.c ?? 0
+    announce(`blocked:${p.id}`, `[fleet] ${n}: the same refusal ${worstRepeat}x in 6min — hammering a guard instead of adapting`, worstRepeat >= 4)
 
     const now = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND timestamp>?`, p.id, recent)
     const before = count(`SELECT COUNT(*) c FROM log_entries WHERE profile_id=? AND timestamp>?`, p.id, wider)

@@ -81,3 +81,55 @@ describe('the threshold still catches a genuine loop', () => {
     expect(countBlocks(rows) >= 4).toBe(false)
   })
 })
+
+describe('hammering one guard vs tripping several', () => {
+  /**
+   * The alarm fired on five agents in one night and was actionable once.
+   * A guard block is normal operation: the gates fire across the fleet all day
+   * and the agent adapts. CyberSapper tripped a jettison gate and an abandon
+   * gate in the same window while completing 88 missions — two different guards
+   * catching two different mistakes, which is the system working. Morg'Thar hit
+   * the SAME destination refusal four times in 23 seconds, which is not.
+   *
+   * So the signal is the most-repeated refusal, not the count of refusals.
+   * Replayed over the night's real data, this stops firing on Zibal Prospector
+   * (9 distinct refusals, max 3 of any one, +33,820 earned) and Rook Vance
+   * (7 distinct, max 2) while still catching Cass Margin (16 repeats of one).
+   */
+  const worstRepeat = (rows: Row[]) => {
+    const tally = new Map<string, number>()
+    for (const r of rows.filter(isGuardBlock)) {
+      const sig = r.summary.slice(0, 60)
+      tally.set(sig, (tally.get(sig) ?? 0) + 1)
+    }
+    return Math.max(0, ...tally.values())
+  }
+  const tr = (s: string): Row => ({ type: 'tool_result', summary: s })
+
+  test("Morg's real case fires: the same destination refusal four times", () => {
+    const same = 'BLOCKED by Admiral doctrine: you set course for "the_telescope" 4s ago and are already re-routing'
+    expect(worstRepeat([tr(same), tr(same), tr(same), tr(same)])).toBeGreaterThanOrEqual(4)
+  })
+
+  test('four DIFFERENT guards in one window does not fire', () => {
+    expect(worstRepeat([
+      tr('BLOCKED by Admiral doctrine: jettison is disabled fleet-wide (attempted: void_dustx3)'),
+      tr('BLOCKED by Admiral doctrine: you have abandoned 3 missions in the last hour'),
+      tr('BLOCKED by Admiral doctrine: you set course for "krynn" 30s ago'),
+      tr('REFUSED: you are winding down. This is not a bug.'),
+    ])).toBeLessThan(4)
+  })
+
+  test('the volatile tail of a refusal must not split the signature', () => {
+    // The elapsed-seconds figure changes on every retry; a 60-char prefix cuts
+    // before it, so the same guard groups as one.
+    const a = 'BLOCKED by Admiral doctrine: you set course for "the_telescope" 4s ago'
+    const b = 'BLOCKED by Admiral doctrine: you set course for "the_telescope" 23s ago'
+    expect(a.slice(0, 60)).toBe(b.slice(0, 60))
+  })
+
+  test('narration still never counts, however often it repeats', () => {
+    const n: Row = { type: 'llm_thought', summary: 'I was BLOCKED by Admiral doctrine again' }
+    expect(worstRepeat([n, n, n, n, n, n])).toBe(0)
+  })
+})
