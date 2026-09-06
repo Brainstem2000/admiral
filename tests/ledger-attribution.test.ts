@@ -93,3 +93,61 @@ describe('the consistency bound', () => {
     expect(plausibleBound(null)).toBe(5000)
   })
 })
+
+/**
+ * A BULK order declares its amounts inside `results[]` and carries no top-level
+ * cost field. Reading only the top level returned null, plausibleBound floored at
+ * 5,000, and every real bulk order exceeds that — so CyberSpock's on-plan
+ * titanium_alloy x120 @2,500 was stamped `coincident` and lost its attribution,
+ * surfacing in the dashboard as an unexplained -305,733.
+ *
+ * The guard that must survive the fix: a payload that DOES declare its own figure
+ * is answering for itself. CyberSapper sold one Refueling Pump for 1,100 with a
+ * 68,523 residual alongside it — that is genuinely a different event, and a
+ * nested array must never talk over the top-level `total_earned`.
+ */
+describe('bulk order envelopes', () => {
+  const BULK = {
+    action: 'create_buy_order', mode: 'bulk', kind: 'bulk',
+    results: [{
+      index: 0, success: true, item: 'Titanium Alloy', item_id: 'titanium_alloy',
+      quantity: 120, price_each: 2500,
+      fills: [{ price_each: 2500, quantity: 120 }],
+    }],
+  }
+
+  test('reads quantity x price_each out of results[]', () => {
+    expect(readDeclared(BULK)).toBe(300_000)
+  })
+
+  test('the real purchase is attributed, not stamped coincident', () => {
+    expect(classifyResidual('create_buy_order', -305_733, BULK)).toBe('order_create')
+  })
+
+  test('sums across multiple results', () => {
+    expect(readDeclared({
+      action: 'create_buy_order',
+      results: [{ quantity: 10, price_each: 100 }, { quantity: 4, price_each: 250 }],
+    })).toBe(2_000)
+  })
+
+  test('a per-result cost field wins over quantity x price', () => {
+    expect(readDeclared({ action: 'create_buy_order', results: [{ total_cost: 7_777, quantity: 2, price_each: 1 }] }))
+      .toBe(7_777)
+  })
+
+  test('a declared top-level figure still wins — the Refueling Pump case', () => {
+    const sale = {
+      action: 'sell', item_id: 'refueling_pump', quantity_sold: 1, total_earned: 1100,
+      fills: [{ price_each: 1100, quantity: 1 }],
+    }
+    expect(readDeclared(sale)).toBe(1100)
+    expect(classifyResidual('sell', -68_523, sale)).toBe('coincident')
+  })
+
+  test('an empty or absent results[] changes nothing', () => {
+    expect(readDeclared({ action: 'create_buy_order', results: [] })).toBeNull()
+    expect(readDeclared({ action: 'refuel', cost: 810 })).toBe(810)
+    expect(classifyResidual('refuel', -29_292, { action: 'refuel', cost: 810 })).toBe('coincident')
+  })
+})

@@ -60,13 +60,51 @@ export function plausibleBound(declared: number | null): number {
   return Math.max((declared ?? 0) * 4, 5_000)
 }
 
+/**
+ * A BULK order states its amounts one level down, inside `results[]`, and has no
+ * top-level cost field at all:
+ *
+ *   {"action":"create_buy_order","mode":"bulk","results":[
+ *      {"item_id":"titanium_alloy","quantity":120,"price_each":2500, "fills":[...]}]}
+ *
+ * Reading only the top level returns null, `plausibleBound(null)` floors at
+ * 5,000, and any real bulk order dwarfs that — so a correct, on-plan purchase is
+ * stamped `coincident` and loses its item attribution. CyberSpock's
+ * titanium_alloy x120 @2,500 booked as an unexplained -305,733 that way.
+ *
+ * Sum the results instead. A per-result cost field wins; otherwise quantity x
+ * price_each, which is what the bulk envelope actually carries.
+ */
+function declaredFromResults(ref: Record<string, unknown>): number | null {
+  const results = ref.results
+  if (!Array.isArray(results) || results.length === 0) return null
+  let total = 0
+  for (const entry of results) {
+    if (!entry || typeof entry !== 'object') continue
+    const r = entry as Record<string, unknown>
+    const direct = DECLARED_FIELDS
+      .map(f => r[f])
+      .find(v => typeof v === 'number' && Number.isFinite(v) && v !== 0) as number | undefined
+    if (direct !== undefined) { total += Math.abs(direct); continue }
+    const qty = r.quantity ?? r.quantity_sold
+    const each = r.price_each ?? r.unit_price
+    if (typeof qty === 'number' && typeof each === 'number'
+        && Number.isFinite(qty) && Number.isFinite(each)) total += Math.abs(qty * each)
+  }
+  return total > 0 ? total : null
+}
+
 export function readDeclared(ref: Record<string, unknown> | null | undefined): number | null {
   if (!ref) return null
   for (const f of DECLARED_FIELDS) {
     const v = ref[f]
     if (typeof v === 'number' && Number.isFinite(v) && v !== 0) return Math.abs(v)
   }
-  return null
+  // Only when the top level declared nothing. A payload that DOES declare its own
+  // figure is answering for itself, and a nested array must not override it — a
+  // 1,100cr Refueling Pump sale carrying a 68,523 residual is genuinely coincident
+  // and has to stay that way.
+  return declaredFromResults(ref)
 }
 
 /**
