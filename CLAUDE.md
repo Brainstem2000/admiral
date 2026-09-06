@@ -18,12 +18,27 @@ bun run build          # build frontend + compile standalone `admiral` binary
 ```
 
 - Runtime is **Bun** (`bun:sqlite`, `bun build --compile`). Do not introduce Node-only APIs.
-- There is **no automated test suite**. Verify changes by: `bun run build` must
-  succeed, then boot the binary and exercise the relevant API/UI (see Verifying below).
-- `tsc --noEmit` reports a handful of *pre-existing* errors (Bun-only globals like
-  `import.meta.dir` / `bun:sqlite`, plus a couple of `unknown` casts). These are
-  expected — the project builds via Bun's bundler, not `tsc`. Don't treat them as
-  regressions; just make sure you don't add *new* ones in files you touch.
+- **Run the tests.** `bun test` — 544 across 65 files, all passing. (This line used
+  to read "there is no automated test suite"; it was stale by every one of them.)
+  Then `bun run build` must succeed and build **warning-free**, and boot the binary
+  to exercise the relevant API/UI (see Verifying below).
+- **Typecheck with `bun scripts/typecheck.ts`, not bare `tsc`.** Raw `tsc --noEmit`
+  prints ~42 errors that really are expected — Bun-only globals (`import.meta.dir`,
+  `bun:sqlite`) the bundler resolves and tsc cannot, plus deliberate `unknown` casts.
+  The script tolerates exactly those and **fails on the crash class**: `TS2304`
+  "Cannot find name" and its relatives mean an identifier that does not exist at
+  runtime, i.e. a guaranteed ReferenceError on the line that reaches it.
+
+  **This is not a style rule — the old wording caused a two-day outage.** On
+  2026-09-05 three doctrine guards referenced an out-of-scope `ctx`;
+  `refuseAbandon(ctx.profileId)` runs unconditionally, so every `abandon_mission`
+  killed the turn — 29 dead turns across Juno Freight, CyberSpock and Morg'Thar.
+  tsc reported it the entire time as five TS2304s sitting in the middle of the noise
+  this file told everyone to ignore. A fourth instance in `ledger.ts` was swallowed
+  by a collector `catch` and silently dropped ledger rows instead. Never eyeball
+  twenty tolerated lines hoping to spot the one that matters; run the script.
+  A bundler warning ("will always be undefined") is the same class — fix it or the
+  next real one hides behind it.
 
 ## Layout
 
@@ -161,7 +176,9 @@ future session must not re-derive or get wrong:
 
 ## Verifying a change
 
-1. `bun run build` (must succeed).
+1. `bun test` (544 must pass), then `bun scripts/typecheck.ts` (must print OK —
+   it fails on the crash class and tolerates the Bun-global noise), then
+   `bun run build` (must succeed, and warning-free).
 2. `./admiral`, then hit the relevant endpoint(s) under `http://127.0.0.1:3031/api/...`
    or drive the UI at `http://127.0.0.1:3031`.
 3. For agent behavior, create/connect a profile and watch its log stream in the
