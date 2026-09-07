@@ -2156,6 +2156,26 @@ export function markStorageDirty(profileId: string, reason: string): void {
     ON CONFLICT(profile_id) DO UPDATE SET reason = excluded.reason`).run(profileId, reason)
 }
 
+/**
+ * Has this agent moved goods since the last `view_storage` snapshot?
+ *
+ * `storage_inventory` is a SNAPSHOT, refreshed only by view_storage. A deposit or
+ * withdrawal changes the real station storage and leaves the cache untouched, so
+ * any figure read from it afterwards is fiction. `markStorageDirty` records that.
+ *
+ * Written because checkCraftInputs trusted the cache: CyberSpock deposited
+ * lead_ingot x3 at Blood Forge on 2026-09-07, and the craft guard kept answering
+ * "station storage has 0" from the stale snapshot. He looped
+ * craft -> BLOCKED -> withdraw -> deposit -> craft three times over 45 minutes.
+ * A guard that fabricates a blocker is worse than no guard: it cost more ticks
+ * than the one it was built to save.
+ */
+export function isStorageDirty(profileId: string): boolean {
+  const row = db.query('SELECT 1 AS x FROM storage_dirty WHERE profile_id = ?')
+    .get(profileId) as { x: number } | null
+  return !!row
+}
+
 export function clearStorageDirty(profileId: string): void {
   db.query('DELETE FROM storage_dirty WHERE profile_id = ?').run(profileId)
 }

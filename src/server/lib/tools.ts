@@ -4,7 +4,7 @@ import type { GameConnection } from './connections/interface'
 import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
 import { scrubLiveState, scrubNotice } from './note-hygiene'
 import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor, refuseAbandon, noteAbandon, knownTitle, isRefusedMissionTitle } from './mission-guard'
-import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
+import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, isStorageDirty, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -339,6 +339,8 @@ const recentFailures = new Map<string, Array<{ key: string; timestamp: number }>
 // Fuel-floor checkpoint state: last blocked jump per profile (see fuel floor guard).
 const fuelFloorBlocks = new Map<string, { dest: string; at: number }>()
 const repeatBuyBlocks = new Map<string, { key: string; at: number }>()
+/** Last craft this profile was blocked on — a repeat clears the gate. */
+const craftBlocks = new Map<string, string>()
 
 /** Items an agent is EXPECTED to rebuy: consumables burned down every run.
  *  Blocking a restock of these would be the guard causing the outage. */
@@ -959,6 +961,16 @@ function checkCraftInputs(ctx: ToolContext, deep: string, commandArgs: Record<st
   const station = currentLocation(ctx).dockedAt
   if (!station) return null   // the docked-state gate already covers this
 
+  // `storage_inventory` is a SNAPSHOT refreshed only by view_storage. A deposit
+  // or withdrawal since then makes every figure in it fiction, and a guard that
+  // blocks on fiction is worse than no guard at all — it invents a blocker the
+  // agent cannot clear by doing the right thing. CyberSpock deposited lead_ingot
+  // x3 at Blood Forge on 2026-09-07 and this gate kept answering "station storage
+  // has 0", so he looped craft -> BLOCKED -> withdraw -> deposit -> craft three
+  // times across 45 minutes. When the cache is stale, defer to the game: it costs
+  // one tick to be told the truth, which is cheaper than an unbreakable loop.
+  if (isStorageDirty(ctx.profileId)) return null
+
   const recipe = codexGet('recipe', recipeId)
   const inputs = Array.isArray(recipe?.inputs) ? recipe!.inputs as Array<Record<string, unknown>> : null
   if (!inputs || inputs.length === 0) return null   // unknown recipe — let the game answer
@@ -986,7 +998,15 @@ function checkCraftInputs(ctx: ToolContext, deep: string, commandArgs: Record<st
     } catch { /* hints are a bonus */ }
     missing.push(`${item}: need ${need}, station storage has ${have}${hint}`)
   }
-  if (missing.length === 0) return null
+  if (missing.length === 0) { craftBlocks.delete(ctx.profileId); return null }
+
+  // Even with fresh data, this gate must never be able to trap an agent. If the
+  // identical craft is attempted again, stand down and let the game rule on it.
+  const key = `${recipeId}:${qty}`
+  const prior = craftBlocks.get(ctx.profileId)
+  if (prior === key) { craftBlocks.delete(ctx.profileId); return null }
+  craftBlocks.set(ctx.profileId, key)
+
   return (
     `BLOCKED: craft(${recipeId} x${qty}) would fail — crafting draws ONLY from station storage at ${station}, never from cargo.\n` +
     missing.map(m => `  • ${m}`).join('\n') +
