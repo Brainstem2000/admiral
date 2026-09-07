@@ -2480,6 +2480,33 @@ export function getRecentBuyUnitPrice(profileId: string, itemId: string, windowM
   return row?.p ?? null
 }
 
+/**
+ * How much of `itemId` this profile has already BOUGHT in the recent past.
+ *
+ * Exists because a shopping list in a directive is a snapshot, and an agent that
+ * has already filled a line cannot see that from the list. CyberSpock bought
+ * titanium_alloy x120 at 17:40 on 2026-09-06, deposited it at the build yard, and
+ * bought another 120 at 20:02 for a further 304,716 credits. His own reasoning
+ * three minutes earlier read "Already have 120, need 0" — the fallback to a line
+ * he *could* execute won over what he knew, after three other lines came back
+ * unavailable. Titanium alloy bids 300 against the 2,500 he paid, so the mistake
+ * is 88% unrecoverable.
+ *
+ * Counts both kinds the ledger writes for a purchase: `buy` for a direct one and
+ * `order_create` for a bulk market order (the latter only attributes its item
+ * since the bulk-envelope fix — before that it landed as `coincident` with a null
+ * item_id and this query would have seen nothing).
+ */
+export function getRecentPurchasedQuantity(profileId: string, itemId: string, windowMinutes = 360): number {
+  const row = getDb().query(
+    `SELECT COALESCE(SUM(quantity), 0) AS q FROM financial_ledger
+      WHERE profile_id = ? AND item_id = ? AND quantity IS NOT NULL AND quantity > 0
+        AND kind IN ('buy', 'order_create')
+        AND timestamp > datetime('now', ?)`
+  ).get(profileId, itemId, `-${Math.max(1, windowMinutes)} minutes`) as { q: number } | undefined
+  return row?.q ?? 0
+}
+
 export function realisableValue(itemId: string, heldQty: number): RealisableValue {
   const held = Math.max(0, Math.floor(heldQty))
   const none: RealisableValue = {

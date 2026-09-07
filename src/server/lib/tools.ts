@@ -4,7 +4,7 @@ import type { GameConnection } from './connections/interface'
 import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
 import { scrubLiveState, scrubNotice } from './note-hygiene'
 import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor, refuseAbandon, noteAbandon, knownTitle, isRefusedMissionTitle } from './mission-guard'
-import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
+import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -338,6 +338,35 @@ function actionCooldownRemaining(profileId: string): number | null {
 const recentFailures = new Map<string, Array<{ key: string; timestamp: number }>>()
 // Fuel-floor checkpoint state: last blocked jump per profile (see fuel floor guard).
 const fuelFloorBlocks = new Map<string, { dest: string; at: number }>()
+const repeatBuyBlocks = new Map<string, { key: string; at: number }>()
+
+/** Items an agent is EXPECTED to rebuy: consumables burned down every run.
+ *  Blocking a restock of these would be the guard causing the outage. */
+const RESTOCKABLE = /(?:fuel_cell|rounds_box|missile|torpedo|repair_kit|shield_cell|ammo|charge_pack|medkit)/i
+
+/** item_id -> quantity across both call shapes: a direct buy carries them at the
+ *  top level, a bulk order nests them in `orders[]`. Reading only the top level
+ *  would miss exactly the bulk purchase that motivated this guard. */
+function purchaseLines(args: Record<string, unknown> | undefined): Array<{ id: string; qty: number }> {
+  if (!args) return []
+  const out: Array<{ id: string; qty: number }> = []
+  const push = (id: unknown, qty: unknown) => {
+    const i = typeof id === 'string' ? id : ''
+    const q = typeof qty === 'number' ? qty : Number(qty)
+    if (i && Number.isFinite(q) && q > 0) out.push({ id: i, qty: q })
+  }
+  const orders = args.orders
+  if (Array.isArray(orders)) {
+    for (const o of orders) {
+      if (o && typeof o === 'object') {
+        const r = o as Record<string, unknown>
+        push(r.item_id ?? r.item, r.quantity ?? r.qty)
+      }
+    }
+  }
+  if (!out.length) push(args.item_id ?? args.item, args.quantity ?? args.qty)
+  return out
+}
 /** Ship classes this profile has successfully commissioned, and when. A hull is
  *  the most expensive single purchase an agent can make, and a commission takes
  *  hundreds of ticks during which the ship does not appear in `list_ships` — so
@@ -1421,6 +1450,48 @@ export function checkDoctrineGuards(
             }
           }
         }
+      }
+    }
+  }
+
+  // Repeat-purchase checkpoint. A shopping list in a directive is a SNAPSHOT, and
+  // an agent that has already filled a line cannot see that from the list. On
+  // 2026-09-06 CyberSpock bought titanium_alloy x120 at 17:40, deposited it at the
+  // build yard, and bought another 120 at 20:02 for a further 304,716 credits. His
+  // own reasoning three minutes earlier read "Already have 120, need 0" — but
+  // fury_crystal, circuit_board and weapon_housing had all just come back
+  // unavailable, and he fell back to the one line he COULD execute. Titanium alloy
+  // bids 300 against the 2,500 paid, so 88% of that is unrecoverable.
+  //
+  // Prose could not prevent this: he already knew the fact and acted against it.
+  // A checkpoint states it at the moment of the buy, which is the only moment it
+  // matters. Consumables are exempt, and a deliberate repeat clears it — the guard
+  // must never be the thing that strands an agent that genuinely needs the stock.
+  {
+    const bareB = command.replace(/^spacemolt_/, '').replace(/^market_/, '')
+    if ((bareB === 'buy' || bareB === 'create_buy_order')
+        && getPreference('repeat_buy_gate') !== 'off') {
+      for (const line of purchaseLines(commandArgs)) {
+        if (RESTOCKABLE.test(line.id) || line.qty < 10) continue
+        const already = getRecentPurchasedQuantity(profileId, line.id)
+        if (already < line.qty) continue
+        const key = `${line.id}:${line.qty}`
+        const prior = repeatBuyBlocks.get(profileId)
+        if (prior && prior.key === key && Date.now() - prior.at < 10 * 60_000) {
+          repeatBuyBlocks.delete(profileId)   // deliberate repeat — let it through
+          break
+        }
+        repeatBuyBlocks.set(profileId, { key, at: Date.now() })
+        return (
+          `CHECKPOINT by repeat-purchase guard: you have ALREADY bought ${already} x ${line.id} `
+          + `in the last six hours, and this order is for ${line.qty} more. A shopping list in your `
+          + `directive is a snapshot from before those purchases — it does not shrink as you fill it. `
+          + `Check where the first lot went before buying a second: it is most likely already in `
+          + `STATION STORAGE at the build site (crafting escrows from storage, not cargo), so `
+          + `\`view_storage\` there and subtract what you find. If you genuinely need ${line.qty} MORE `
+          + `on top of the ${already} you bought, repeat this exact order to proceed — the checkpoint `
+          + `clears once. If you do not, buy a different line or report the blocker and move on.`
+        )
       }
     }
   }
