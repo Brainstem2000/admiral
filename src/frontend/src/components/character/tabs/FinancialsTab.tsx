@@ -168,12 +168,30 @@ const SEVERITY_COLOR: Record<AlertItem['severity'], string> = {
 // ── Tab ──────────────────────────────────────────────────────────────────────
 
 export function FinancialsTab({ profile, connected }: { profile: Profile; connected: boolean }) {
-  const [period, setPeriod] = useState<Period>('24h')
+  // A parked agent's last transaction is usually older than 24h, so the default
+  // window returned zero rows and the tab read as "no financial history" for
+  // every offline agent. CyberSapper sat at 1 credit with 797 refuels and 152
+  // mission payouts behind him and the panel showed nothing. Offline agents open
+  // on the full history instead; they are the case you are reading BECAUSE they
+  // are idle, and the last 24 hours is the one window guaranteed to be empty.
+  const [period, setPeriod] = useState<Period>(connected ? '24h' : 'all')
+  // Once the operator picks a window, never override it.
+  const [periodPinned, setPeriodPinned] = useState(false)
   // Default: newest first — a transactions list is read as a timeline. Amount
   // sort stays one header-click away.
   const [sortKey, setSortKey] = useState<'amount' | 'time'>('time')
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc')
   const { ledger, reconcile, snaps, liveWallet, walletAt } = useFinancials(profile.id, connected, period)
+
+  // Switching agent resets the pin so the offline default applies to the new one.
+  useEffect(() => { setPeriodPinned(false); setPeriod(connected ? '24h' : 'all') }, [profile.id])
+
+  // Widen once if the window is genuinely empty. Covers the connected-but-idle
+  // agent too — an agent that has not traded today is not an agent with no history.
+  useEffect(() => {
+    if (periodPinned || period === 'all') return
+    if (ledger && ledger.rows.length === 0) setPeriod(period === '24h' ? '7d' : 'all')
+  }, [ledger, period, periodPinned])
 
   const points = useMemo(() =>
     (snaps || [])
@@ -370,7 +388,7 @@ export function FinancialsTab({ profile, connected }: { profile: Profile; connec
       {PERIODS.map(p => (
         <button
           key={p}
-          onClick={() => setPeriod(p)}
+          onClick={() => { setPeriodPinned(true); setPeriod(p) }}
           className={`px-1.5 py-0.5 text-[9px] uppercase tracking-wider border transition-colors ${
             period === p
               ? 'border-primary/60 text-primary bg-primary/10'
