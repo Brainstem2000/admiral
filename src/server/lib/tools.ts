@@ -357,16 +357,25 @@ function purchaseLines(args: Record<string, unknown> | undefined): Array<{ id: s
     const q = typeof qty === 'number' ? qty : Number(qty)
     if (i && Number.isFinite(q) && q > 0) out.push({ id: i, qty: q })
   }
+  // The item arrives under three different names across the real call shapes:
+  //   game(buy, item_id=X quantity=N)
+  //   game(buy, id=X quantity=N)                       <- `id`, not `item_id`
+  //   game(create_buy_order, item_id=X orders=[{price_each, quantity}])
+  // The third omits item_id INSIDE each order and inherits it from the top level.
+  // Missing either alias made the gate silently blind: CyberSpock placed a
+  // standing order for fury_crystal x16 at 18:29 on 2026-09-07 and tried to buy
+  // another 16 at 21:09 with `id=`, and the checkpoint never fired.
+  const topItem = args.item_id ?? args.item ?? args.id
   const orders = args.orders
   if (Array.isArray(orders)) {
     for (const o of orders) {
       if (o && typeof o === 'object') {
         const r = o as Record<string, unknown>
-        push(r.item_id ?? r.item, r.quantity ?? r.qty)
+        push(r.item_id ?? r.item ?? r.id ?? topItem, r.quantity ?? r.qty)
       }
     }
   }
-  if (!out.length) push(args.item_id ?? args.item, args.quantity ?? args.qty)
+  if (!out.length) push(topItem, args.quantity ?? args.qty)
   return out
 }
 /** Ship classes this profile has successfully commissioned, and when. A hull is

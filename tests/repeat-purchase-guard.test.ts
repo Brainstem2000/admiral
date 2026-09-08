@@ -26,16 +26,17 @@ function purchaseLines(args: Record<string, unknown> | undefined): Array<{ id: s
     const q = typeof qty === 'number' ? qty : Number(qty)
     if (i && Number.isFinite(q) && q > 0) out.push({ id: i, qty: q })
   }
+  const topItem = args.item_id ?? args.item ?? args.id
   const orders = args.orders
   if (Array.isArray(orders)) {
     for (const o of orders) {
       if (o && typeof o === 'object') {
         const r = o as Record<string, unknown>
-        push(r.item_id ?? r.item, r.quantity ?? r.qty)
+        push(r.item_id ?? r.item ?? r.id ?? topItem, r.quantity ?? r.qty)
       }
     }
   }
-  if (!out.length) push(args.item_id ?? args.item, args.quantity ?? args.qty)
+  if (!out.length) push(topItem, args.quantity ?? args.qty)
   return out
 }
 
@@ -115,5 +116,42 @@ describe('the checkpoint decision', () => {
       { orders: [{ item_id: 'fury_crystal', quantity: 216 }, { item_id: 'titanium_alloy', quantity: 120 }] },
       bought({ titanium_alloy: 120 }),
     )).toBe(true)
+  })
+})
+
+
+/**
+ * The gate went blind on two real call shapes, observed 2026-09-07. CyberSpock
+ * placed a standing order for fury_crystal x16 at 18:29 and tried to buy another
+ * 16 at 21:09; the checkpoint never fired, because:
+ *   - the second call passed the item as `id=`, not `item_id=`
+ *   - the first passed `orders:[{price_each, quantity}]` with NO item_id inside,
+ *     inheriting it from the top-level `item_id`, which produced ZERO lines
+ * A guard that cannot see the call is worse than none: it reports safe.
+ */
+describe('every real call shape is readable', () => {
+  test('buy with id= instead of item_id=', () => {
+    expect(purchaseLines({ id: 'fury_crystal', quantity: 16 }))
+      .toEqual([{ id: 'fury_crystal', qty: 16 }])
+  })
+
+  test('orders[] entries inherit the top-level item_id', () => {
+    expect(purchaseLines({
+      item_id: 'fury_crystal',
+      orders: [{ price_each: 680, quantity: 16 }],
+    })).toEqual([{ id: 'fury_crystal', qty: 16 }])
+  })
+
+  test('an explicit per-order item_id still wins over the top level', () => {
+    expect(purchaseLines({
+      item_id: 'fury_crystal',
+      orders: [{ item_id: 'circuit_board', quantity: 375 }],
+    })).toEqual([{ id: 'circuit_board', qty: 375 }])
+  })
+
+  test('the real duplicate would now checkpoint', () => {
+    const bought = (m: Record<string, number>) => (id: string) => m[id] ?? 0
+    expect(wouldCheckpoint({ id: 'fury_crystal', quantity: 16 }, bought({ fury_crystal: 16 })))
+      .toBe(true)
   })
 })
