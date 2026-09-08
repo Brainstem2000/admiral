@@ -299,6 +299,16 @@ export function captureSystemLinks(resultData: unknown, source: string): void {
 // cooldown gate and re-arm it when they finish.
 const MACRO_TOOLS = new Set(['mine_until_full', 'goto_system', 'sell_cargo', 'hunt_here'])
 
+/** Is this cargo line a MODULE, ship or other fitted equipment rather than a
+ *  tradeable commodity? Equipment reaches the hold by being uninstalled, looted
+ *  or bought for fitting — never as merchandise the sell_cargo macro should
+ *  dispose of. Matched on the id so it holds for items the catalog cache has
+ *  not seen yet. */
+export function isEquipmentItem(itemId: string): boolean {
+  return /(?:^|_)(?:laser|harvester|scanner|thruster|shield_booster|armor_plate|plating|cargo_expander|reactor|drone_bay|cloak|jammer|repair_module|tractor|mining_module|weapon|cannon|railgun|missile_launcher|torpedo_launcher|autocannon|module)(?:_|$)/i.test(itemId)
+    || /_(?:i|ii|iii|iv|v)$/i.test(itemId) && /(?:laser|harvester|booster|expander|core|emitter|computer|capacitor)/i.test(itemId)
+}
+
 export function isMacroTool(name: string): boolean {
   return MACRO_TOOLS.has(name)
 }
@@ -4477,15 +4487,31 @@ async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, r
     }
     const obs = depth.get(item.item_id.toLowerCase())
     let sellQty = item.quantity
-    if (item.quantity > 5) {
-      if (!obs || obs.buy <= 2) {
-        skipped.push(`${item.item_id} x${item.quantity} (${obs ? `lowball bid ${obs.buy}cr` : 'no local bid'} — deposit or create_sell_order instead)`)
-        continue
-      }
-      if (obs.qty !== null && obs.qty < item.quantity) {
-        sellQty = obs.qty
-        if (sellQty <= 0) { skipped.push(`${item.item_id} x${item.quantity} (bid depth 0)`); continue }
-      }
+
+    // EQUIPMENT IS NOT MERCHANDISE. A module sitting in cargo is almost always
+    // gear the agent just UNINSTALLED to free a slot, not stock to liquidate.
+    // 2026-09-07: Ledger uninstalled his Mining Laser III at 14:11 to fit a
+    // smaller laser for sparse seams, then ran sell_cargo — and the macro sold
+    // an 18,037cr module for TWO CREDITS. This macro must never dispose of
+    // equipment; if the operator genuinely wants it gone, `sell` it by name.
+    if (isEquipmentItem(item.item_id)) {
+      skipped.push(`${item.item_id} x${item.quantity} (EQUIPMENT — this macro never sells modules or ships; `
+        + `sell it by name if you really mean to)`)
+      continue
+    }
+
+    // Lowball check applies at ANY quantity. It used to sit behind `quantity > 5`,
+    // which is exactly backwards: a single high-value item is the one you can
+    // least afford to dump. The same threshold bug was fixed once already in
+    // checkDoctrineGuards (Zibal's phase crystals, four at a time into a 1cr bid)
+    // and never carried across to this macro.
+    if (!obs || obs.buy <= 2) {
+      skipped.push(`${item.item_id} x${item.quantity} (${obs ? `lowball bid ${obs.buy}cr` : 'no local bid'} — deposit or create_sell_order instead)`)
+      continue
+    }
+    if (item.quantity > 5 && obs.qty !== null && obs.qty < item.quantity) {
+      sellQty = obs.qty
+      if (sellQty <= 0) { skipped.push(`${item.item_id} x${item.quantity} (bid depth 0)`); continue }
     }
     const act = await macroAction(ctx,'sell', { item_id: item.item_id, quantity: sellQty }, 3)
     if (!act.ok) {
