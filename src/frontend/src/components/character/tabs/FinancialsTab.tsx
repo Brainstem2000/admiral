@@ -44,6 +44,7 @@ const KIND_LABELS: Record<string, string> = {
   unattributed: 'unexplained',
   other: 'misc',
   escrow_correction: 'correction',
+  craft_fee: 'craft labor',
   order_create: 'order placed',
   purchase_tax: 'purchase tax',
   sales_tax: 'sales tax',
@@ -58,6 +59,11 @@ const KIND_TITLES: Record<string, string> = {
     + 'Common causes: an untimed fee, a refund landing at the same moment, or a payload '
     + 'that reports no cost.',
   unattributed: 'A balance change with no command recorded against it.',
+  craft_fee: 'Labor and rental for a crafting job — the credit cost of RUNNING it. '
+    + 'Separate from the recipe inputs, which are escrowed from station storage as items, '
+    + 'not charged in credits. Rental applies when the job routes to another player\'s or '
+    + 'faction\'s facility rather than your own. Use dry_run:true on a craft for an itemised '
+    + 'quote before committing.',
   escrow_correction: 'A bookkeeping entry reversing a phantom escrow row, not a trade.',
 }
 
