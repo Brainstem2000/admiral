@@ -151,3 +151,54 @@ describe('bulk order envelopes', () => {
     expect(classifyResidual('refuel', -29_292, { action: 'refuel', cost: 810 })).toBe('coincident')
   })
 })
+
+/**
+ * "COINCIDENT" is an internal bucket name and it leaked to the operator as a
+ * word explaining nothing. Behind the bad label was a real classification gap:
+ * a craft payload carries job_id and recipe but NO cost field, so readDeclared
+ * returned null, plausibleBound floored at 5,000, and CyberSpock's 20,090 fee
+ * for "Temper Crimson Fury Alloy" — an ordinary, correct charge — booked as
+ * unexplained.
+ *
+ * The plausibility test compares a movement against a figure the action stated
+ * about ITSELF. With no figure there is nothing to be inconsistent with. So when
+ * the payload proves the action completed and the money moved in that action's
+ * expected direction, name it.
+ *
+ * The false positive this guard exists for went the other way: a +2,019,719
+ * commission refund landing during a refuel that DID declare cost:48. That case
+ * must stay coincident, and does, because it declares a figure.
+ */
+describe('unpriced fees are named, not dumped', () => {
+  const CRAFT = {
+    action: 'craft', kind: 'job',
+    job_id: '62166c2f32afcc290bfc402c8b885828',
+    recipe: 'Temper Crimson Fury Alloy',
+  }
+
+  test('a craft fee is a craft fee, not coincident', () => {
+    expect(classifyResidual('craft', -20_090, CRAFT)).toBe('craft_fee')
+  })
+
+  test('the guard still catches a windfall arriving during a declared action', () => {
+    // the real case: refuel declaring cost 48, +2,019,719 landing alongside it
+    expect(classifyResidual('refuel', 2_019_719, { action: 'refuel', cost: 48 }))
+      .toBe('coincident')
+  })
+
+  test('a POSITIVE movement during a confirmed craft is still suspicious', () => {
+    expect(classifyResidual('craft', 500_000, CRAFT)).toBe('coincident')
+  })
+
+  test('an unconfirmed action with no declaration stays coincident', () => {
+    // no job_id/recipe/order_id — nothing proves the action completed
+    expect(classifyResidual('craft', -20_090, { action: 'craft' })).toBe('coincident')
+  })
+
+  test('a declared figure still governs when present', () => {
+    expect(classifyResidual('refuel', -29_292, { action: 'refuel', cost: 810 }))
+      .toBe('coincident')
+    expect(classifyResidual('refuel', -810, { action: 'refuel', cost: 810 }))
+      .toBe('fuel')
+  })
+})

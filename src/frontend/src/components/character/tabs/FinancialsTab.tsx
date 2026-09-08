@@ -32,6 +32,35 @@ function sinceFor(period: Period): string {
   return '2000-01-01 00:00:00'
 }
 
+/**
+ * Human wording for the kinds whose enum name explains nothing to a reader.
+ * `coincident` in particular is an internal bucket — money that moved WHILE an
+ * action ran, which that action never declared — and showing the raw word made
+ * a -20,090 craft fee read as a mystery. The badge says what happened; the
+ * tooltip says why we could not name it more precisely.
+ */
+const KIND_LABELS: Record<string, string> = {
+  coincident: 'unexplained',
+  unattributed: 'unexplained',
+  other: 'misc',
+  escrow_correction: 'correction',
+  order_create: 'order placed',
+  purchase_tax: 'purchase tax',
+  sales_tax: 'sales tax',
+  mission_bond: 'mission bond',
+  mission_reward: 'mission pay',
+  mission_penalty: 'mission penalty',
+}
+
+const KIND_TITLES: Record<string, string> = {
+  coincident: 'Credits moved during this command that the command did not account for. '
+    + 'The amount is real and the balance is correct — only the reason is unconfirmed. '
+    + 'Common causes: an untimed fee, a refund landing at the same moment, or a payload '
+    + 'that reports no cost.',
+  unattributed: 'A balance change with no command recorded against it.',
+  escrow_correction: 'A bookkeeping entry reversing a phantom escrow row, not a trade.',
+}
+
 const KIND_COLORS: Record<string, string> = {
   buy: 'var(--smui-red)',
   sell: 'var(--smui-green)',
@@ -149,8 +178,9 @@ function KindChip({ kind }: { kind: string }) {
     <span
       className="text-[9px] uppercase tracking-wider px-1 py-0.5 border inline-block max-w-full truncate align-middle"
       style={{ color: `hsl(${c})`, borderColor: `hsl(${c} / 0.35)` }}
+      title={KIND_TITLES[kind]}
     >
-      {kind.replace(/_/g, ' ')}
+      {KIND_LABELS[kind] ?? kind.replace(/_/g, ' ')}
     </span>
   )
 }
@@ -530,7 +560,7 @@ export function FinancialsTab({ profile, connected }: { profile: Profile; connec
                 const share = Math.abs(v.total) / maxKindAbs
                 return (
                   <div key={kind} className="flex items-center gap-2">
-                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground w-28 shrink-0 truncate" style={DISPLAY}>{kind.replace(/_/g, ' ')}</span>
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground w-28 shrink-0 truncate" style={DISPLAY} title={KIND_TITLES[kind]}>{KIND_LABELS[kind] ?? kind.replace(/_/g, ' ')}</span>
                     <span className="text-[9px] text-muted-foreground/60 tabular-nums w-8 shrink-0 text-right">{v.count}×</span>
                     <div className="flex-1 h-2 bg-border/30 overflow-hidden">
                       <div

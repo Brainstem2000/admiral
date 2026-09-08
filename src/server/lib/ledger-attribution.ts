@@ -115,6 +115,21 @@ export function readDeclared(ref: Record<string, unknown> | null | undefined): n
  * `unattributed` when we know which command was running, because that discards
  * information we already hold.
  */
+/** Kinds that are always a COST. A negative movement during one of these is a
+ *  fee by construction; a positive one is something else arriving. */
+const OUTGOING: ReadonlySet<LedgerKind> = new Set<LedgerKind>([
+  'fuel', 'sales_tax', 'purchase_tax', 'craft_fee', 'repair', 'mission_bond',
+  'mission_penalty', 'gift_sent', 'freight', 'ship_purchase', 'order_create',
+])
+
+/** Payload markers proving the action actually completed, so an unpriced charge
+ *  alongside one is that action's fee rather than a coincidence. */
+function actionConfirmed(ref: Record<string, unknown> | null | undefined): boolean {
+  if (!ref) return false
+  return typeof ref.job_id === 'string' || typeof ref.recipe === 'string'
+    || typeof ref.order_id === 'string' || typeof ref.mission_id === 'string'
+}
+
 export function classifyResidual(
   action: string | null | undefined,
   amount: number,
@@ -125,5 +140,22 @@ export function classifyResidual(
   if (!a) return 'unattributed'                 // genuinely nothing to go on
   const kind = ACTION_KIND[a]
   if (!kind) return 'coincident'                // a query or unknown verb was running
-  return Math.abs(amount) <= plausibleBound(readDeclared(ref)) ? kind : 'coincident'
+
+  const declared = readDeclared(ref)
+
+  // NOTHING DECLARED. The plausibility test compares a movement against a figure
+  // the action stated about itself — with no figure there is nothing to be
+  // inconsistent with, and the 5,000 floor becomes arbitrary. A craft is the
+  // clearest case: its payload carries a job_id and a recipe but no cost, so
+  // CyberSpock's 20,090 fee for Temper Crimson Fury Alloy booked as
+  // "coincident" and read to the operator as an unexplained loss.
+  //
+  // So when the payload PROVES the action happened and the money moved in that
+  // action's expected direction, name it. The false positive this guard was
+  // built for went the other way — a +2,019,719 commission refund landing during
+  // a refuel that DID declare cost:48 — and that case still fails the test below
+  // because it declares a figure.
+  if (declared === null && actionConfirmed(ref) && OUTGOING.has(kind) && amount < 0) return kind
+
+  return Math.abs(amount) <= plausibleBound(declared) ? kind : 'coincident'
 }
