@@ -1445,6 +1445,17 @@ export function checkDoctrineGuards(
           if (qty > remaining) {
             return `BLOCKED: quota for ${itemId} has only ${remaining} remaining (you tried ${qty}). Sell at most ${Math.floor(remaining)} or leave it vaulted.`
           }
+        } else if (itemId) {
+          const lock = commissionLock(profileId, itemId, qty)
+          if (lock.breaks) {
+            const quota = getSellQuota(profileId, itemId)
+            if (quota === null || quota < qty) {
+              return (
+                `BLOCKED: ${itemId} is a recorded commission line — the build still needs ${lock.required} and you hold ${lock.total} ` +
+                `(storage + cargo), so selling ${qty} would break it. Keep it, deposit it at the yard, or ask the Admiral for a sell quota.`
+              )
+            }
+          }
         }
       }
     }
@@ -1715,7 +1726,8 @@ export function checkDoctrineGuards(
     const bare = command.replace(/^spacemolt_/, '').replace(/^social_/, '')
     if (bare === 'send_gift' || bare.endsWith('_send_gift')) {
       const itemId = String(commandArgs?.item_id ?? '').toLowerCase()
-      if (itemId && SELL_CARGO_ALWAYS_EXCLUDE.has(itemId)) {
+      const giftQty = Number(commandArgs?.quantity ?? 0) || 0
+      if (itemId && (SELL_CARGO_ALWAYS_EXCLUDE.has(itemId) || commissionLock(profileId, itemId, giftQty).breaks)) {
         const recipient = String(commandArgs?.recipient ?? '').trim().toLowerCase()
         const fleet = new Set<string>()
         for (const p of listProfiles()) {
@@ -4469,6 +4481,23 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
 // guard). History of what it held and why: git log this block.
 const SELL_CARGO_ALWAYS_EXCLUDE = new Set<string>([])
 
+/**
+ * Is this item locked for THIS agent because a recorded, unbuilt commission still
+ * needs it? The three market-exit guards (sell, sell_cargo, send_gift) keyed only
+ * on SELL_CARGO_ALWAYS_EXCLUDE, which has been an empty set since the Devastator
+ * was dropped — so on 2026-09-10 13:39 CyberSpock's sell_cargo(exclude=[]) sold 50
+ * uranium_ore the Juggernaut needs for 7,500cr, and nothing in code objected. The
+ * craft lock already read getCommissionRequirement(); the exits now do too, with
+ * the same "would this break the total" rule so genuine surplus stays sellable.
+ */
+function commissionLock(profileId: string, itemId: string, qty: number): { required: number; total: number; breaks: boolean } {
+  const required = getCommissionRequirement(itemId, profileId)
+  if (required <= 0) return { required: 0, total: 0, breaks: false }
+  let total = 0
+  try { total = getStorageTotalForProfile(profileId, itemId) + getCargoQuantity(profileId, itemId) } catch { total = 0 }
+  return { required, total, breaks: total - qty < required }
+}
+
 /** Ammunition the ship's own fitted weapons consume, read off get_ship.
  *
  *  sell_cargo(exclude=[]) means "sell everything sellable", and ammo is
@@ -4538,6 +4567,11 @@ async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, r
   let prevCredits = start.credits
   for (const item of start.cargo.slice(0, 20)) {
     if (Date.now() > deadline) { failed.push('(deadline hit — remaining items not attempted)'); break }
+    const lineLock = commissionLock(ctx.profileId, item.item_id.toLowerCase(), item.quantity)
+    if (lineLock.breaks) {
+      skipped.push(`${item.item_id} x${item.quantity} (commission line — the build needs ${lineLock.required}, you hold ${lineLock.total}; never sold by this macro)`)
+      continue
+    }
     if (exclude.has(item.item_id.toLowerCase())) {
       const isBom = SELL_CARGO_ALWAYS_EXCLUDE.has(item.item_id.toLowerCase())
       skipped.push(`${item.item_id} x${item.quantity} (${isBom ? 'BoM-locked — never sellable via this macro' : 'excluded'})`)
