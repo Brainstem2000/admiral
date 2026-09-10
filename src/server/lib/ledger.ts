@@ -143,7 +143,7 @@ export class LedgerCollector {
 
       // Fleet-internal gifts: the recipient side is silent, so the send is the
       // only place their +credits can be booked from.
-      if (action === 'send_gift' || action.endsWith('_send_gift')) {
+      if (action === 'send_gift' || action === 'faction_gift' || action.endsWith('_send_gift')) {
         const credits = num(r.credits_sent)
         const recipient = str(r.recipient) || str(r.target) || str(args?.recipient)
         if (credits && recipient) this.mirrorFleetGift(profileName, recipient, credits, command)
@@ -421,8 +421,12 @@ export class LedgerCollector {
         })
         break
       }
-      case 'send_gift': {
-        // { action: send_gift, credits_sent, wallet_remaining, ... } — outbound credit
+      case 'send_gift':
+      case 'faction_gift': {
+        // { action: send_gift | faction_gift, credits_sent, wallet_remaining, ... } — outbound
+        // credit gift. The game answers `faction_gift` when the recipient is a faction, and
+        // matching only `send_gift` let a 2,720,802cr nine-agent levy to the treasury on
+        // 2026-09-07 leave ZERO ledger rows; every parked wallet then displayed ~2x too high.
         // gift. Item/ship gifts carry no credits_sent and book nothing (the ledger tracks
         // credits, not inventory). Three silent refund gifts (212,618cr, 2026-08-25) left
         // a wallet with zero ledger rows before this case existed. The result may not echo
