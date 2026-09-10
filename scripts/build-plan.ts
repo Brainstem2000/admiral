@@ -149,15 +149,35 @@ const stock = (id: string) => {
 /** Price of a unit nobody sells, nobody can mine, and no recipe makes: only a hunt or a wreck yields it. */
 const DROP_PENALTY_PER_UNIT = 250_000
 
-function cost(id: string, qty: number, seen = new Set<string>()): number {
-  const net = Math.max(0, qty - stock(id))
+// Stock is consumed as the plan commits it. Without reservation the same units
+// satisfied every node that asked: the 8 reactor_fuel_assembly in the lockbox
+// covered the plutonium line AND fed a wrap_/unwrap_ cycle that then priced as
+// free, and any two branches leaning on one steel_plate stack were both "covered".
+const reserved = new Map<string, number>()
+function avail(id: string, path?: Map<string, number>): number {
+  return Math.max(0, stock(id) - (reserved.get(id) ?? 0) - (path?.get(id) ?? 0))
+}
+function withUse(path: Map<string, number> | undefined, id: string, use: number): Map<string, number> {
+  const m = new Map(path ?? []); if (use > 0) m.set(id, (m.get(id) ?? 0) + use); return m
+}
+
+function cost(id: string, qty: number, seen = new Set<string>(), path?: Map<string, number>): number {
+  const use = Math.min(qty, avail(id, path))
+  const net = Math.max(0, qty - use)
   if (net === 0) return 0
+  const nextPath = withUse(path, id, use)
   // Buying COMPETES with crafting — it does not pre-empt it. Preferring a
   // purchase the moment depth allowed bought fury_alloy x96 for 1,920,000
   // while 6,270 fury_crystal sat in storage and the craft cost nothing.
   const sup = supplier(id, net)
   const buyCost = sup ? sup.best_ask * net : Infinity
-  if (seen.has(id)) return buyCost                               // recipe cycle: only a purchase escapes it
+  // A recipe cycle never yields net units: reaching `id` again while costing
+  // one of its own recipes means "buy X to craft X", which is not a chain. The
+  // purchase escape belongs one level up — plan() and cost() both compare a
+  // direct purchase against every recipe before recursing — so here it must be
+  // Infinity. Returning buyCost let wrap_/unwrap_reactor_fuel_assembly price 8
+  // assemblies at the market ask and masquerade as a craft (2026-09-10).
+  if (seen.has(id)) return Infinity
   const rs = recipesFor(id)
   const next = new Set(seen).add(id)
   // An item with NO recipe is a raw. A raw the fleet can EXTRACT (mining, rad,
@@ -176,14 +196,16 @@ function cost(id: string, qty: number, seen = new Set<string>()): number {
   const craftCost = Math.min(...rs.map(r => {
     const runs = Math.ceil(net / yieldOf(r, id))
     return (r.inputs ?? r.materials ?? []).reduce(
-      (s: number, i: any) => s + cost(i.item_id, i.quantity * runs, next), 0)
+      (s: number, i: any) => s + cost(i.item_id, i.quantity * runs, next, nextPath), 0)
   }))
   return Math.min(buyCost, craftCost)
 }
 
 const buy = new Map<string, number>(), mine = new Map<string, number>(), make = new Map<string, string>()
 function plan(id: string, qty: number, seen = new Set<string>()) {
-  const net = Math.max(0, qty - stock(id))
+  const use = Math.min(qty, avail(id))
+  if (use > 0) reserved.set(id, (reserved.get(id) ?? 0) + use)
+  const net = Math.max(0, qty - use)
   if (net === 0) return
   const sup = supplier(id, net)
   const buyCost = sup ? sup.best_ask * net : Infinity
@@ -191,7 +213,7 @@ function plan(id: string, qty: number, seen = new Set<string>()) {
   const priced = (seen.has(id) ? [] : recipesFor(id)).map(r => ({
     r,
     c: (r.inputs ?? r.materials ?? []).reduce((s: number, i: any) =>
-      s + cost(i.item_id, i.quantity * Math.ceil(net / yieldOf(r, id)), next), 0),
+      s + cost(i.item_id, i.quantity * Math.ceil(net / yieldOf(r, id)), next, new Map([[id, use]])), 0),
   })).filter(x => Number.isFinite(x.c)).sort((a, b) => a.c - b.c)
   if (!priced.length || priced[0].c > buyCost) {
     if (sup) { buy.set(id, (buy.get(id) ?? 0) + net); return }
