@@ -1571,6 +1571,18 @@ export function listCommissionRequirements(shipClass?: string): Array<{ ship_cla
 }
 
 /** What this agent holds of one item at one station — the number the craft guard protects. */
+/**
+ * Does the fleet's intel say this system has a station? `true`/`false` when a
+ * row exists (the stations feed backfills every station system and clears the
+ * flag on the rest), `null` when the system is unknown to us.
+ */
+export function systemHasStation(systemId: string): boolean | null {
+  if (!systemId) return null
+  const row = getDb().query('SELECT has_station FROM fleet_intel_systems WHERE system_id = ?').get(systemId) as { has_station: number | null } | undefined
+  if (!row) return null
+  return Number(row.has_station) === 1
+}
+
 export function getStorageQuantity(profileId: string, stationId: string, itemId: string): number {
   const row = db.query(
     'SELECT quantity FROM storage_inventory WHERE profile_id = ? AND station_id = ? AND item_id = ?',

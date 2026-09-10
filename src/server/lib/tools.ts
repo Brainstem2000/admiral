@@ -4,7 +4,7 @@ import type { GameConnection } from './connections/interface'
 import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
 import { scrubLiveState, scrubNotice } from './note-hygiene'
 import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor, refuseAbandon, noteAbandon, knownTitle, isRefusedMissionTitle } from './mission-guard'
-import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, isStorageDirty, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS } from './db'
+import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, isStorageDirty, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS, systemHasStation } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { agentManager } from './agent-manager'
@@ -1051,6 +1051,10 @@ function checkCraftInputs(ctx: ToolContext, deep: string, commandArgs: Record<st
  * station's last view_market (this process) or the fleet's station-scoped
  * market table says so before the round trip — and says how deep the ask is.
  */
+/** Base values from the fuel guide (docs/guides/fuel): a cell is worth this at the station tank. */
+const FUEL_CELL_BASE: Record<string, number> = { fuel_cell: 43, premium_fuel_cell: 120, military_fuel_cell: 390 }
+const FUEL_CELL_PRICE_CAP_X = 5
+
 function checkBuyAsk(ctx: ToolContext, deep: string, commandArgs: Record<string, unknown> | undefined): string | null {
   if (deep !== 'buy' || getPreference('buy_ask_gate') === 'off') return null
   const itemId = String(commandArgs?.id ?? commandArgs?.item_id ?? '').toLowerCase()
@@ -1069,6 +1073,16 @@ function checkBuyAsk(ctx: ToolContext, deep: string, commandArgs: Record<string,
       return (
         `BLOCKED: ${itemId} is not on the ${station} board at all — your view_market ${ageS}s ago listed no order ` +
         `for it (ask depth 0). Nobody here sells it. Buy it where you have SEEN an ask, or create_buy_order here and wait.`
+      )
+    }
+    if (FUEL_CELL_BASE[itemId] !== undefined && e.ask !== null && e.ask > FUEL_CELL_PRICE_CAP_X * FUEL_CELL_BASE[itemId]) {
+      // Nova Reyes paid 3,000cr each for eight fuel_cell (base value 43) at Hex
+      // Star on 2026-09-10 — a lowball ask that cost 24,000cr for 160 fuel a
+      // station tank sells for ~500. The quantity guard could not see the price.
+      const base = FUEL_CELL_BASE[itemId]
+      return (
+        `BLOCKED: ${itemId} at ${e.ask}cr is a lowball trap — base value ${base}cr, cap ${FUEL_CELL_PRICE_CAP_X * base}cr ` +
+        `(view_market ${ageS}s ago). Station tank fuel costs 2-20cr per unit; refuel from the tank here, and buy cells only where the ask is under the cap.`
       )
     }
     if (e.ask === null || e.ask <= 0 || e.askQty === 0) {
@@ -3359,7 +3373,7 @@ function makeMacroNarrator(ctx: ToolContext, macro: string, reason?: string, min
 // current one — arriving and immediately re-routing. Any real work (scan,
 // market, mission, combat, mining, docking, looting) clears the gate, as does
 // simply waiting out the window. Toggle: preference `destination_gate` = 'off'.
-const lastDestinations = new Map<string, { system: string; at: number; workedSince: boolean }>()
+const lastDestinations = new Map<string, { system: string; at: number; workedSince: boolean; from: string | null }>()
 const DESTINATION_COMMIT_MS = 4 * 60_000
 
 /** Commands that count as actually working a system rather than passing through.
@@ -3478,6 +3492,23 @@ function movesTowardCommitment(ctx: ToolContext, target: string, committed: stri
   } catch { return false }
 }
 
+/**
+ * A committed system with no station cannot be "worked" by an agent passing
+ * through — there is no board to read and no dock to make — so arriving there
+ * satisfies the commitment. Without this, hand-flying a corridor leg by leg was
+ * refused at every stationless waypoint: Ledger Voss at Adhara and again at
+ * Pipirima, Nova Reyes at Proxima Centauri and CyberSpock at Blood Forge on
+ * 2026-09-10 (four refusals, one of which left Ledger idling on 14 fuel).
+ * Bouncing straight back to the system the course was set from is still churn
+ * and stays refused; so does leaving a STATION system without working it.
+ */
+function passingThroughStationless(ctx: ToolContext, prev: { system: string; from: string | null }, target: string): boolean {
+  const here = currentLocation(ctx).systemId
+  if (!here || here !== prev.system) return false          // not arrived — a mid-route diversion
+  if (systemHasStation(here) !== false) return false         // station here, or unknown: gate stands
+  return target !== prev.from                                // forward, not a bounce
+}
+
 /** Returns a refusal string when the agent is re-routing without having worked
  *  the system it just travelled to, or null to allow. */
 function checkDestinationCommit(ctx: ToolContext, target: string): string | null {
@@ -3491,13 +3522,15 @@ function checkDestinationCommit(ctx: ToolContext, target: string): string | null
     // commitment, so it keeps pointing at the final destination rather than
     // resetting to each waypoint (which would make the gate meaningless).
     if (movesTowardCommitment(ctx, target, prev.system)) return null
-    const waiver = departureWaiver(ctx)
-    if (!waiver) return destinationRefusal(prev.system, target, now - prev.at)
-    ctx.log('system', `Destination gate waived (${waiver}) — leaving ${prev.system} for ${target}`)
+    if (!passingThroughStationless(ctx, prev, target)) {
+      const waiver = departureWaiver(ctx)
+      if (!waiver) return destinationRefusal(prev.system, target, now - prev.at)
+      ctx.log('system', `Destination gate waived (${waiver}) — leaving ${prev.system} for ${target}`)
+    }
   }
 
   if (!prev || prev.system !== target) {
-    lastDestinations.set(profileId, { system: target, at: now, workedSince: false })
+    lastDestinations.set(profileId, { system: target, at: now, workedSince: false, from: currentLocation(ctx).systemId })
   }
   return null
 }
@@ -3517,10 +3550,15 @@ function checkRawJumpCommit(ctx: ToolContext, target: string): string | null {
   if (prev.system === target || prev.workedSince || now - prev.at >= DESTINATION_COMMIT_MS) return null
   const cur = currentLocation(ctx)
   if (!cur.systemId || cur.systemId !== prev.system) return null
+  if (passingThroughStationless(ctx, prev, target)) {
+    // Raw hops never open a commitment; passing through closes this one.
+    lastDestinations.delete(ctx.profileId)
+    return null
+  }
   const waiver = departureWaiver(ctx)
   if (waiver) {
     ctx.log('system', `Destination gate waived (${waiver}) — jumping ${prev.system} -> ${target}`)
-    lastDestinations.set(ctx.profileId, { system: target, at: now, workedSince: false })
+    lastDestinations.set(ctx.profileId, { system: target, at: now, workedSince: false, from: cur.systemId })
     return null
   }
   return destinationRefusal(prev.system, target, now - prev.at)
