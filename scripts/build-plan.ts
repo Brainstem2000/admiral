@@ -146,6 +146,9 @@ const stock = (id: string) => {
 }
 
 /** Rough cost of obtaining `qty` of `id`, used only to CHOOSE between recipes. */
+/** Price of a unit nobody sells, nobody can mine, and no recipe makes: only a hunt or a wreck yields it. */
+const DROP_PENALTY_PER_UNIT = 250_000
+
 function cost(id: string, qty: number, seen = new Set<string>()): number {
   const net = Math.max(0, qty - stock(id))
   if (net === 0) return 0
@@ -157,11 +160,19 @@ function cost(id: string, qty: number, seen = new Set<string>()): number {
   if (seen.has(id)) return buyCost                               // recipe cycle: only a purchase escapes it
   const rs = recipesFor(id)
   const next = new Set(seen).add(id)
-  // An item with NO recipe is a raw: mineable, so give it a heavy but finite
-  // price. An item whose every recipe is cyclic is NOT mineable and must stay
-  // Infinity — collapsing that to the same penalty let wrap/unwrap loops price
-  // at 5,000/unit and beat the real chain (breed_plutonium).
-  if (!rs.length) return Math.min(buyCost, net * 5_000)
+  // An item with NO recipe is a raw. A raw the fleet can EXTRACT (mining, rad,
+  // gas, ice) gets a heavy but finite price; a raw with no extraction type is a
+  // drop — hunted, salvaged or looted — and must price far above any chain the
+  // fleet can actually run. At a flat 5,000/unit, 16 hoarfrost_heartcore (80,000)
+  // beat the fusion route to power_core whose helium the lockbox already held,
+  // so the plan told the Admiral on 2026-09-10 to go hunting. An item whose
+  // every recipe is cyclic is NOT mineable and must stay Infinity — collapsing
+  // that to the same penalty let wrap/unwrap loops price at 5,000/unit and beat
+  // the real chain (breed_plutonium).
+  if (!rs.length) {
+    const by = itemById.get(id)?.extracted_by
+    return Math.min(buyCost, net * (by ? 5_000 : DROP_PENALTY_PER_UNIT))
+  }
   const craftCost = Math.min(...rs.map(r => {
     const runs = Math.ceil(net / yieldOf(r, id))
     return (r.inputs ?? r.materials ?? []).reduce(
