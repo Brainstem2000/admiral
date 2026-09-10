@@ -304,7 +304,52 @@ export function classifyToolCall(
  *  call it meant, so it executes now instead of costing a retry round. Hosted
  *  models never answer this way, so the strict shape check makes this inert
  *  for them. */
-export function recoverToolCallFromText(response: AssistantMessage, log: LogFn): boolean {
+/** Keys the model may mangle: `"function_call:"`, `" Name "`, `"Arguments"` — fold to a canonical form. */
+function normalizeKeys(obj: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) out[k.trim().replace(/[:\s]+$/, '').toLowerCase()] = v
+  return out
+}
+
+/** `arguments` arrives as an object, a JSON string, or nothing. */
+function parseArgs(v: unknown): Record<string, unknown> | null {
+  if (v === undefined || v === null) return {}
+  if (typeof v === 'string') {
+    const t = v.trim()
+    if (!t) return {}
+    try { const o = JSON.parse(t); return o && typeof o === 'object' && !Array.isArray(o) ? o : null } catch { return null }
+  }
+  return typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : null
+}
+
+/** Damerau-Levenshtein with adjacent transpositions — enough to catch a doubled
+ *  letter or a swapped pair, not enough to confuse two real tools. */
+function editDistance(a: string, b: string): number {
+  const d: number[][] = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0))
+  for (let i = 0; i <= a.length; i++) d[i][0] = i
+  for (let j = 0; j <= b.length; j++) d[0][j] = j
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1)
+    }
+  }
+  return d[a.length][b.length]
+}
+
+/** A misspelt tool name (`update_ttodo`) maps to the ONE declared tool within
+ *  two edits of it; anything ambiguous or far off is left alone. */
+export function repairToolName(name: string, known?: Set<string>): string {
+  if (!known || known.size === 0 || known.has(name)) return name
+  const lower = name.toLowerCase()
+  if (known.has(lower)) return lower
+  if (lower.length < 6) return name
+  const hits = [...known].filter(k => Math.abs(k.length - lower.length) <= 2 && editDistance(lower, k) <= 2)
+  return hits.length === 1 ? hits[0] : name
+}
+
+export function recoverToolCallFromText(response: AssistantMessage, log: LogFn, knownTools?: Set<string>): boolean {
   if (response.content.some((c) => c.type === 'toolCall')) return false
   const texts = response.content.filter((c): c is { type: 'text'; text: string } => c.type === 'text' && typeof (c as any).text === 'string')
   if (texts.length !== 1) return false
@@ -313,9 +358,39 @@ export function recoverToolCallFromText(response: AssistantMessage, log: LogFn):
   let obj: any
   try { obj = JSON.parse(raw) } catch { return false }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false
+  obj = normalizeKeys(obj)
   let name: string | undefined
   let args: Record<string, unknown> = {}
-  if (typeof obj.command === 'string' && obj.command.trim()) {
+  // The OpenAI-style envelopes a local model prints when it misses the tool
+  // channel — seen verbatim from gpt-oss on Ledger Voss, 2026-09-10:
+  //   {"role":"Assistant","function_call":{"name":"update_todo","arguments":{"content":"…"}}}
+  //   {"role":"assistant","function_call:":"update_ttodo","arguments":{"content":"TODO: "}}
+  // plus the modern {"tool_calls":[{"function":{"name","arguments"}}]} and a bare
+  // {"function":{…}}. Each one cost a text-only round; three of them parked the
+  // agent in idle backoff mid-corridor.
+  const fc = obj.function_call ?? obj.function ?? obj.tool_call
+  const tc = Array.isArray(obj.tool_calls) && obj.tool_calls.length ? obj.tool_calls[0] : undefined
+  const envelope: Record<string, unknown> | undefined =
+    fc && typeof fc === 'object' && !Array.isArray(fc) ? normalizeKeys(fc as Record<string, unknown>)
+    : typeof fc === 'string' && fc.trim() ? { name: fc.trim(), arguments: obj.arguments ?? obj.args ?? obj.parameters }
+    : tc && typeof tc === 'object' ? (() => {
+        const t = normalizeKeys(tc as Record<string, unknown>)
+        const f = t.function && typeof t.function === 'object' ? normalizeKeys(t.function as Record<string, unknown>) : t
+        return f
+      })()
+    : undefined
+  if (envelope && typeof envelope.name === 'string' && envelope.name.trim()) {
+    const parsed = parseArgs(envelope.arguments ?? envelope.args ?? envelope.parameters)
+    if (parsed) {
+      name = envelope.name.trim()
+      args = parsed
+      if (name === 'game' || (typeof parsed.command === 'string' && !knownTools?.has(name))) {
+        // {"function_call":{"name":"game","arguments":{"command":"jump","args":{…}}}} or a
+        // game command named directly: route through the game tool as executeTool expects.
+        if (typeof parsed.command === 'string') { name = 'game' }
+      }
+    }
+  } else if (typeof obj.command === 'string' && obj.command.trim()) {
     name = 'game'
     args = { command: obj.command.trim() }
     if (obj.args && typeof obj.args === 'object' && !Array.isArray(obj.args)) args.args = obj.args
@@ -337,9 +412,12 @@ export function recoverToolCallFromText(response: AssistantMessage, log: LogFn):
     args = { content: obj.content }
   }
   if (!name) return false
+  const repaired = repairToolName(name, knownTools)
+  const note = repaired !== name ? ` (repaired "${name}" -> "${repaired}")` : ''
+  name = repaired
   const call: ToolCall = { type: 'toolCall', id: `recovered_${Date.now().toString(36)}`, name, arguments: args }
   response.content = response.content.map((c) => (c === texts[0] ? call : c)) as typeof response.content
-  log('system', `Recovered a tool call the model emitted as text: ${name}(${JSON.stringify(args).slice(0, 140)})`)
+  log('system', `Recovered a tool call the model emitted as text: ${name}(${JSON.stringify(args).slice(0, 140)})${note}`)
   return true
 }
 
@@ -368,6 +446,9 @@ export function readableThought(text: string): string {
     return `(intended tool call) ${obj.command}(${argStr})`
   }
   if (typeof obj.name === 'string') return `(intended tool call) ${obj.name}(...)`
+  const fcRaw = obj.function_call ?? obj['function_call:'] ?? obj.function
+  if (fcRaw && typeof fcRaw === 'object' && typeof fcRaw.name === 'string') return `(intended tool call) ${fcRaw.name}(...)`
+  if (typeof fcRaw === 'string') return `(intended tool call) ${fcRaw}(...)`
   return `(model emitted a JSON object with keys: ${Object.keys(obj).join(', ')})`
 }
 
@@ -642,7 +723,7 @@ export async function runAgentTurn(
 
     context.messages.push(response)
 
-    recoverToolCallFromText(response, log)
+    recoverToolCallFromText(response, log, declaredTools)
     const toolCalls = response.content.filter((c): c is ToolCall => c.type === 'toolCall')
 
     const textParts = response.content
