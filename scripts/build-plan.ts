@@ -101,6 +101,7 @@ const depth = (id: string) => Math.max(0, ...offers(id).map(r => r.ask_quantity_
 // Rook Vance to War Citadel for "13 free rad_harvester_i" he could not touch.
 //   --for <agent>      count only that agent's storage (name prefix, case-insensitive)
 //   --at <station_id>  count only that station
+//   --faction          also count the faction lockbox (faction_storage_inventory)
 // Default stays fleet-wide, which is the right frame for "can the fleet do this
 // at all" — but the header says which frame is in force, because a bare number
 // with no frame is how this went wrong every previous time.
@@ -127,9 +128,20 @@ if (scopeProfileId) { where.push('profile_id = ?'); bindExtra.push(scopeProfileI
 if (atStation) { where.push('station_id = ?'); bindExtra.push(atStation) }
 const stockQ = db.query(
   `SELECT COALESCE(SUM(quantity),0) q FROM storage_inventory WHERE ${where.join(' AND ')}`)
+// --faction: add the faction lockbox (faction_storage_inventory, fed by `view target=faction`).
+// Any officer can withdraw from it where it exists, so for a scoped --for run it is real
+// stock — the Juggernaut count on 2026-09-10 missed shield_emitter 172, hull_plating 195,
+// durasteel_plate 221 and weapon_housing 80 sitting in the War Citadel lockbox.
+const withFaction = process.argv.includes('--faction')
+const factionQ = db.query(
+  `SELECT COALESCE(SUM(quantity),0) q FROM faction_storage_inventory WHERE item_id = ?${atStation ? ' AND station_id = ?' : ''}`)
 const stockCache = new Map<string, number>()
 const stock = (id: string) => {
-  if (!stockCache.has(id)) stockCache.set(id, (stockQ.get(id, ...bindExtra) as any).q as number)
+  if (!stockCache.has(id)) {
+    let q = (stockQ.get(id, ...bindExtra) as any).q as number
+    if (withFaction) q += (factionQ.get(...(atStation ? [id, atStation] : [id])) as any).q as number
+    stockCache.set(id, q)
+  }
   return stockCache.get(id)!
 }
 
@@ -194,7 +206,7 @@ for (const m of hull.build_materials) plan(m.item_id, m.quantity)
 
 const n = (x: number) => Math.round(x).toLocaleString('en-US')
 const scopeLabel = scopeAgentName
-  ? `stock counted: ${scopeAgentName} only${atStation ? ` at ${atStation}` : ''}`
+  ? `stock counted: ${scopeAgentName} only${atStation ? ` at ${atStation}` : ''}${withFaction ? ' + the faction lockbox' : ''}`
   : atStation
     ? `stock counted: all agents at ${atStation}`
     : 'stock counted: FLEET-WIDE across every agent and station — '

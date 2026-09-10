@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { agentManager } from '../lib/agent-manager'
-import { listProfiles, getDb } from '../lib/db'
+import { listProfiles, getDb, getFactionStorage, getFactionLedger, getFactionTreasurySummary } from '../lib/db'
 
 /**
  * Faction-level view: overview (treasury, members/roles, personnel, fuel) plus
@@ -152,5 +152,30 @@ faction.get('/', async (c) => {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
   }
 })
+
+
+// --- Faction ledger / lockbox / treasury (DB-backed, no game tick) ---
+
+/** Lockbox contents as last reported by any agent's `view target=faction`, per station. */
+faction.get('/storage', (c) => {
+  const station = c.req.query('station') || undefined
+  const rows = getFactionStorage(station)
+  const byStation: Record<string, { updated_at: string; reported_by: string | null; items: Array<{ item_id: string; item_name: string; quantity: number }> }> = {}
+  for (const r of rows) {
+    const s = byStation[r.station_id] ??= { updated_at: r.updated_at, reported_by: r.reported_by, items: [] }
+    if (r.updated_at > s.updated_at) { s.updated_at = r.updated_at; s.reported_by = r.reported_by }
+    s.items.push({ item_id: r.item_id, item_name: r.item_name, quantity: r.quantity })
+  }
+  return c.json({ stations: byStation })
+})
+
+/** Booked treasury and lockbox movements. ?since=ISO&kind=&item=&profile=&limit= */
+faction.get('/ledger', (c) => {
+  const q = c.req.query()
+  return c.json(getFactionLedger({ since: q.since, kind: q.kind, itemId: q.item, profileId: q.profile, limit: q.limit ? Number(q.limit) : undefined }))
+})
+
+/** Treasury reconciliation: last reported balance vs booked movements. */
+faction.get('/treasury', (c) => c.json(getFactionTreasurySummary()))
 
 export default faction

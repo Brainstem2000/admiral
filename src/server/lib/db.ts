@@ -967,6 +967,51 @@ function migrate(db: Database): void {
     );
   `)
 
+  // Faction ledger: every credit movement into/out of the faction treasury and every
+  // item movement into/out of the faction lockbox, plus snapshots of what the game
+  // itself reports (view target=faction returns the lockbox at the docked station AND
+  // the treasury balance). The Admiral asked for this on 2026-09-10 after the
+  // Juggernaut progress count missed six complete component lines that were sitting
+  // in the War Citadel lockbox — nothing in the DB knew the lockbox existed.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS faction_ledger (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT DEFAULT (datetime('now')),
+      faction_id TEXT,
+      faction_tag TEXT,
+      kind TEXT NOT NULL,
+      profile_id TEXT,
+      station_id TEXT,
+      item_id TEXT,
+      quantity REAL,
+      credits_signed INTEGER,
+      source_command TEXT NOT NULL,
+      raw_ref TEXT,
+      tick INTEGER,
+      dedupe_key TEXT UNIQUE
+    );
+    CREATE INDEX IF NOT EXISTS idx_fled_ts ON faction_ledger(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_fled_kind ON faction_ledger(kind);
+    CREATE TABLE IF NOT EXISTS faction_storage_inventory (
+      faction_id TEXT NOT NULL,
+      station_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      item_name TEXT DEFAULT '',
+      quantity REAL NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now')),
+      reported_by TEXT,
+      PRIMARY KEY (faction_id, station_id, item_id)
+    );
+    CREATE TABLE IF NOT EXISTS faction_treasury_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      faction_id TEXT,
+      credits INTEGER NOT NULL,
+      at TEXT DEFAULT (datetime('now')),
+      reported_by TEXT,
+      source_command TEXT
+    );
+  `)
+
   // Agent schedules for cron-like automation
   db.exec(`
     CREATE TABLE IF NOT EXISTS schedules (
@@ -1621,6 +1666,117 @@ export function getMostRecentStation(profileId: string): string | null {
     'SELECT station_id FROM storage_inventory WHERE profile_id = ? ORDER BY updated_at DESC LIMIT 1',
   ).get(profileId) as { station_id: string } | null
   return row?.station_id ?? null
+}
+
+// --- Faction ledger / lockbox / treasury ---------------------------------------
+
+export interface FactionLedgerRow {
+  faction_id: string | null
+  faction_tag: string | null
+  kind: 'treasury_deposit' | 'treasury_withdraw' | 'treasury_gift' | 'lockbox_deposit' | 'lockbox_withdraw'
+  profile_id: string | null
+  station_id: string | null
+  item_id: string | null
+  quantity: number | null
+  credits_signed: number | null
+  source_command: string
+  raw_ref: string | null
+  tick: number | null
+  dedupe_key: string
+  timestamp?: string
+}
+
+/** INSERT OR IGNORE on dedupe_key: replays of the same tick/command book once. Returns true when a row was written. */
+export function insertFactionLedger(row: FactionLedgerRow): boolean {
+  const res = getDb().query(`
+    INSERT OR IGNORE INTO faction_ledger
+      (timestamp, faction_id, faction_tag, kind, profile_id, station_id, item_id, quantity, credits_signed, source_command, raw_ref, tick, dedupe_key)
+    VALUES (COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(row.timestamp ?? null, row.faction_id, row.faction_tag, row.kind, row.profile_id, row.station_id, row.item_id,
+         row.quantity, row.credits_signed, row.source_command, row.raw_ref, row.tick, row.dedupe_key)
+  return Number((res as { changes?: number }).changes ?? 0) > 0
+}
+
+/** Replace the lockbox snapshot for one station (wholesale, like recordStorageSnapshot). */
+export function recordFactionStorageSnapshot(
+  factionId: string, stationId: string, items: StorageItem[], reportedBy: string | null, at?: string,
+): void {
+  const d = getDb()
+  const tx = d.transaction(() => {
+    d.query('DELETE FROM faction_storage_inventory WHERE faction_id = ? AND station_id = ?').run(factionId, stationId)
+    const ins = d.query(`INSERT INTO faction_storage_inventory (faction_id, station_id, item_id, item_name, quantity, updated_at, reported_by)
+      VALUES (?, ?, ?, ?, ?, COALESCE(?, datetime('now')), ?)`)
+    for (const it of items) {
+      if (!it.item_id || !(it.quantity > 0)) continue
+      ins.run(factionId, stationId, it.item_id, it.item_name ?? '', it.quantity, at ?? null, reportedBy)
+    }
+  })
+  tx()
+}
+
+export function recordFactionTreasurySnapshot(factionId: string | null, credits: number, reportedBy: string | null, sourceCommand: string, at?: string): void {
+  getDb().query(`INSERT INTO faction_treasury_snapshots (faction_id, credits, at, reported_by, source_command)
+    VALUES (?, ?, COALESCE(?, datetime('now')), ?, ?)`).run(factionId, Math.round(credits), at ?? null, reportedBy, sourceCommand)
+}
+
+export function getFactionStorage(stationId?: string): Array<{ faction_id: string; station_id: string; item_id: string; item_name: string; quantity: number; updated_at: string; reported_by: string | null }> {
+  const d = getDb()
+  return (stationId
+    ? d.query('SELECT * FROM faction_storage_inventory WHERE station_id = ? ORDER BY quantity DESC').all(stationId)
+    : d.query('SELECT * FROM faction_storage_inventory ORDER BY station_id, quantity DESC').all()) as any
+}
+
+/** Faction lockbox quantity of an item, summed over stations (or one station). */
+export function getFactionStorageQuantity(itemId: string, stationId?: string): number {
+  const d = getDb()
+  const row = (stationId
+    ? d.query('SELECT COALESCE(SUM(quantity),0) q FROM faction_storage_inventory WHERE item_id = ? AND station_id = ?').get(itemId, stationId)
+    : d.query('SELECT COALESCE(SUM(quantity),0) q FROM faction_storage_inventory WHERE item_id = ?').get(itemId)) as { q: number }
+  return Number(row?.q ?? 0)
+}
+
+export function getFactionLedger(opts: { since?: string; kind?: string; itemId?: string; profileId?: string; limit?: number } = {}): Array<Record<string, unknown>> {
+  const cond: string[] = []; const params: (string | number)[] = []
+  if (opts.since) { cond.push('timestamp >= ?'); params.push(opts.since) }
+  if (opts.kind) { cond.push('kind = ?'); params.push(opts.kind) }
+  if (opts.itemId) { cond.push('item_id = ?'); params.push(opts.itemId) }
+  if (opts.profileId) { cond.push('profile_id = ?'); params.push(opts.profileId) }
+  const where = cond.length ? `WHERE ${cond.join(' AND ')}` : ''
+  return getDb().query(`SELECT * FROM faction_ledger ${where} ORDER BY id DESC LIMIT ?`).all(...params, Math.min(Math.max(opts.limit ?? 200, 1), 5000)) as Array<Record<string, unknown>>
+}
+
+/**
+ * Reconciliation: the newest treasury balance the game reported, the credit movements
+ * booked since then, and what those imply the balance should be now. A non-zero
+ * `unexplained` between two snapshots is money that moved without a booked command
+ * (a member depositing from a client the Admiral does not run, a facility payout, a
+ * craft job drawing on the treasury).
+ */
+export function getFactionTreasurySummary(): {
+  latest: { credits: number; at: string; reported_by: string | null } | null
+  previous: { credits: number; at: string } | null
+  booked_since_latest: number
+  implied_now: number | null
+  unexplained_between_snapshots: number | null
+} {
+  const d = getDb()
+  const snaps = d.query('SELECT credits, at, reported_by FROM faction_treasury_snapshots ORDER BY id DESC LIMIT 2').all() as Array<{ credits: number; at: string; reported_by: string | null }>
+  const latest = snaps[0] ?? null
+  const previous = snaps[1] ?? null
+  // Inclusive lower bound: timestamps are whole seconds, and a movement booked in
+  // the snapshot's own second is a command that ran after the query, not before it.
+  const sumSince = (from: string, to?: string) => Number((d.query(
+    `SELECT COALESCE(SUM(credits_signed),0) s FROM faction_ledger WHERE credits_signed IS NOT NULL AND timestamp >= ? ${to ? 'AND timestamp < ?' : ''}`,
+  ).get(...(to ? [from, to] : [from])) as { s: number }).s)
+  const bookedSince = latest ? sumSince(latest.at) : 0
+  const between = latest && previous ? (latest.credits - previous.credits) - sumSince(previous.at, latest.at) : null
+  return {
+    latest,
+    previous: previous ? { credits: previous.credits, at: previous.at } : null,
+    booked_since_latest: bookedSince,
+    implied_now: latest ? latest.credits + bookedSince : null,
+    unexplained_between_snapshots: between,
+  }
 }
 
 /** Fleet-wide holdings of an item outside one station — where to source a blocked craft from. */

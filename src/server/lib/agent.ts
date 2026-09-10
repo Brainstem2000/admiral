@@ -13,6 +13,7 @@ import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
 import { isCodeDefect } from './swallow'
+import { captureFactionFromCommand } from './faction-ledger'
 import { allTools, toolsForRole, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest, reputationLockedSystemIds } from './tools'
 import { directiveForbidsSystem } from './directive-rules'
 import { runAgentTurn, VOLATILE_STATE_HEADER, VOLATILE_STATE_END, type CompactionState } from './loop'
@@ -958,6 +959,10 @@ export class Agent {
       )
       const payload = (result as { structuredContent?: unknown }).structuredContent ?? result.result
       recordStorageFromCommand(command, payload, this.profileId)
+      try {
+        const loc = (this.connection?.getLocalState?.() as { location?: { docked_at?: string | null } } | null)?.location
+        captureFactionFromCommand(command, args, payload, this.profileId, getProfile(this.profileId)?.name ?? 'manual', { station: loc?.docked_at ?? null })
+      } catch { /* never break command execution */ }
       recordCargoFromCommand(command, payload, this.profileId)
       // Same self-accounting captures the LLM tool path runs (ships, policies,
       // freight, links, empire policy) — manual/API commands see the same truths.

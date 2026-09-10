@@ -7,6 +7,7 @@ import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refus
 import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, isStorageDirty, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS, systemHasStation } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
+import { captureFactionFromCommand } from './faction-ledger'
 import { agentManager } from './agent-manager'
 import { invalidateBriefingCache, collectTargets, hopsFrom } from './briefing'
 import { resolveAgentRole } from './role'
@@ -2756,6 +2757,7 @@ export async function executeTool(
       if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
       recordStorageFromCommand(command, resultData, ctx.profileId)
       recordCargoFromCommand(command, resultData, ctx.profileId)
+      captureFactionFromCommand(command, commandArgs, resultData, ctx.profileId, ctx.profileName, { station: currentLocation(ctx).dockedAt })
     } catch { /* never break game execution */ }
 
     // Book credit movements from the resolved result — via bookLedgerFromCommand, the
