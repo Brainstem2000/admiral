@@ -994,12 +994,25 @@ function checkCraftInputs(ctx: ToolContext, deep: string, commandArgs: Record<st
   const inputs = Array.isArray(recipe?.inputs) ? recipe!.inputs as Array<Record<string, unknown>> : null
   if (!inputs || inputs.length === 0) return null   // unknown recipe — let the game answer
 
+  // `quantity` on a craft is OUTPUT ITEMS, not runs — the game rounds it up to
+  // whole production runs (docs/crafting: "quantity means output items, not
+  // runs"). A recipe that yields several items per run therefore needs
+  // ceil(quantity / yield) runs' worth of inputs, not quantity runs' worth.
+  // Multiplying by quantity told CyberSpock on 2026-09-10 that purify_argon
+  // x680 (5 argon -> 3 purified, 227 runs, 1,135 argon) needed 3,400 argon
+  // against the 1,241 he held, and sent him two systems away to fetch argon he
+  // did not need. Every multi-output recipe (refine_steel, process_copper_wiring,
+  // purify_argon) was over-counted the same way.
+  const outputs = Array.isArray(recipe?.outputs) ? recipe!.outputs as Array<Record<string, unknown>> : []
+  const yieldPerRun = Math.max(1, Number(outputs[0]?.quantity ?? 1) || 1)
+  const runs = Math.ceil(qty / yieldPerRun)
+
   const missing: string[] = []
   for (const inp of inputs) {
     const item = String(inp.item_id ?? '')
     const per = Number(inp.quantity ?? 0) || 0
     if (!item || per <= 0) continue
-    const need = per * qty
+    const need = per * runs
     let have = 0
     try { have = getStorageQuantity(ctx.profileId, station, item) } catch { have = 0 }
     if (have >= need) continue
@@ -1027,7 +1040,7 @@ function checkCraftInputs(ctx: ToolContext, deep: string, commandArgs: Record<st
   craftBlocks.set(ctx.profileId, key)
 
   return (
-    `BLOCKED: craft(${recipeId} x${qty}) would fail — crafting draws ONLY from station storage at ${station}, never from cargo.\n` +
+    `BLOCKED: craft(${recipeId} x${qty}${yieldPerRun > 1 ? ` = ${runs} run(s) of ${yieldPerRun}` : ''}) would fail — crafting draws ONLY from station storage at ${station}, never from cargo.\n` +
     missing.map(m => `  • ${m}`).join('\n') +
     `\nDeposit or acquire the missing inputs, then craft. Checked locally; no game tick was spent.`
   )
@@ -1623,14 +1636,19 @@ export function checkDoctrineGuards(
     const bare = command.replace(/^spacemolt_/, '').replace(/^craft_/, '')
     if (bare === 'craft' || bare.endsWith('_craft')) {
       const recipeId = String(commandArgs?.id ?? commandArgs?.recipe_id ?? '').trim()
-      const runs = Math.max(1, Number(commandArgs?.quantity ?? commandArgs?.count ?? commandArgs?.runs ?? 1) || 1)
+      const wanted = Math.max(1, Number(commandArgs?.quantity ?? commandArgs?.count ?? commandArgs?.runs ?? 1) || 1)
       const isDryRun = commandArgs?.dry_run === true
       // The guard is not handed a location, so fall back to the last station this agent
       // recorded storage at — storage snapshots are written on every view_storage.
       const stationId = String(commandArgs?.base_id ?? commandArgs?.station_id ?? getMostRecentStation(profileId) ?? '')
 
       if (recipeId && !isDryRun && stationId) {
-        const recipe = codexGet('recipe', recipeId) as { inputs?: Array<{ item_id?: string; quantity?: number }> } | null
+        const recipe = codexGet('recipe', recipeId) as { inputs?: Array<{ item_id?: string; quantity?: number }>; outputs?: Array<{ quantity?: number }> } | null
+        // `quantity` is output items; the game rounds it up to whole runs, so a
+        // multi-output recipe consumes ceil(quantity / yield) runs of inputs, not
+        // quantity runs (same over-count that broke checkCraftInputs, 2026-09-10).
+        const yieldPerRun = Math.max(1, Number(recipe?.outputs?.[0]?.quantity ?? 1) || 1)
+        const runs = Math.ceil(wanted / yieldPerRun)
         for (const input of recipe?.inputs ?? []) {
           const itemId = String(input?.item_id ?? '').toLowerCase()
           if (!itemId) continue
