@@ -4639,7 +4639,28 @@ async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContex
 
   const end = await macroReadState(conn)
   const minedUnits = (end.cargoUsed ?? lastUsed) - (start.cargoUsed ?? 0)
-  return `mine_until_full DONE: ${mines} mine actions, +${minedUnits} cargo units, cargo now ${end.cargoUsed ?? '?'}/${end.cargoCapacity ?? '?'}. Stopped: ${stopReason}.`
+  return mineStopMessage(mines, minedUnits, end.cargoUsed ?? lastUsed, end.cargoCapacity, stopReason, stopPct)
+}
+
+/**
+ * The macro's closing line. A per-call cap (max_mines / the 15-minute deadline) is a
+ * PAUSE, not a finish: on 2026-09-11 06:20 Ledger Voss read "mine_until_full DONE:
+ * … cargo now 185/450. Stopped: max_mines." and his next thought was "hold full at
+ * 185/450 — ready to sell", a ten-jump round trip for 41% of a hold. The word DONE
+ * is now reserved for full / depleted / error stops; a capped call says PAUSED and
+ * names the next action.
+ */
+export function mineStopMessage(mines: number, minedUnits: number, used: number | null, cap: number | null, stopReason: string, stopPct = 100): string {
+  const usedTxt = used ?? '?'; const capTxt = cap ?? '?'
+  const capped = stopReason === 'max_mines' || stopReason.startsWith('deadline')
+  const target = cap ? Math.floor((cap * stopPct) / 100) : null
+  const notFull = capped && used !== null && target !== null && used < target
+  if (notFull) {
+    const pct = cap ? Math.round((used / cap) * 100) : 0
+    return `mine_until_full PAUSED (not done): ${mines} mine actions, +${minedUnits} cargo units, cargo now ${usedTxt}/${capTxt} (${pct}%). ` +
+      `Stopped: ${stopReason} — that is the per-call cap, NOT a full hold. Call mine_until_full again now; stop only when it reports full or depleted.`
+  }
+  return `mine_until_full DONE: ${mines} mine actions, +${minedUnits} cargo units, cargo now ${usedTxt}/${capTxt}. Stopped: ${stopReason}.`
 }
 
 /**
