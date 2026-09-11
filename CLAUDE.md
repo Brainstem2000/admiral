@@ -18,7 +18,7 @@ bun run build          # build frontend + compile standalone `admiral` binary
 ```
 
 - Runtime is **Bun** (`bun:sqlite`, `bun build --compile`). Do not introduce Node-only APIs.
-- **Run the tests.** `bun test` — 690 across 81 files, all passing (≈9 min; several files wait on a rate-limited catalog fetch). (This line used
+- **Run the tests.** `bun test` — 722 across 85 files, all passing (≈9 min; several files wait on a rate-limited catalog fetch). (This line used
   to read "there is no automated test suite"; it was stale by every one of them.)
   Then `bun run build` must succeed and build **warning-free**, and boot the binary
   to exercise the relevant API/UI (see Verifying below).
@@ -96,6 +96,21 @@ src/shared/types.ts shared TS interfaces
   response, the turn loop sees zero tool calls on round 0, scores the turn `idle`,
   and three of those trip the idle backoff, which parks the agent until a human
   nudges it. Covered by `tests/llm-abort-handling.test.ts`.
+- **A turn that attempts no game action and writes no state is `idle`, whichever
+  round the prose came in.** The idle score used to fire only when round 0 had no
+  tool call, so an agent that said "standing by", took the one "call the tool"
+  retry, fired a free query and said "standing by" again scored `completed`, reset
+  the idle counter, and went round again 2s later. Bob Comet did that for 17 minutes
+  on 2026-09-11 (274 calls, ~100 turns, docked with no orders) and the idle backoff
+  never engaged. `MAX_NO_TOOL_ROUNDS_PER_TURN` (2) caps replies without a tool call
+  per turn — the initial one plus the single retry. Queries, local reads and
+  `status_log` are not progress; an attempted action, `update_todo`, `update_memory`
+  or `fleet_order` is. Covered by `tests/zero-action-turn-guard.test.ts`.
+- **A request far smaller than a system prompt is refused, not sent.** agent.ts
+  passes `expectSystemPrompt`; a request estimating under
+  `MIN_EXPECTED_REQUEST_TOKENS` (300), or with no messages at all, means the prompt
+  or the message list was lost, so the loop logs a `system` line with the sizes
+  and scores the turn idle instead of burning a call. Same test file.
 - **A turn must never end without the agent recording state.** The prompt tells it
   to persist *after* acting, so a turn guillotined at the tool-round cap loses
   everything and the next turn re-derives it from a stale TODO — which is what
@@ -164,6 +179,10 @@ future session must not re-derive or get wrong:
 - **`systemPromptTokens` in `llm_call` logs is an ESTIMATE, not real tokens** —
   `CHARS_PER_TOKEN = 2` in `loop.ts`. Only `cacheRead`/`cacheWrite`/`input`/`output`
   come from the provider.
+- **The `in/out` figure in an `llm_call` summary is the UNCACHED input.** A fully
+  cached ~60k-token request reads as `3/190 tokens (63.5k cached)`; before the
+  parenthetical was added (2026-09-11) that line was read as an empty prompt being
+  sent every few seconds. The request is the cached prefix plus the 3.
 - **The cost lever is cache WRITES, not enabling caching.** `buildSystemPrompt`
   interpolates memory, todo, fleet orders, and a situational briefing that refreshes
   every 60s — all inside the cached prefix, so each one invalidates it. Moving those
@@ -176,7 +195,7 @@ future session must not re-derive or get wrong:
 
 ## Verifying a change
 
-1. `bun test` (544 must pass), then `bun scripts/typecheck.ts` (must print OK —
+1. `bun test` (722 must pass), then `bun scripts/typecheck.ts` (must print OK —
    it fails on the crash class and tolerates the Bun-global noise), then
    `bun run build` (must succeed, and warning-free).
 2. `./admiral`, then hit the relevant endpoint(s) under `http://127.0.0.1:3031/api/...`

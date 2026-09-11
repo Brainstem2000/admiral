@@ -595,6 +595,9 @@ export class Agent {
                 // game action (plus the wrap-up reserve if the TODO is unwritten).
                 // Preference `turn_ends_on_action` = 'off' restores run-to-cap.
                 endTurnAfterAction: getPreference('turn_ends_on_action') !== 'off',
+                // A real turn always carries the full system prompt: refuse to send a
+                // request that has plainly lost it (see MIN_EXPECTED_REQUEST_TOKENS).
+                expectSystemPrompt: true,
                 contextBudgetRatio,
                 onActivity: (a) => this.setActivity(`${phasePrefix}${a}`),
                 compactionModel: hasDualModel ? executorResolved?.model : undefined,

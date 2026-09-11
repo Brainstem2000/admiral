@@ -23,6 +23,23 @@ const WRAPUP_RESERVE_ROUNDS = 2
  *  next turn. So both may run during the reserve, and only `update_todo`
  *  SATISFIES it. */
 const STATE_WRITE_TOOLS = new Set(['update_todo', 'update_memory'])
+/** Replies in ONE turn that carry no tool call at all — prose, a bare thinking
+ *  block, or nothing. The first such reply on round 0 earns the one "call the
+ *  tool" retry (see the zero-tool-call branch in runAgentTurn); the second
+ *  ends the turn. That is the entire retry budget for a model that talks
+ *  instead of acting, kept as a number rather than a flag so the log line can
+ *  say the cap was reached. */
+export const MAX_NO_TOOL_ROUNDS_PER_TURN = 2
+/** Floor for a request sent on a real agent turn (`LoopOptions.expectSystemPrompt`).
+ *  The executor's system prompt alone estimates at ~47k tokens (Bob Comet,
+ *  2026-09-11), so a request that totals a few hundred is a lost prompt or an
+ *  emptied message list, never a legitimately short turn. Exported for tests. */
+export const MIN_EXPECTED_REQUEST_TOKENS = 300
+/** Local tools whose call means the turn DID something even without a game
+ *  action: a state write the next turn reads (todo, memory) or an order for
+ *  another agent. Reads (`read_todo`, `codex`, `fleet_route`) and
+ *  `status_log` change nothing the next turn can act on, so they do not count. */
+const PROGRESS_LOCAL_TOOLS = new Set(['update_todo', 'update_memory', 'fleet_order'])
 /** Mirror of tools.ts LOCAL_TOOLS — tools that run inside Admiral and never
  *  touch the game, so they can never be a game action. tools.ts does not
  *  export its set; until it does, keep this list in step with it. A tool
@@ -252,6 +269,12 @@ export interface LoopOptions {
    *  Defaults come from localProviderCallOptions. */
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
   temperature?: number
+  /** The caller built a full agent system prompt for this turn (agent.ts always
+   *  does). Turns on the request sanity check: a request estimating below
+   *  MIN_EXPECTED_REQUEST_TOKENS, or with no messages at all, is refused with a
+   *  `system` log line instead of being sent. Off by default so unit tests can
+   *  drive the loop with a three-character prompt. */
+  expectSystemPrompt?: boolean
 }
 
 /** How a turn ended. `connection_lost` means the game connection is dead or
@@ -527,8 +550,11 @@ export async function runAgentTurn(
   let wroteTodo = false
   let wroteMemory = false
   let wrapUpInjected = false
-  // One retry per turn for a text-only first round — see the zero-tool-call branch.
-  let textOnlyRetried = false
+  // Replies without a tool call this turn — bounded by MAX_NO_TOOL_ROUNDS_PER_TURN.
+  let noToolRounds = 0
+  // Did this turn attempt a game action or write state? A turn that only ran
+  // free queries and talked is scored idle whichever round the talking came in.
+  let madeProgress = false
   let wrapUpReason: 'cap' | 'action' = 'cap'
   // Round count at which the reserve is exhausted; set when the wrap-up is injected.
   let reserveEndsAt = 0
@@ -616,6 +642,41 @@ export async function runAgentTurn(
     // only by emergencyCompact, after burning the call. See enforceHardCeiling.
     enforceHardCeiling(context, model, log)
 
+    // Request sanity check. A real agent turn carries a system prompt of tens
+    // of thousands of tokens (~47k estimated on Bob Comet's executor,
+    // 2026-09-11) plus at least the turn's own user message. A request that
+    // adds up to a few hundred tokens is therefore never "the agent has little
+    // to say" — it means the prompt or the message list was lost on the way
+    // here, and sending it would burn a call on a model that has been told
+    // nothing. Refuse it, say why, and score the turn idle so the loop backs
+    // off instead of re-issuing the same empty request every TURN_INTERVAL.
+    if (options?.expectSystemPrompt) {
+      const sysToks = context.systemPrompt ? estimateTokens(context.systemPrompt, cpt) : 0
+      const msgToks = totalMessageTokens(context.messages, cpt)
+      const total = sysToks + msgToks
+      if (context.messages.length === 0 || total < MIN_EXPECTED_REQUEST_TOKENS) {
+        const why = context.messages.length === 0
+          ? 'the message list is empty'
+          : `~${total} estimated tokens in total (system prompt ~${sysToks}, ${context.messages.length} message(s) ~${msgToks}) ` +
+            `against a floor of ${MIN_EXPECTED_REQUEST_TOKENS}`
+        const outcome: TurnOutcome = madeProgress ? 'completed' : 'idle'
+        log('system',
+          `Refusing to send an LLM request: ${why}. A full agent prompt is expected on this turn, so a request ` +
+          `this small means the prompt or the message list was lost, not that the agent has nothing to say. ` +
+          `No call was made; ending the turn${outcome === 'idle' ? ' (scored idle)' : ''}.`,
+          JSON.stringify({
+            stopReason: 'request_refused',
+            round: rounds,
+            systemPromptChars: context.systemPrompt?.length ?? 0,
+            messageCount: context.messages.length,
+            estimatedTokens: { system: sysToks, messages: msgToks, total },
+            minExpected: MIN_EXPECTED_REQUEST_TOKENS,
+            charsPerToken: cpt,
+          }, null, 2))
+        return outcome
+      }
+    }
+
     options?.onActivity?.('Waiting for LLM response...')
     const callStartedAt = Date.now()
     let response: AssistantMessage
@@ -672,7 +733,12 @@ export async function runAgentTurn(
       const costStr = u.cost.total < 0.001 ? '<$0.001' : `$${u.cost.total.toFixed(3)}`
       const inStr = u.input >= 1000 ? `${(u.input / 1000).toFixed(1)}k` : String(u.input)
       const outStr = u.output >= 1000 ? `${(u.output / 1000).toFixed(1)}k` : String(u.output)
-      const summary = `${response.model} | ${inStr}/${outStr} tokens | ${costStr} | ${response.stopReason} | ${(durationMs / 1000).toFixed(1)}s`
+      // `input` is the UNCACHED input only. A fully cached 60k-token prompt used
+      // to read as "3/190 tokens", and on 2026-09-11 that was taken for an empty
+      // prompt being sent every few seconds. The cached prefix IS the request.
+      const cacheRead = u.cacheRead ?? 0
+      const cacheStr = cacheRead >= 1000 ? `${(cacheRead / 1000).toFixed(1)}k` : String(cacheRead)
+      const summary = `${response.model} | ${inStr}/${outStr} tokens${cacheRead > 0 ? ` (${cacheStr} cached)` : ''} | ${costStr} | ${response.stopReason} | ${(durationMs / 1000).toFixed(1)}s`
 
       const textBlocks = response.content.filter(b => b.type === 'text').length
       const thinkingBlocks = response.content.filter(b => b.type === 'thinking').length
@@ -742,6 +808,7 @@ export async function runAgentTurn(
     }
 
     if (toolCalls.length === 0) {
+      noToolRounds++
       // A collapsed reply is not a thought and must not be kept. Logging it raw
       // filled the dashboard with zero-width padding, and leaving it in the
       // context fed the collapse back to the model on the next call.
@@ -760,17 +827,32 @@ export async function runAgentTurn(
       // running (Morg'Thar, 2026-09-02 09:31 CT): the reload was never sent, the
       // TODO was never written, and the idle backoff parked him for it. One
       // retry costs a call; a parked hunter costs the next fifteen minutes.
-      if (rounds === 0 && !textOnlyRetried && textParts.length > 0) {
-        textOnlyRetried = true
+      // The retry is bounded by MAX_NO_TOOL_ROUNDS_PER_TURN rather than a flag,
+      // so the cap is one number and the log line below can say it was hit.
+      if (rounds === 0 && noToolRounds < MAX_NO_TOOL_ROUNDS_PER_TURN && textParts.length > 0) {
         context.messages.push({ role: 'user', content: TEXT_ONLY_RETRY_NOTE, timestamp: Date.now() })
         log('system', 'Text-only response on round 0 — asking once for the tool call before scoring the turn idle')
         continue
       }
-      // A first-round response with zero tool calls means the whole turn did
-      // nothing — surface that so the agent loop can back off instead of
-      // re-burning a full-context LLM call every TURN_INTERVAL (observed:
-      // idle vault-keeper logging a dozen "zero tool calls" turns in a row).
-      return rounds === 0 ? 'idle' : 'completed'
+      // A reply with no tool call ends the turn. How the turn is SCORED depends
+      // on whether it did anything, not on which round the prose came in: an
+      // agent that answers "standing by" on round 0, is asked for a tool call,
+      // fires one free query (get_player, view storage) and says "standing by"
+      // again has done exactly as much as one that never called a tool — but
+      // `rounds` is 1 by then, so it used to score `completed`, reset the idle
+      // counter, and go round again after TURN_INTERVAL. Bob Comet ran that
+      // cycle for 17 minutes on 2026-09-11 (08:54–09:11 CT): 274 LLM calls
+      // over ~100 turns, docked with no orders throughout, the backoff never
+      // engaging. Only a game action (attempted — a refusal still shows intent)
+      // or a state write counts as doing something; queries and prose do not.
+      if (madeProgress) return 'completed'
+      const capNote = noToolRounds >= MAX_NO_TOOL_ROUNDS_PER_TURN
+        ? ` — ${noToolRounds}/${MAX_NO_TOOL_ROUNDS_PER_TURN} replies without a tool call, per-turn cap reached`
+        : ''
+      log('system',
+        `Zero-action turn: ${rounds} tool round(s), no game action attempted and no TODO/memory write` +
+        `${capNote}; scoring idle (three in a row engage the idle backoff)`)
+      return 'idle'
     }
 
     const reason = reasoning
@@ -841,6 +923,7 @@ export async function runAgentTurn(
       if (result.startsWith(COOLDOWN_BLOCKED_SENTINEL)) cooldownBlocked = true
       if (result.startsWith(LOOP_FLUSH_SENTINEL)) loopFlush = true
       if (isSuccessfulActionResult(kind, toolCall.name, result)) actionSucceeded = true
+      if (kind === 'action' || kind === 'macro' || PROGRESS_LOCAL_TOOLS.has(toolCall.name)) madeProgress = true
       if (toolCall.name === 'update_todo') { wroteTodo = true; roundsSinceTodoWrite.set(profileId, 0) }
       if (toolCall.name === 'update_memory') wroteMemory = true
       if (result.startsWith('Error: [connection_failed]')) connectionFailures++
