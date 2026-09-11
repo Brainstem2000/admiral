@@ -98,6 +98,7 @@ export interface PlanCondition {
   in_system?: string               // system id the agent must be in
   result_matches?: string          // a tool result logged after the step was queued contains this text
   storage_at_least?: { station_id: string; item_id: string; qty: number }
+  cargo_at_least?: { item_id: string; qty: number }   // the ship's hold, from the live local state
   wallet_at_least?: number
   after?: string                   // ISO timestamp
   admiral_go?: boolean             // never applies on its own; the fire action releases it

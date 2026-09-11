@@ -60,17 +60,41 @@ function emit(profileId: string, log: StepLogger, summary: string): void {
   else addLogEntry(profileId, 'system', summary)
 }
 
-interface LiveState { dockedAt: string | null; systemId: string | null; credits: number | null; known: boolean }
+interface LiveState {
+  dockedAt: string | null; systemId: string | null; credits: number | null; known: boolean
+  /** item_id → quantity aboard, or null when the hold has never been read into the local state. */
+  cargo: Map<string, number> | null
+}
+
+/** The hold as the connection cached it from the last player-scoped result (get_cargo, refuel,
+ *  sell …): an array of {item_id, quantity} rows, sometimes wrapped as {cargo: [...]} or {items: [...]}. */
+function readCargo(raw: unknown): Map<string, number> | null {
+  let rows: unknown = raw
+  if (rows && typeof rows === 'object' && !Array.isArray(rows)) {
+    const o = rows as Record<string, unknown>
+    rows = Array.isArray(o.cargo) ? o.cargo : Array.isArray(o.items) ? o.items : null
+  }
+  if (!Array.isArray(rows)) return null
+  const out = new Map<string, number>()
+  for (const r of rows) {
+    if (!r || typeof r !== 'object') continue
+    const it = r as Record<string, unknown>
+    const id = typeof it.item_id === 'string' ? it.item_id : typeof it.id === 'string' ? it.id : null
+    const qty = typeof it.quantity === 'number' ? it.quantity : Number(it.quantity ?? NaN)
+    if (id && Number.isFinite(qty)) out.set(id, (out.get(id) ?? 0) + qty)
+  }
+  return out
+}
 
 function readLive(ctx: PlanEvalContext): LiveState {
   const gs = ctx.connection?.getLocalState?.() ?? null
-  if (!gs) return { dockedAt: null, systemId: null, credits: null, known: false }
+  if (!gs) return { dockedAt: null, systemId: null, credits: null, known: false, cargo: null }
   const loc = (gs.location ?? {}) as Record<string, unknown>
   const player = (gs.player ?? {}) as Record<string, unknown>
   const dockedAt = typeof loc.docked_at === 'string' && loc.docked_at ? loc.docked_at : null
   const systemId = typeof loc.system_id === 'string' ? loc.system_id : null
   const credits = typeof gs.credits === 'number' ? gs.credits : (typeof player.credits === 'number' ? player.credits : null)
-  return { dockedAt, systemId, credits, known: 'docked_at' in loc || systemId !== null }
+  return { dockedAt, systemId, credits, known: 'docked_at' in loc || systemId !== null, cargo: readCargo(gs.cargo) }
 }
 
 /** Refresh a stale storage snapshot for a station the agent is docked at — the fact a
@@ -124,6 +148,15 @@ export async function unmetReason(cond: PlanCondition, step: { since_log_id: num
     await refreshStorageIfStale(ctx, s.station_id, live)
     const have = getStorageQuantity(ctx.profileId, s.station_id, s.item_id)
     if (have < s.qty) return `${s.item_id} at ${s.station_id}: ${have} < ${s.qty}`
+  }
+  // The hold itself. 2026-09-11: a load step retired on "docked at War Citadel" while the
+  // agent had skipped two of its three withdraw lines, so the next step's orders were
+  // wrong for what he actually carried and he flew back. Gate on the cargo, not the dock.
+  if (cond.cargo_at_least) {
+    const c = cond.cargo_at_least
+    if (!live.cargo) return 'cargo unknown'
+    const have = live.cargo.get(c.item_id) ?? 0
+    if (have < c.qty) return `cargo ${c.item_id}: ${have} < ${c.qty}`
   }
   if (cond.result_matches) {
     const hit = findToolResultSince(ctx.profileId, step.since_log_id, cond.result_matches)

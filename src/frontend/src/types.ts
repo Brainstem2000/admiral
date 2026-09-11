@@ -74,6 +74,7 @@ export interface PlanCondition {
   in_system?: string
   result_matches?: string
   storage_at_least?: { station_id: string; item_id: string; qty: number }
+  cargo_at_least?: { item_id: string; qty: number }
   wallet_at_least?: number
   after?: string
   admiral_go?: boolean

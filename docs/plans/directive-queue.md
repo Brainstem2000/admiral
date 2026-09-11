@@ -34,6 +34,11 @@ restore_to (nullable), fired_at, completed_at, notes, created_at.
 - `result_matches: <substring>` against tool_result summaries since the step was queued
 - `storage_at_least: {station_id, item_id, qty}` — evaluator refreshes a stale
   `storage_inventory` snapshot with a silent `view_storage` when docked there (today's bug)
+- `cargo_at_least: {item_id, qty}` — the ship's own hold, read from the connection's live
+  local state (the last player-scoped result: get_cargo, refuel, sell …); `cargo unknown`
+  until the hold has been read once. Added 2026-09-11 after a load step retired on
+  `docked_at` while two of its three withdraw lines had been skipped — gate a load on
+  what is aboard, not on where the ship is
 - `wallet_at_least: <credits>`
 - `after: <ISO time>` (cron already exists in `schedules`; do not duplicate it)
 - `admiral_go: true` — never fires on its own; a fire-now button or API call releases it

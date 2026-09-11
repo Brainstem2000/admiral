@@ -83,5 +83,20 @@ recordStorageSnapshot('p-ledger', 'crimson_war_citadel', [{ item_id: 'titanium_a
 const i3 = await advancePlanQueue({ profileId: 'p-ledger', connection: wc })
 out.iCompleted = i3?.completed?.id ?? null; out.iApplied = i3?.applied?.id ?? null
 out.iDirective = getProfile('p-ledger')!.directive
+// (j) cargo_at_least reads the hold from the live local state: unknown hold → 'cargo unknown',
+// short hold → waits with the count, enough aboard → applies. Completion uses it too.
+insertPlanStep({ id: 'j1', profile_id: 'p-ledger', plan_id: 'cargo', plan_name: 'Cargo', seq: 1, title: 'Load uranium', directive: 'CARGO 1: load 200 uranium.', todo: null,
+  condition_json: JSON.stringify({ docked_at: 'blood_forge_smelting_works' }), completion_json: JSON.stringify({ docked_at: 'blood_forge_smelting_works', cargo_at_least: { item_id: 'uranium_ore', qty: 200 } }), restore_on_done: 0, notes: '' })
+insertPlanStep({ id: 'j2', profile_id: 'p-ledger', plan_id: 'cargo', plan_name: 'Cargo', seq: 2, title: 'Fly to the Well', directive: 'CARGO 2: fly the corridor.', todo: null,
+  condition_json: JSON.stringify({ docked_at: 'blood_forge_smelting_works', cargo_at_least: { item_id: 'uranium_ore', qty: 200 } }), completion_json: null, restore_on_done: 0, notes: '' })
+const bfNoCargo = conn({ location: { system_id: 'blood_forge', docked_at: 'blood_forge_smelting_works' } })
+out.jApplied = (await advancePlanQueue({ profileId: 'p-ledger', connection: bfNoCargo }))?.applied?.id ?? null
+out.jUnknown = (await describePlanQueue({ profileId: 'p-ledger', connection: bfNoCargo })).find(s => s.id === 'j1')?.waiting_on ?? null
+const bfShort = conn({ location: { system_id: 'blood_forge', docked_at: 'blood_forge_smelting_works' }, cargo: [{ item_id: 'uranium_ore', item_name: 'Uranium Ore', quantity: 120, size: 2 }] })
+out.jShortBoundary = await advancePlanQueue({ profileId: 'p-ledger', connection: bfShort })
+out.jShort = (await describePlanQueue({ profileId: 'p-ledger', connection: bfShort })).find(s => s.id === 'j1')?.waiting_on ?? null
+const bfFull = conn({ location: { system_id: 'blood_forge', docked_at: 'blood_forge_smelting_works' }, cargo: { cargo: [{ item_id: 'uranium_ore', quantity: 200 }, { item_id: 'polonium_ore', quantity: 4 }] } })
+const j3 = await advancePlanQueue({ profileId: 'p-ledger', connection: bfFull })
+out.jCompleted = j3?.completed?.id ?? null; out.jNext = j3?.applied?.id ?? null
 out.count = listPlanSteps('p-ledger').length
 console.log('__RESULT__' + JSON.stringify(out))

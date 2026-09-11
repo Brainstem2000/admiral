@@ -20,6 +20,7 @@ function describeCondition(c: PlanCondition | null): string {
   if (c.in_system) parts.push(`in ${c.in_system}`)
   if (c.result_matches) parts.push(`a result contains "${c.result_matches}"`)
   if (c.storage_at_least) parts.push(`${c.storage_at_least.item_id} ≥ ${c.storage_at_least.qty} at ${c.storage_at_least.station_id}`)
+  if (c.cargo_at_least) parts.push(`${c.cargo_at_least.item_id} ≥ ${c.cargo_at_least.qty} aboard`)
   if (typeof c.wallet_at_least === 'number') parts.push(`wallet ≥ ${c.wallet_at_least.toLocaleString()}`)
   if (c.after) parts.push(`after ${c.after}`)
   return parts.join(' · ')
@@ -28,16 +29,18 @@ function describeCondition(c: PlanCondition | null): string {
 interface Draft {
   plan_name: string; title: string; directive: string; todo: string
   docked_at: string; result_matches: string; storage_station: string; storage_item: string; storage_qty: string
+  cargo_item: string; cargo_qty: string
   wallet_at_least: string; admiral_go: boolean; completion_matches: string; restore_on_done: boolean
 }
 const EMPTY: Draft = { plan_name: '', title: '', directive: '', todo: '', docked_at: '', result_matches: '', storage_station: '', storage_item: '', storage_qty: '',
-  wallet_at_least: '', admiral_go: false, completion_matches: '', restore_on_done: false }
+  cargo_item: '', cargo_qty: '', wallet_at_least: '', admiral_go: false, completion_matches: '', restore_on_done: false }
 
 function draftToBody(d: Draft) {
   const condition: PlanCondition = {}
   if (d.docked_at.trim()) condition.docked_at = d.docked_at.trim()
   if (d.result_matches.trim()) condition.result_matches = d.result_matches.trim()
   if (d.storage_station.trim() && d.storage_item.trim() && Number(d.storage_qty) > 0) condition.storage_at_least = { station_id: d.storage_station.trim(), item_id: d.storage_item.trim(), qty: Number(d.storage_qty) }
+  if (d.cargo_item.trim() && Number(d.cargo_qty) > 0) condition.cargo_at_least = { item_id: d.cargo_item.trim(), qty: Number(d.cargo_qty) }
   if (d.wallet_at_least.trim()) condition.wallet_at_least = Number(d.wallet_at_least)
   if (d.admiral_go) condition.admiral_go = true
   const completion: PlanCondition | null = d.completion_matches.trim() ? { docked: false, result_matches: d.completion_matches.trim() } : null
@@ -120,6 +123,10 @@ export function PlanTab({ profile }: { profile: Profile; connected: boolean }) {
               <div className="grid grid-cols-[1fr_80px] gap-2">
                 <input className="bg-background border border-border px-2 py-1" placeholder="item id" value={draft.storage_item} onChange={e => setDraft({ ...draft, storage_item: e.target.value })} />
                 <input className="bg-background border border-border px-2 py-1" placeholder="≥ qty" value={draft.storage_qty} onChange={e => setDraft({ ...draft, storage_qty: e.target.value })} />
+              </div>
+              <div className="grid grid-cols-[1fr_80px] gap-2">
+                <input className="bg-background border border-border px-2 py-1" placeholder="aboard: item id" value={draft.cargo_item} onChange={e => setDraft({ ...draft, cargo_item: e.target.value })} />
+                <input className="bg-background border border-border px-2 py-1" placeholder="≥ qty" value={draft.cargo_qty} onChange={e => setDraft({ ...draft, cargo_qty: e.target.value })} />
               </div>
               <input className="bg-background border border-border px-2 py-1" placeholder="wallet at least (credits)" value={draft.wallet_at_least} onChange={e => setDraft({ ...draft, wallet_at_least: e.target.value })} />
               <label className="flex items-center gap-2"><input type="checkbox" checked={draft.admiral_go} onChange={e => setDraft({ ...draft, admiral_go: e.target.checked })} /> only when I fire it (never automatic)</label>
