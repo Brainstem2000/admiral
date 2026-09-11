@@ -496,7 +496,26 @@ export class Agent {
       // this very turn — and never a restartTurn, so a route or a running macro is
       // never interrupted (docs/plans/directive-queue.md).
       try {
-        await advancePlanQueue({ profileId: this.profileId, connection: this.connection, log: this.log })
+        const changed = await advancePlanQueue({ profileId: this.profileId, connection: this.connection, log: this.log })
+        // The prompt refresh below carries the new directive, but a model mid-plan keeps
+        // following its conversation (CyberSpock, 2026-09-10 21:19: step applied, he posted
+        // "HALT: awaiting orders" instead). Announce the change in the turn itself, the way
+        // a restart's "Directive Updated" message does — without the restart.
+        if (changed?.applied) {
+          const step = changed.applied
+          context.messages.push({
+            role: 'user' as const,
+            content: `## Orders changed\nA queued plan step applied: ${step.title}. Your directive${step.todo ? ' and TODO were' : ' was'} replaced — read the new directive in your prompt and act on it now. Do not wait for further orders; this is the order.`,
+            timestamp: Date.now(),
+          })
+        }
+        if (changed?.completed && !changed.applied) {
+          context.messages.push({
+            role: 'user' as const,
+            content: `## Plan step complete\n"${changed.completed.title}" is done${changed.completed.restore_on_done ? ' and your previous directive is back in force' : ''}. Follow the directive in your prompt.`,
+            timestamp: Date.now(),
+          })
+        }
       } catch (e) {
         this.log('error', `directive queue: ${e instanceof Error ? e.message : String(e)}`)
       }
