@@ -1045,6 +1045,29 @@ function migrate(db: Database): void {
       FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_etrig_profile ON event_triggers(profile_id);
+    CREATE TABLE IF NOT EXISTS directive_queue (
+      id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      plan_id TEXT NOT NULL,
+      plan_name TEXT DEFAULT '',
+      seq INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      directive TEXT NOT NULL,
+      todo TEXT DEFAULT NULL,
+      condition_json TEXT DEFAULT '{}',
+      completion_json TEXT DEFAULT NULL,
+      restore_on_done INTEGER DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'queued',
+      restore_to TEXT DEFAULT NULL,
+      since_log_id INTEGER DEFAULT 0,
+      fired_at TEXT DEFAULT NULL,
+      completed_at TEXT DEFAULT NULL,
+      notes TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_dq_profile ON directive_queue(profile_id, status, seq);
   `)
 
   // Fleet orders for cross-agent task delegation (convoy system)
@@ -3535,4 +3558,88 @@ export function getHuntIntel(systemId: string, limit = 5): HuntIntel {
   }
 
   return { killzones, wrecks, missionStations }
+}
+
+
+// ---------------------------------------------------------------------------
+// Directive queue — plan steps per agent, applied between turns when their
+// condition holds (docs/plans/directive-queue.md). The agent sees only the
+// active step's directive; the queue itself never enters the prompt.
+// ---------------------------------------------------------------------------
+
+export interface PlanStepRow {
+  id: string
+  profile_id: string
+  plan_id: string
+  plan_name: string
+  seq: number
+  title: string
+  directive: string
+  todo: string | null
+  condition_json: string
+  completion_json: string | null
+  restore_on_done: number
+  status: 'queued' | 'active' | 'done' | 'cancelled' | 'skipped'
+  restore_to: string | null
+  since_log_id: number
+  fired_at: string | null
+  completed_at: string | null
+  notes: string
+  created_at: string
+  updated_at: string
+}
+
+export function listPlanSteps(profileId: string, planId?: string): PlanStepRow[] {
+  const d = getDb()
+  return (planId
+    ? d.query('SELECT * FROM directive_queue WHERE profile_id = ? AND plan_id = ? ORDER BY seq, created_at').all(profileId, planId)
+    : d.query('SELECT * FROM directive_queue WHERE profile_id = ? ORDER BY plan_id, seq, created_at').all(profileId)) as PlanStepRow[]
+}
+
+export function getPlanStep(id: string): PlanStepRow | undefined {
+  return getDb().query('SELECT * FROM directive_queue WHERE id = ?').get(id) as PlanStepRow | undefined
+}
+
+/** The step the agent is currently running under, if any. */
+export function activePlanStep(profileId: string): PlanStepRow | undefined {
+  return getDb().query("SELECT * FROM directive_queue WHERE profile_id = ? AND status = 'active' ORDER BY fired_at DESC LIMIT 1").get(profileId) as PlanStepRow | undefined
+}
+
+/** Lowest-sequence queued step across the agent's plans (plans are ordered by plan_id, then seq). */
+export function nextQueuedPlanStep(profileId: string): PlanStepRow | undefined {
+  return getDb().query("SELECT * FROM directive_queue WHERE profile_id = ? AND status = 'queued' ORDER BY plan_id, seq, created_at LIMIT 1").get(profileId) as PlanStepRow | undefined
+}
+
+export function insertPlanStep(row: Omit<PlanStepRow, 'created_at' | 'updated_at' | 'fired_at' | 'completed_at' | 'restore_to' | 'since_log_id' | 'status'> & { status?: PlanStepRow['status'] }): PlanStepRow {
+  const d = getDb()
+  const since = (d.query('SELECT COALESCE(MAX(id), 0) AS m FROM log_entries WHERE profile_id = ?').get(row.profile_id) as { m: number }).m
+  d.query(`INSERT INTO directive_queue
+      (id, profile_id, plan_id, plan_name, seq, title, directive, todo, condition_json, completion_json, restore_on_done, status, since_log_id, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(row.id, row.profile_id, row.plan_id, row.plan_name ?? '', row.seq, row.title, row.directive, row.todo ?? null,
+         row.condition_json ?? '{}', row.completion_json ?? null, row.restore_on_done ? 1 : 0, row.status ?? 'queued', since, row.notes ?? '')
+  return getPlanStep(row.id)!
+}
+
+export function updatePlanStep(id: string, patch: Partial<PlanStepRow>): PlanStepRow | undefined {
+  const allowed = ['plan_name', 'seq', 'title', 'directive', 'todo', 'condition_json', 'completion_json', 'restore_on_done', 'status', 'restore_to', 'since_log_id', 'fired_at', 'completed_at', 'notes']
+  const sets: string[] = []; const vals: unknown[] = []
+  for (const k of allowed) {
+    if (k in patch) { sets.push(`${k} = ?`); vals.push((patch as Record<string, unknown>)[k]) }
+  }
+  if (sets.length === 0) return getPlanStep(id)
+  sets.push("updated_at = datetime('now')"); vals.push(id)
+  getDb().query(`UPDATE directive_queue SET ${sets.join(', ')} WHERE id = ?`).run(...vals)
+  return getPlanStep(id)
+}
+
+export function deletePlanStep(id: string): void {
+  getDb().query('DELETE FROM directive_queue WHERE id = ?').run(id)
+}
+
+/** Newest tool_result after `sinceId` whose summary contains `needle` (case-insensitive). */
+export function findToolResultSince(profileId: string, sinceId: number, needle: string): { id: number; summary: string } | undefined {
+  return getDb().query(
+    "SELECT id, summary FROM log_entries WHERE profile_id = ? AND id > ? AND type = 'tool_result' AND lower(summary) LIKE ? ORDER BY id DESC LIMIT 1",
+  ).get(profileId, sinceId, `%${needle.toLowerCase()}%`) as { id: number; summary: string } | undefined
 }

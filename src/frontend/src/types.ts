@@ -65,3 +65,36 @@ export interface AgentStatus {
   mode: 'llm' | 'manual'
   playerData?: Record<string, unknown>
 }
+
+/** Directive queue (docs/plans/directive-queue.md) — mirrors src/shared/types.ts */
+export type PlanStepStatus = 'queued' | 'active' | 'done' | 'cancelled' | 'skipped'
+export interface PlanCondition {
+  docked?: boolean
+  docked_at?: string
+  in_system?: string
+  result_matches?: string
+  storage_at_least?: { station_id: string; item_id: string; qty: number }
+  wallet_at_least?: number
+  after?: string
+  admiral_go?: boolean
+}
+export interface PlanStep {
+  id: string
+  profile_id: string
+  plan_id: string
+  plan_name: string
+  seq: number
+  title: string
+  directive: string
+  todo: string | null
+  condition: PlanCondition
+  completion: PlanCondition | null
+  restore_on_done: boolean
+  status: PlanStepStatus
+  restore_to: string | null
+  fired_at: string | null
+  completed_at: string | null
+  notes: string
+  created_at: string
+  updated_at: string
+}

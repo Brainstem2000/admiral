@@ -13,7 +13,7 @@
  * ctab from the URL on each switch — that's what makes the tab persist across agents.
  */
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
-import { ScrollText, LayoutDashboard, TrendingUp, GraduationCap, Rocket, Crosshair, Radio, BookOpen, Coins, Package } from 'lucide-react'
+import { ScrollText, LayoutDashboard, TrendingUp, GraduationCap, Rocket, Crosshair, Radio, BookOpen, Coins, Package, ListChecks } from 'lucide-react'
 import type { Profile, LogEntry } from '@/types'
 import { deriveActivity, type LogRef } from '@/lib/activity'
 import { ActivityGraphic } from './ActivityGraphic'
@@ -27,6 +27,7 @@ import { ShipTab } from './tabs/ShipTab'
 import { CombatTab } from './tabs/CombatTab'
 import { CommsTab } from './tabs/CommsTab'
 import { CostTab } from './tabs/CostTab'
+import { PlanTab } from './tabs/PlanTab'
 import { LogPane } from '@/components/LogPane'
 
 interface Props {
@@ -49,6 +50,7 @@ const TABS = [
   { id: 'comms', label: 'Comms', icon: <Radio size={12} /> },
   { id: 'knowledge', label: 'Knowledge', icon: <BookOpen size={12} /> },
   { id: 'cost', label: 'Cost', icon: <Coins size={12} /> },
+  { id: 'plan', label: 'Plan', icon: <ListChecks size={12} /> },
 ] as const
 type TabId = typeof TABS[number]['id']
 
@@ -295,6 +297,7 @@ export function CharacterPage({ profile, status, playerData, onOpenEditor }: Pro
             )}
 
             {tab === 'cost' && <CostTab profile={profile} connected={status.connected} />}
+            {tab === 'plan' && <PlanTab profile={profile} connected={status.connected} />}
           </div>
         </div>
       )}

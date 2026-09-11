@@ -87,3 +87,39 @@ export interface GameCommandInfo {
   isMutation: boolean
   params: GameCommandParam[]
 }
+
+/** One queued directive for an agent's plan (see docs/plans/directive-queue.md). */
+export type PlanStepStatus = 'queued' | 'active' | 'done' | 'cancelled' | 'skipped'
+
+/** Every present key must hold (AND). Evaluated between turns, so "no macro in flight" is implicit. */
+export interface PlanCondition {
+  docked?: boolean                 // default true: a step only applies while docked
+  docked_at?: string               // station id the agent must be docked at
+  in_system?: string               // system id the agent must be in
+  result_matches?: string          // a tool result logged after the step was queued contains this text
+  storage_at_least?: { station_id: string; item_id: string; qty: number }
+  wallet_at_least?: number
+  after?: string                   // ISO timestamp
+  admiral_go?: boolean             // never applies on its own; the fire action releases it
+}
+
+export interface PlanStep {
+  id: string
+  profile_id: string
+  plan_id: string
+  plan_name: string
+  seq: number
+  title: string
+  directive: string
+  todo: string | null
+  condition: PlanCondition
+  completion: PlanCondition | null
+  restore_on_done: boolean
+  status: PlanStepStatus
+  restore_to: string | null
+  fired_at: string | null
+  completed_at: string | null
+  notes: string
+  created_at: string
+  updated_at: string
+}

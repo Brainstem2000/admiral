@@ -19,6 +19,7 @@ import { directiveForbidsSystem } from './directive-rules'
 import { runAgentTurn, VOLATILE_STATE_HEADER, VOLATILE_STATE_END, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
 import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles, FORBIDDEN_SYSTEMS, assessSystemDanger } from './db'
+import { advancePlanQueue } from './plan-queue'
 import { FleetIntelCollector, buildDepositBriefing } from './fleet-intel'
 import { safeTruncate } from './text-safe'
 import { LedgerCollector } from './ledger'
@@ -487,6 +488,17 @@ export class Agent {
           })
           this.log('system', `Directive updated, restarting turn: ${directive}`)
         }
+      }
+
+      // Directive queue: between turns, retire the active plan step if its completion
+      // condition holds and apply the next queued step whose condition holds. These
+      // are plain profile writes — the prompt refresh below sees the new directive on
+      // this very turn — and never a restartTurn, so a route or a running macro is
+      // never interrupted (docs/plans/directive-queue.md).
+      try {
+        await advancePlanQueue({ profileId: this.profileId, connection: this.connection, log: this.log })
+      } catch (e) {
+        this.log('error', `directive queue: ${e instanceof Error ? e.message : String(e)}`)
       }
 
       try {

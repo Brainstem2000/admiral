@@ -21,6 +21,12 @@ const lines: Array<[string, number]> = [
   ['power_cell', 529], ['power_battery', 29], ['synthetic_diamond', 48], ['reactor_fuel_assembly', 16], ['thorium_fuel_rod', 40],
   ['power_core', 16], ['weapons_grade_plutonium', 8], ['fury_crystal', 36], ['cobalt_ore', 60], ['silicon_ore', 135], ['fluorine_gas', 116],
   ['platinum_ore', 64], ['vanadium_ore', 308], ['palladium_ore', 50], ['nickel_billet', 180], ['helium_3', 37],
+  // default-fit lines from the yard quote of 2026-09-10 16:52 (the Admiral chose the fitted commission)
+  ['railgun_ii', 6], ['crimson_berserker_plating', 1], ['afterburner_i', 1], ['tritium_ice', 160], ['liquid_tritium', 64], ['fusion_fuel_rod', 32],
+  // intermediate outputs of the build plan's craft tree (2026-09-10 19:25): the craft lock exempts a
+  // craft whose OUTPUT is a still-short line, so every step of the chain must be a line or the lock
+  // blocks converting uranium_ore -> uranium_concentrate as "consuming a commission line".
+  ['uranium_concentrate', 122], ['uranium_hexafluoride', 31], ['low_enriched_uranium', 16], ['reactor_grade_plutonium', 8], ['ammo_fabricator', 1],
 ]
 setCommissionRequirements('juggernaut', lines.map(([item_id, quantity]) => ({ item_id, quantity })), row.id)
 console.log(`recorded ${lines.length} Juggernaut lines for ${row.name}`)

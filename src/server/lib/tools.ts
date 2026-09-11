@@ -352,6 +352,8 @@ const fuelFloorBlocks = new Map<string, { dest: string; at: number }>()
 const repeatBuyBlocks = new Map<string, { key: string; at: number }>()
 /** Last craft this profile was blocked on — a repeat clears the gate. */
 const craftBlocks = new Map<string, string>()
+/** Last deposit this profile was blocked on for an empty hold — a repeat lets the game rule. */
+const depositBlocks = new Map<string, string>()
 
 /** Items an agent is EXPECTED to rebuy: consumables burned down every run.
  *  Blocking a restock of these would be the guard causing the outage. */
@@ -572,6 +574,7 @@ export function cleanupProfileToolState(profileId: string): void {
   recentFailures.delete(profileId)
   contextFlushRequests.delete(profileId)
   fuelFloorBlocks.delete(profileId)
+  depositBlocks.delete(profileId)
   reputationLockouts.delete(profileId)
   lastDestinations.delete(profileId)
   tactical.delete(profileId)
@@ -1123,6 +1126,227 @@ function checkBuyAsk(ctx: ToolContext, deep: string, commandArgs: Record<string,
   return null
 }
 
+/**
+ * `{item_id, quantity}` lines from a get_status-shaped state's `cargo` array.
+ * null when the state carries no such array at all — "no reading" and "empty
+ * hold" are different answers, and only one of them justifies a refusal.
+ * A line whose quantity is missing or non-numeric keeps `quantity: null`.
+ */
+function parseCargoArray(gs: Record<string, unknown> | null | undefined): Array<{ item_id: string; quantity: number | null }> | null {
+  const raw = gs?.cargo
+  if (!Array.isArray(raw)) return null
+  return (raw as Array<Record<string, unknown>>)
+    .filter((c) => c && typeof c === 'object' && (typeof c.item_id === 'string' || typeof c.item === 'string'))
+    .map((c) => {
+      const q = Number(c.quantity)
+      return { item_id: String(c.item_id ?? c.item), quantity: c.quantity === undefined || c.quantity === null || !Number.isFinite(q) ? null : q }
+    })
+}
+
+/** Hold units one item occupies, when the catalog knows the item. */
+function catalogItemSize(itemId: string): number | null {
+  try {
+    const size = Number(codexGet('item', itemId)?.size)
+    return Number.isFinite(size) && size > 0 ? size : null
+  } catch { return null }
+}
+
+const UUID_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+interface DepositLineClamp { itemId: string; asked: number; held: number; size: number | null }
+interface DepositPreflight {
+  /** Set when the whole call was refused locally; nothing was sent. */
+  refusal: string | null
+  /** Lines whose quantity was cut down to the live hold. */
+  clamps: DepositLineClamp[]
+  /** Bulk lines removed because the hold has none of the item. */
+  dropped: Array<{ itemId: string; asked: number }>
+}
+const DEPOSIT_UNTOUCHED: DepositPreflight = { refusal: null, clamps: [], dropped: [] }
+
+/** Is this a deposit that draws on the ship's cargo hold (the default source)? */
+function isCargoDeposit(deep: string, commandArgs: Record<string, unknown>): boolean {
+  const action = typeof commandArgs.action === 'string' ? commandArgs.action.trim().toLowerCase() : ''
+  const isDeposit = deep === 'deposit' || deep === 'deposit_items'
+    || ((deep === 'storage' || deep === 'faction') && (action === 'deposit' || action === 'deposit_items'))
+  if (!isDeposit) return false
+  const source = String(commandArgs.source ?? 'cargo').trim().toLowerCase()
+  return source === '' || source === 'cargo'
+}
+
+/**
+ * A deposit for more of an item than the hold carries does not fail loudly.
+ * The bulk envelope answers 200 with `succeeded: 0` buried under `details`,
+ * beneath a cargo listing that reads as "here is your hold after the deposit".
+ * CyberSpock sent deposit_items(uranium_ore x360) three times on 2026-09-10
+ * while holding 180 — 360 was the hold's CARGO-UNIT figure (uranium_ore is
+ * size 2), not the item count — read each envelope as success, and flew two
+ * extra six-jump round trips with the ore still aboard.
+ *
+ * The connection's own state cache is the live hold. When it carries a cargo
+ * array, cut any over-ask down to what is actually held (the call then does
+ * what the agent meant), drop bulk lines the hold has none of, and refuse a
+ * call with nothing to move at all. With no live cargo array the game answers,
+ * and the DB cargo snapshot is never consulted — it is a snapshot.
+ */
+function checkDepositCargo(ctx: ToolContext, deep: string, commandArgs: Record<string, unknown> | undefined): DepositPreflight {
+  if (!commandArgs || !isCargoDeposit(deep, commandArgs) || getPreference('deposit_clamp') === 'off') return DEPOSIT_UNTOUCHED
+  // Credit and ship deposits do not draw on the hold's item lines.
+  if (commandArgs.credits !== undefined || commandArgs.ship_id !== undefined) return DEPOSIT_UNTOUCHED
+
+  let gs: Record<string, unknown> | null = null
+  try { gs = ctx.connection.getLocalState?.() ?? null } catch { gs = null }
+  const cargo = parseCargoArray(gs)
+  if (!cargo) return DEPOSIT_UNTOUCHED   // no live reading — the game answers
+
+  /** Units held; null when the hold lists the item without a usable quantity. */
+  const heldOf = (itemId: string): number | null => {
+    let total = 0
+    for (const c of cargo) {
+      if (c.item_id.toLowerCase() !== itemId.toLowerCase()) continue
+      if (c.quantity === null) return null
+      total += c.quantity
+    }
+    return total
+  }
+  // A line this guard has no business touching: no item, a credit line, a
+  // stored-ship UUID (carrier bay load — never in cargo), or no usable count.
+  const skip = (itemId: string, asked: number): boolean =>
+    !itemId || itemId.toLowerCase() === 'credits' || UUID_RX.test(itemId) || !Number.isFinite(asked) || asked <= 0
+
+  const clamps: DepositLineClamp[] = []
+  const dropped: Array<{ itemId: string; asked: number }> = []
+  let requested: Array<{ itemId: string; asked: number }> = []
+
+  if (Array.isArray(commandArgs.items)) {
+    const kept: unknown[] = []
+    for (const e of commandArgs.items as unknown[]) {
+      const entry = e && typeof e === 'object' ? e as Record<string, unknown> : null
+      const itemId = entry ? String(entry.item_id ?? entry.id ?? entry.item ?? '').trim() : ''
+      const asked = entry ? Number(entry.quantity) : NaN
+      if (!entry || skip(itemId, asked)) { kept.push(e); continue }
+      requested.push({ itemId, asked })
+      const held = heldOf(itemId)
+      if (held === null) { kept.push(e); continue }
+      if (held <= 0) { dropped.push({ itemId, asked }); continue }
+      if (asked > held) {
+        clamps.push({ itemId, asked, held, size: catalogItemSize(itemId) })
+        kept.push({ ...entry, quantity: held })
+        continue
+      }
+      kept.push(e)
+    }
+    if (kept.length > 0 || dropped.length === 0) {
+      if (clamps.length || dropped.length) commandArgs.items = kept
+      depositBlocks.delete(ctx.profileId)
+      return { refusal: null, clamps, dropped }
+    }
+  } else {
+    const itemId = String(commandArgs.item_id ?? commandArgs.id ?? '').trim()
+    const asked = Number(commandArgs.quantity)
+    if (skip(itemId, asked)) return DEPOSIT_UNTOUCHED
+    requested = [{ itemId, asked }]
+    const held = heldOf(itemId)
+    if (held === null) return DEPOSIT_UNTOUCHED
+    if (held > 0) {
+      if (asked > held) {
+        clamps.push({ itemId, asked, held, size: catalogItemSize(itemId) })
+        commandArgs.quantity = held
+      }
+      depositBlocks.delete(ctx.profileId)
+      return { refusal: null, clamps, dropped }
+    }
+  }
+
+  // Every requested line is absent from the live hold. Refuse once; if the
+  // identical call comes straight back, the cache may be the thing that is
+  // wrong, so stand down and let the game rule — one tick beats a trap.
+  const key = stableStringify({ deep, requested })
+  if (depositBlocks.get(ctx.profileId) === key) {
+    depositBlocks.delete(ctx.profileId)
+    ctx.log('system', `[deposit-clamp] identical deposit repeated after a local refusal — passing it to the game unchanged`)
+    return DEPOSIT_UNTOUCHED
+  }
+  depositBlocks.set(ctx.profileId, key)
+  const holdList = cargo.filter((c) => (c.quantity ?? 0) > 0).slice(0, 8)
+    .map((c) => `${c.item_id} x${c.quantity}`).join(', ')
+  const what = requested.map((r) => `${r.asked} ${r.itemId}`).join(', ')
+  return {
+    refusal:
+      `BLOCKED: deposit of ${what} — your hold has none${requested.length > 1 ? ' of these' : ''} (live cargo). Nothing to deposit.` +
+      (holdList ? ` Your cargo holds: ${holdList}.` : ' Your cargo is empty.') +
+      ` Checked locally; no game tick was spent.`,
+    clamps, dropped,
+  }
+}
+
+/** A storage command: deposit/withdraw in any spelling, or a gift, which shares the envelope. */
+const STORAGE_MOVE_RX = /deposit|withdraw|gift|transfer/
+
+/** The failed lines of a bulk storage envelope (BulkStorageResponse) with its counters; null when there are none. */
+function bulkStorageFailures(resultData: unknown, deep = ''): { action: string; succeeded: number | null; requested: number | null; failed: Array<Record<string, unknown>> } | null {
+  const d = resultData as Record<string, unknown> | null | undefined
+  if (!d || typeof d !== 'object') return null
+  // lib_v2 wraps the game's BulkStorageResponse under `details` beside the
+  // refreshed cargo/location; other connections hand the envelope over bare.
+  const details = d.details && typeof d.details === 'object' ? d.details as Record<string, unknown>
+    : String(d.action ?? '').startsWith('bulk_') ? d : null
+  if (!details || !Array.isArray(details.results)) return null
+  // Only a storage envelope: its own `bulk_*` action, or a storage command.
+  if (!String(details.action ?? '').startsWith('bulk_') && !STORAGE_MOVE_RX.test(deep)) return null
+  const failed = (details.results as unknown[])
+    .filter((r): r is Record<string, unknown> => !!r && typeof r === 'object' && (r as Record<string, unknown>).success === false)
+  if (failed.length === 0) return null
+  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+  return { action: String(details.action ?? ''), succeeded: num(details.succeeded), requested: num(details.requested), failed }
+}
+
+/**
+ * Per-line failures from a bulk deposit/withdraw envelope, as the FIRST lines
+ * of the result — the game's own rendering leads with the cargo listing, so
+ * the failure sat below the fold of the 200-char log summary and past the
+ * point where the model had already concluded "deposited".
+ */
+function bulkStorageFailurePrefix(deep: string, resultData: unknown): string {
+  const f = bulkStorageFailures(resultData, deep)
+  if (!f) return ''
+  const verb = /withdraw/.test(f.action) || /withdraw/.test(deep) ? 'WITHDRAW'
+    : /deposit/.test(f.action) || /deposit/.test(deep) ? 'DEPOSIT' : 'TRANSFER'
+  const lines = f.failed.map((r) => {
+    const item = String(r.item_id ?? '?')
+    const qty = Number(r.quantity)
+    const err = String(r.error ?? 'failed')
+    const msg = String(r.message ?? '').trim()
+    let hint = ''
+    if (/insufficient|only have/i.test(`${err} ${msg}`)) {
+      const size = catalogItemSize(item)
+      hint = ` (quantity is the ITEM COUNT, not cargo units${size && size > 1 ? ` — ${item} is size ${size}` : ''})`
+    }
+    return `⚠️ ${verb} FAILED — ${item}${Number.isFinite(qty) ? ` x${qty}` : ''}: ${err}${msg ? ` — ${msg}` : ''}${hint}`
+  })
+  if (f.succeeded === 0) lines.push('Nothing was moved.')
+  else if (f.succeeded !== null && f.requested !== null) lines.push(`${f.succeeded} of ${f.requested} line(s) moved; the rest did not.`)
+  return lines.join('\n')
+}
+
+/** What the clamp changed, for the agent — after the game has answered. */
+function depositClampNotes(pre: DepositPreflight, resultData: unknown, sent: boolean): string {
+  const failedIds = new Set((bulkStorageFailures(resultData, 'deposit')?.failed ?? []).map((r) => String(r.item_id ?? '').toLowerCase()))
+  const lines = pre.clamps.map((c) => {
+    // The size only explains anything when it is not 1 — that is the one case
+    // where the hold's cargo-unit figure and the item count come apart.
+    const size = c.size && c.size > 1
+      ? ` (${c.itemId} is size ${c.size}${c.asked === c.held * c.size ? `; ${c.asked} is your cargo-unit figure` : ''})`
+      : ''
+    const outcome = sent && !failedIds.has(c.itemId.toLowerCase()) ? `Deposited ${c.held}.` : `Sent as ${c.held}.`
+    return `ℹ️ Admiral clamp: you asked to deposit ${c.asked} ${c.itemId} but hold ${c.held} — quantity is the ITEM COUNT, not cargo units${size}. ${outcome}`
+  })
+  for (const d of pre.dropped) {
+    lines.push(`ℹ️ Admiral clamp: dropped ${d.itemId} x${d.asked} from this deposit — your hold has none (live cargo).`)
+  }
+  return lines.join('\n')
+}
+
 // Sentinel prefix for action pending results — loop.ts detects this to exit the turn early
 export const ACTION_PENDING_SENTINEL = '⚠️ ACTION_PENDING: '
 // Prefix of the cooldown-gate rejection. The loop watches for this to end the turn early instead
@@ -1669,13 +1893,29 @@ export function checkDoctrineGuards(
       const stationId = String(commandArgs?.base_id ?? commandArgs?.station_id ?? getMostRecentStation(profileId) ?? '')
 
       if (recipeId && !isDryRun && stationId) {
-        const recipe = codexGet('recipe', recipeId) as { inputs?: Array<{ item_id?: string; quantity?: number }>; outputs?: Array<{ quantity?: number }> } | null
+        const recipe = codexGet('recipe', recipeId) as { inputs?: Array<{ item_id?: string; quantity?: number }>; outputs?: Array<{ item_id?: string; quantity?: number }> } | null
         // `quantity` is output items; the game rounds it up to whole runs, so a
         // multi-output recipe consumes ceil(quantity / yield) runs of inputs, not
         // quantity runs (same over-count that broke checkCraftInputs, 2026-09-10).
         const yieldPerRun = Math.max(1, Number(recipe?.outputs?.[0]?.quantity ?? 1) || 1)
         const runs = Math.ceil(wanted / yieldPerRun)
-        for (const input of recipe?.inputs ?? []) {
+        // Commission lines are recorded at several depths of the build tree (the yard's
+        // bill AND the raws it resolves to), so a craft that turns one line into its
+        // parent line is the build MAKING PROGRESS, not a line being spent: on
+        // 2026-09-10 18:40 this lock refused synthesize_argon_power_cell x137 because
+        // it "would consume 207 purified_argon" — the 683 argon on the list IS for those
+        // power cells. When any output of the recipe is a recorded line the agent still
+        // holds fewer of than required, the inputs are free to convert. An output line
+        // that is already met gives no exemption (crafting more would only erode it).
+        const feedsShortLine = (recipe?.outputs ?? []).some((o) => {
+          const outId = String(o?.item_id ?? '').toLowerCase()
+          if (!outId) return false
+          const req = getCommissionRequirement(outId, profileId)
+          if (req <= 0) return false
+          const have = getStorageTotalForProfile(profileId, outId) + getCargoQuantity(profileId, outId)
+          return have < req
+        })
+        for (const input of feedsShortLine ? [] : (recipe?.inputs ?? [])) {
           const itemId = String(input?.item_id ?? '').toLowerCase()
           if (!itemId) continue
           const required = getCommissionRequirement(itemId, profileId)
@@ -2292,6 +2532,23 @@ export async function executeTool(
     }
   }
 
+  // withdraw(item, qty) moves personal storage -> cargo with NO source/target; the
+  // game rejects the explicit spellings of that default ("source=storage target=cargo"
+  // -> invalid_source, and "source=station" the same). CyberSpock burned two ticks on
+  // them at Blood Forge on 2026-09-10 19:27 and then left with an empty hold. Naming
+  // the default is unambiguous, so drop the arguments instead of forwarding the error.
+  if ((deepBare === 'withdraw' || deepBare === 'withdraw_items') && commandArgs) {
+    const src = String(commandArgs.source ?? '').toLowerCase()
+    const tgt = String(commandArgs.target ?? '').toLowerCase()
+    const srcIsDefault = src === '' || src === 'storage' || src === 'station' || src === 'self' || src === 'personal'
+    const tgtIsDefault = tgt === '' || tgt === 'cargo' || tgt === 'ship' || tgt === 'hold'
+    if ((src || tgt) && srcIsDefault && tgtIsDefault) {
+      delete commandArgs.source
+      delete commandArgs.target
+      ctx.log('system', `[withdraw] dropped source="${src}" target="${tgt}" — that is the default (personal storage -> cargo); the game rejects it spelled out`)
+    }
+  }
+
   // Buy with no ask at this station: the depth is known before the round trip.
   {
     const refusal = checkBuyAsk(ctx, deepBare, commandArgs)
@@ -2309,6 +2566,28 @@ export async function executeTool(
       ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
       ctx.log('tool_result', refusal)
       return refusal
+    }
+  }
+
+  // A deposit of more than the live hold carries is cut down to the hold
+  // (the tool_call log below shows the clamped call); one with nothing to
+  // move is refused. The clamp is reported to the agent with the result.
+  let depositPreflight: DepositPreflight | null = null
+  {
+    const pre = checkDepositCargo(ctx, deepBare, commandArgs)
+    if (pre.refusal) {
+      ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
+      ctx.log('tool_result', pre.refusal)
+      return pre.refusal
+    }
+    if (pre.clamps.length || pre.dropped.length) {
+      depositPreflight = pre
+      for (const c of pre.clamps) {
+        ctx.log('system', `[deposit-clamp] ${c.itemId}: asked ${c.asked}, live hold ${c.held}${c.size ? ` (size ${c.size})` : ''} — sending ${c.held}`)
+      }
+      for (const d of pre.dropped) {
+        ctx.log('system', `[deposit-clamp] ${d.itemId} x${d.asked} dropped — not in the live hold`)
+      }
     }
   }
 
@@ -2518,6 +2797,18 @@ export async function executeTool(
         }
       }
 
+      // The single-item deposit form fails as a real error. Say what the
+      // number in `quantity` means, since the wrong one is what produced it.
+      if (errCode === 'insufficient_cargo' || /only have \d+ x /i.test(String(resp.error.message ?? ''))) {
+        const itemId = String(commandArgs?.item_id ?? commandArgs?.id ?? '').trim()
+        const size = itemId ? catalogItemSize(itemId) : null
+        errMsg += `\n\n💡 HINT: quantity is the ITEM COUNT, not cargo units${size && size > 1 ? ` — ${itemId} is size ${size}, so the hold's cargo-unit figure is ${size}x the item count` : ''}. Deposit at most what "You only have N x ..." names.`
+      }
+      if (depositPreflight) {
+        const notes = depositClampNotes(depositPreflight, undefined, false)
+        if (notes) errMsg += `\n\n${notes}`
+      }
+
       // Identical-failure loop breaker (see recentFailures above): on the 3rd identical
       // (command, args, error) inside the window, make the result visibly DIFFERENT so the
       // agent's context stops deterministically reproducing the same retry.
@@ -2566,6 +2857,18 @@ export async function executeTool(
       if (prelude) result = `${prelude}\n${result}`
     }
     if (remapNote) result = remapNote + result
+
+    // A bulk deposit/withdraw that moved nothing still answers 200, with the
+    // failure under `details` below a cargo listing that reads as success.
+    // Its failed lines go FIRST — ahead of everything above — so the 200-char
+    // log summary and the model both meet the failure before the listing.
+    // The clamp note follows them for the same reason: the result cap trims
+    // tails, and a long cargo listing would swallow a note appended below it.
+    {
+      const failures = bulkStorageFailurePrefix(deepBare, resultData)
+      const clampNotes = depositPreflight ? depositClampNotes(depositPreflight, resultData, true) : ''
+      if (failures || clampNotes) result = [failures, clampNotes].filter(Boolean).join('\n') + '\n' + result
+    }
 
     // Bank position / docking / threat / market observations for the gates,
     // and credit real work against the current destination — on SUCCESS only,
@@ -3300,12 +3603,8 @@ async function macroReadState(conn: GameConnection): Promise<{
   const player = (gs?.player ?? {}) as Record<string, unknown>
   const ship = (gs?.ship ?? {}) as Record<string, unknown>
   const location = (gs?.location ?? {}) as Record<string, unknown>
-  const cargoRaw = gs?.cargo
-  const cargo: Array<{ item_id: string; quantity: number }> = Array.isArray(cargoRaw)
-    ? (cargoRaw as Array<Record<string, unknown>>)
-        .filter((c) => typeof c.item_id === 'string' || typeof c.item === 'string')
-        .map((c) => ({ item_id: String(c.item_id ?? c.item), quantity: Number(c.quantity ?? 1) }))
-    : []
+  const cargo: Array<{ item_id: string; quantity: number }> =
+    (parseCargoArray(gs) ?? []).map((c) => ({ item_id: c.item_id, quantity: c.quantity ?? 1 }))
   // cargo_used/capacity: numeric fields, or the "10/60" string some shapes use
   let used = typeof ship.cargo_used === 'number' ? ship.cargo_used : null
   let cap = typeof ship.cargo_capacity === 'number' ? ship.cargo_capacity : (typeof ship.max_cargo === 'number' ? ship.max_cargo : null)

@@ -18,6 +18,7 @@ import analytics from './routes/analytics'
 import schedules from './routes/schedules'
 import codexRoutes from './routes/codex'
 import factionRoutes from './routes/faction'
+import planRoutes from './routes/plan'
 import { startScheduler } from './lib/scheduler'
 import { pruneOldData, backfillSystemsFromStations } from './lib/db'
 import { startCatalogService } from './lib/catalog'
@@ -59,6 +60,7 @@ app.use('*', cors({
 // API routes
 app.route('/api/profiles', profiles)
 app.route('/api/profiles', logs)      // logs routes include /:id/logs
+app.route('/api/profiles', planRoutes) // /:id/plan — the directive queue
 app.route('/api/providers', providers)
 app.route('/api/models', models)
 app.route('/api/commands', commands)
