@@ -67,5 +67,21 @@ insertPlanStep({ id: 'h2', profile_id: 'p-ledger', plan_id: 'zzz-ready', plan_na
   condition_json: JSON.stringify({ docked_at: 'crimson_war_citadel' }), completion_json: null, restore_on_done: 0, notes: '' })
 out.hApplied = (await advancePlanQueue({ profileId: 'p-ledger', connection: conn({ location: { system_id: 'krynn', docked_at: 'crimson_war_citadel' } }) }))?.applied?.id ?? null
 out.hBlockedStatus = getPlanStep('h1')!.status
+// (i) strict order: while the active step's completion is unmet, its successor waits even
+// though the successor's own condition holds (both gate on "docked at War Citadel")
+insertPlanStep({ id: 'i1', profile_id: 'p-ledger', plan_id: 'strict', plan_name: 'Strict', seq: 1, title: 'Buy titanium', directive: 'STRICT 1: buy titanium 20.', todo: null,
+  condition_json: JSON.stringify({ docked_at: 'crimson_war_citadel' }), completion_json: JSON.stringify({ docked_at: 'crimson_war_citadel', storage_at_least: { station_id: 'crimson_war_citadel', item_id: 'titanium_alloy', qty: 120 } }), restore_on_done: 0, notes: '' })
+insertPlanStep({ id: 'i2', profile_id: 'p-ledger', plan_id: 'strict', plan_name: 'Strict', seq: 2, title: 'Corridor', directive: 'STRICT 2: fly the corridor.', todo: null,
+  condition_json: JSON.stringify({ docked_at: 'crimson_war_citadel' }), completion_json: null, restore_on_done: 0, notes: '' })
+recordStorageSnapshot('p-ledger', 'crimson_war_citadel', [{ item_id: 'titanium_alloy', quantity: 105 }]); clearStorageDirty('p-ledger')
+const wc = conn({ location: { system_id: 'krynn', docked_at: 'crimson_war_citadel' } })
+out.iFirst = (await advancePlanQueue({ profileId: 'p-ledger', connection: wc }))?.applied?.id ?? null
+out.iSecondBoundary = await advancePlanQueue({ profileId: 'p-ledger', connection: wc })
+out.iStatuses = [getPlanStep('i1')!.status, getPlanStep('i2')!.status]
+out.iWaiting = (await describePlanQueue({ profileId: 'p-ledger', connection: wc })).find(s => s.id === 'i2')?.waiting_on ?? null
+recordStorageSnapshot('p-ledger', 'crimson_war_citadel', [{ item_id: 'titanium_alloy', quantity: 125 }]); clearStorageDirty('p-ledger')
+const i3 = await advancePlanQueue({ profileId: 'p-ledger', connection: wc })
+out.iCompleted = i3?.completed?.id ?? null; out.iApplied = i3?.applied?.id ?? null
+out.iDirective = getProfile('p-ledger')!.directive
 out.count = listPlanSteps('p-ledger').length
 console.log('__RESULT__' + JSON.stringify(out))

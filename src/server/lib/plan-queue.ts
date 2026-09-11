@@ -184,13 +184,21 @@ export function completePlanStep(stepId: string, reason: string, log?: StepLogge
 export async function advancePlanQueue(ctx: PlanEvalContext): Promise<{ completed?: PlanStepRow; applied?: PlanStepRow } | null> {
   const out: { completed?: PlanStepRow; applied?: PlanStepRow } = {}
   const active = activePlanStep(ctx.profileId)
+  // Strict order within a plan: while the active step has a completion condition
+  // that does not hold yet, its own successors wait — whatever their conditions say.
+  // 2026-09-11: CyberSpock's "buy titanium" step (completion: titanium ≥ 120) and the
+  // next step both gated on "docked at War Citadel"; the successor applied one
+  // boundary later and displaced the unfinished step, so the titanium was never bought.
+  let blockedPlan: string | null = null
   if (active?.completion_json) {
     const why = await unmetReason(parseCondition(active.completion_json), active, ctx)
     if (why === null) out.completed = completePlanStep(active.id, 'completion condition met', ctx.log)
+    else blockedPlan = active.plan_id
   }
   // Plans are independent: evaluate the head step of every plan and apply the first
-  // whose condition holds (one per boundary). Within a plan, order is strict.
+  // whose condition holds (one per boundary).
   for (const next of headQueuedPlanSteps(ctx.profileId)) {
+    if (blockedPlan !== null && next.plan_id === blockedPlan) continue
     const why = await unmetReason(parseCondition(next.condition_json), next, ctx)
     if (why === null) { out.applied = applyPlanStep(next.id, 'condition', ctx.log); break }
   }
@@ -201,11 +209,17 @@ export async function advancePlanQueue(ctx: PlanEvalContext): Promise<{ complete
 export async function describePlanQueue(ctx: PlanEvalContext): Promise<Array<PlanStep & { waiting_on: string | null }>> {
   const rows = listPlanSteps(ctx.profileId)
   const out: Array<PlanStep & { waiting_on: string | null }> = []
+  // Same rule as advancePlanQueue: an unfinished active step holds its own plan's successors.
+  const active = rows.find(r => r.status === 'active' && r.completion_json)
+  const activeUnmet = active ? await unmetReason(parseCondition(active.completion_json!), active, ctx) : null
   for (const r of rows) {
     let waiting: string | null = null
-    if (r.status === 'queued') waiting = await unmetReason(parseCondition(r.condition_json), r, ctx)
-    else if (r.status === 'active' && r.completion_json) {
-      const w = await unmetReason(parseCondition(r.completion_json), r, ctx)
+    if (r.status === 'queued') {
+      waiting = active && activeUnmet !== null && r.plan_id === active.plan_id
+        ? `waits for the active step to finish (${activeUnmet})`
+        : await unmetReason(parseCondition(r.condition_json), r, ctx)
+    } else if (r.status === 'active' && r.completion_json) {
+      const w = r.id === active?.id ? activeUnmet : await unmetReason(parseCondition(r.completion_json), r, ctx)
       waiting = w === null ? 'completion condition met — retires at the next turn boundary' : `runs until: ${w}`
     }
     out.push({ ...rowToStep(r), waiting_on: waiting })

@@ -33,9 +33,15 @@ describe('directive queue', () => {
     const r = await run(); expect(r.e).toBeNull(); expect(r.eStatus).toBe('queued'); expect(r.fDirective).toContain('COMMISSION'); expect(r.fStatus).toBe('active'); expect(r.fLog).toContain('FIRED')
   })
   test('a storage threshold gates on the recorded quantity', async () => {
-    const r = await run(); expect(r.gLow).toBeNull(); expect(r.gHigh).toBe('s3'); expect(r.count).toBe(5)
+    const r = await run(); expect(r.gLow).toBeNull(); expect(r.gHigh).toBe('s3'); expect(r.count).toBe(7)
   })
   test('one plan\'s blocked head does not hide another plan\'s ready step', async () => {
     const r = await run(); expect(r.hApplied).toBe('h2'); expect(r.hBlockedStatus).toBe('queued')
+  })
+  test('a successor waits while its plan\'s active step is unfinished, then follows at the boundary that completes it', async () => {
+    const r = await run()
+    expect(r.iFirst).toBe('i1'); expect(r.iSecondBoundary).toBeNull(); expect(r.iStatuses).toEqual(['active', 'queued'])
+    expect(r.iWaiting).toContain('waits for the active step'); expect(r.iWaiting).toContain('titanium_alloy')
+    expect(r.iCompleted).toBe('i1'); expect(r.iApplied).toBe('i2'); expect(r.iDirective).toContain('STRICT 2')
   })
 })
