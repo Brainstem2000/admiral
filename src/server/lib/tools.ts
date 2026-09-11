@@ -2569,8 +2569,13 @@ export async function executeTool(
   if ((deepBare === 'withdraw' || deepBare === 'withdraw_items') && commandArgs) {
     const src = String(commandArgs.source ?? '').toLowerCase()
     const tgt = String(commandArgs.target ?? '').toLowerCase()
-    const srcIsDefault = src === '' || src === 'storage' || src === 'station' || src === 'self' || src === 'personal'
-    const tgtIsDefault = tgt === '' || tgt === 'cargo' || tgt === 'ship' || tgt === 'hold'
+    // A station id as the source (source="crimson_war_citadel") names the same default:
+    // personal storage at the station you are docked at.
+    const here = String(currentLocation(ctx).dockedAt ?? '').toLowerCase()
+    const srcIsDefault = src === '' || src === 'storage' || src === 'station' || src === 'self' || src === 'personal' || (here !== '' && src === here)
+    // "target=self" on a storage withdraw is storage-to-storage, which does not exist; the
+    // intent is the hold (CyberSpock, War Citadel, 2026-09-11 00:09-00:11, three refusals).
+    const tgtIsDefault = tgt === '' || tgt === 'cargo' || tgt === 'ship' || tgt === 'hold' || tgt === 'self'
     if ((src || tgt) && srcIsDefault && tgtIsDefault) {
       delete commandArgs.source
       delete commandArgs.target

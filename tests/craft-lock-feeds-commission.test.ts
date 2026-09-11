@@ -36,6 +36,11 @@ describe('craft lock: converting a line into a still-short parent line', () => {
     expect(r.withdrawArgs).toEqual({ item_id: 'uranium_ore', quantity: 355 })
     expect(r.withdrawFactionArgs).toEqual({ item_id: 'uranium_ore', quantity: 10, source: 'faction', target: 'self' })
   }, 60_000)
+  test('target=self and a station-id source are the same default and are dropped too', async () => {
+    const r = await run()
+    expect(r.withdrawSelfArgs).toEqual({ item_id: 'purified_argon', quantity: 15 })
+    expect(r.withdrawStationArgs).toEqual({ item_id: 'purified_argon', quantity: 15 })
+  }, 60_000)
   test('an output line that is already met gives no exemption', async () => {
     const r = await run(); expect(r.concentrateSatisfied).toContain('BLOCKED'); expect(r.concentrateSatisfiedReached).toBe(false)
   }, 60_000)

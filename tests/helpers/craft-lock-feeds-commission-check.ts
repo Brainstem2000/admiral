@@ -56,4 +56,8 @@ clearStorageDirty('p-builder')
   const call = h.calls.find(c => c.cmd === 'withdraw'); out.withdrawArgs = call?.args ?? null }
 { const h = harness(); await executeTool('game', { command: 'withdraw', args: { item_id: 'uranium_ore', quantity: 10, source: 'faction', target: 'self' } }, h.ctx)
   const call = h.calls.find(c => c.cmd === 'withdraw'); out.withdrawFactionArgs = call?.args ?? null }
+{ const h = harness(); await executeTool('game', { command: 'withdraw', args: { item_id: 'purified_argon', quantity: 15, source: 'storage', target: 'self' } }, h.ctx)
+  out.withdrawSelfArgs = h.calls.find(c => c.cmd === 'withdraw')?.args ?? null }
+{ const h = harness(); await executeTool('game', { command: 'withdraw', args: { item_id: 'purified_argon', quantity: 15, source: STATION, target: 'self' } }, h.ctx)
+  out.withdrawStationArgs = h.calls.find(c => c.cmd === 'withdraw')?.args ?? null }
 console.log('__RESULT__' + JSON.stringify(out))
