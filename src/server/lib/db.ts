@@ -3643,3 +3643,11 @@ export function findToolResultSince(profileId: string, sinceId: number, needle: 
     "SELECT id, summary FROM log_entries WHERE profile_id = ? AND id > ? AND type = 'tool_result' AND lower(summary) LIKE ? ORDER BY id DESC LIMIT 1",
   ).get(profileId, sinceId, `%${needle.toLowerCase()}%`) as { id: number; summary: string } | undefined
 }
+
+/** Age of the newest storage snapshot row for one station, in ms; null when never recorded. */
+export function storageSnapshotAgeMs(profileId: string, stationId: string): number | null {
+  const row = getDb().query('SELECT MAX(updated_at) AS at FROM storage_inventory WHERE profile_id = ? AND station_id = ?').get(profileId, stationId) as { at: string | null } | undefined
+  if (!row?.at) return null
+  const t = Date.parse(row.at.includes('T') ? row.at : row.at.replace(' ', 'T') + 'Z')
+  return Number.isFinite(t) ? Math.max(0, Date.now() - t) : null
+}

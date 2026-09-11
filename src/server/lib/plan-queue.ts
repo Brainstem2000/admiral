@@ -16,7 +16,7 @@
 import type { PlanCondition, PlanStep } from '../../shared/types'
 import {
   activePlanStep, addLogEntry, findToolResultSince, getPlanStep, getProfile, getStorageQuantity,
-  isStorageDirty, listPlanSteps, nextQueuedPlanStep, updatePlanStep, updateProfile, type PlanStepRow,
+  isStorageDirty, listPlanSteps, nextQueuedPlanStep, storageSnapshotAgeMs, updatePlanStep, updateProfile, type PlanStepRow,
 } from './db'
 import type { GameConnection } from './connections/interface'
 import { recordStorageFromCommand } from './tools'
@@ -77,9 +77,14 @@ function readLive(ctx: PlanEvalContext): LiveState {
  *  step depends on must be real, not the last view_storage (deposits do not refresh it). */
 const storageRefreshAt = new Map<string, number>()
 const STORAGE_REFRESH_COOLDOWN_MS = 60_000
+/** A snapshot older than this is re-read even when nothing marked it dirty: a gift
+ *  RECEIVED changes the recipient's storage without any command of theirs. */
+const STORAGE_SNAPSHOT_STALE_MS = 5 * 60_000
 async function refreshStorageIfStale(ctx: PlanEvalContext, stationId: string, live: LiveState): Promise<void> {
   if (!ctx.connection || live.dockedAt !== stationId) return
-  if (!isStorageDirty(ctx.profileId)) return
+  const age = storageSnapshotAgeMs(ctx.profileId, stationId)
+  const fresh = age !== null && age < STORAGE_SNAPSHOT_STALE_MS
+  if (!isStorageDirty(ctx.profileId) && fresh) return
   const key = `${ctx.profileId}:${stationId}`
   const last = storageRefreshAt.get(key) ?? 0
   if (Date.now() - last < STORAGE_REFRESH_COOLDOWN_MS) return
