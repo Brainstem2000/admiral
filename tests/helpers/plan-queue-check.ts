@@ -60,5 +60,12 @@ const bf = conn({ location: { system_id: 'blood_forge', docked_at: 'blood_forge_
 out.gLow = await advancePlanQueue({ profileId: 'p-ledger', connection: bf })
 recordStorageSnapshot('p-ledger', 'blood_forge_smelting_works', [{ item_id: 'uranium_ore', quantity: 488 }]); clearStorageDirty('p-ledger')
 out.gHigh = (await advancePlanQueue({ profileId: 'p-ledger', connection: bf }))?.applied?.id ?? null
+// (h) a blocked head in one plan (admiral_go) must not hide a ready step in another plan
+insertPlanStep({ id: 'h1', profile_id: 'p-ledger', plan_id: 'aaa-blocked', plan_name: 'Blocked', seq: 1, title: 'Needs the Admiral', directive: 'BLOCKED PLAN', todo: null,
+  condition_json: JSON.stringify({ admiral_go: true }), completion_json: null, restore_on_done: 0, notes: '' })
+insertPlanStep({ id: 'h2', profile_id: 'p-ledger', plan_id: 'zzz-ready', plan_name: 'Ready', seq: 1, title: 'Ready now', directive: 'READY PLAN: go.', todo: null,
+  condition_json: JSON.stringify({ docked_at: 'crimson_war_citadel' }), completion_json: null, restore_on_done: 0, notes: '' })
+out.hApplied = (await advancePlanQueue({ profileId: 'p-ledger', connection: conn({ location: { system_id: 'krynn', docked_at: 'crimson_war_citadel' } }) }))?.applied?.id ?? null
+out.hBlockedStatus = getPlanStep('h1')!.status
 out.count = listPlanSteps('p-ledger').length
 console.log('__RESULT__' + JSON.stringify(out))

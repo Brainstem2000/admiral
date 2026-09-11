@@ -2,7 +2,7 @@ import { Type, StringEnum } from '@mariozechner/pi-ai'
 import type { Tool } from '@mariozechner/pi-ai'
 import type { GameConnection } from './connections/interface'
 import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
-import { scrubLiveState, scrubNotice } from './note-hygiene'
+import { scrubLiveState, scrubNotice, dedupeTodoAgainstMemory, ageCompletedTodoLines, scrubMemoryTaskLines, hygieneNotice, resetNoteHygiene } from './note-hygiene'
 import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor, refuseAbandon, noteAbandon, knownTitle, isRefusedMissionTitle } from './mission-guard'
 import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, isStorageDirty, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS, systemHasStation } from './db'
 import { FleetIntelCollector } from './fleet-intel'
@@ -568,6 +568,7 @@ const ACQUISITION_COMMANDS = new Set([
 ])
 
 export function cleanupProfileToolState(profileId: string): void {
+  resetNoteHygiene(profileId)
   windDownProfiles.delete(profileId)
   actionCooldowns.delete(profileId)
   memoryDirtyFlags.delete(profileId)
@@ -1626,6 +1627,34 @@ export function checkDoctrineGuards(
     }
     // Dropping one contract is judgement; dropping eight in three hours while
     // completing none is a loop. See mission-guard.ts.
+    // Ship purchases and mission acceptance need the directive's word. 2026-09-10 20:38-20:41:
+    // CyberSpock, idle after a delivery ("stay docked, await orders"), accepted a combat
+    // bounty, bought a 50,001cr Catalogue hull and flew it into six lawless systems —
+    // no order said either. An idle local model invents work; the exits are gated here.
+    // Both gates read the standing directive; an unknown profile or an empty directive
+    // has nothing to enforce, so they stand down (the wind-down gate above still applies).
+    const standingDirective = (getProfile(profileId)?.directive ?? '').trim().toLowerCase()
+    if (standingDirective && (bare === 'buy_listed_ship' || bare === 'buy_ship' || bare.endsWith('_buy_listed_ship') || bare.endsWith('_buy_ship'))) {
+      const directive = standingDirective
+      const authorized = /\b(buy|purchase|acquire)\b[^.\n]{0,40}\b(ship|hull)\b|buy_listed_ship|buy_ship/.test(directive)
+      if (!authorized) {
+        return (
+          'BLOCKED by Admiral doctrine: buying a ship needs an order that says so, and your directive does not mention ' +
+          'buying a ship or a hull. Keep the ship you fly. If you believe a different hull is needed, say so in faction chat and wait.'
+        )
+      }
+    }
+    if (standingDirective && (bare === 'accept_mission' || bare.endsWith('_accept_mission'))) {
+      const directive = standingDirective
+      const forbids = /\b(no|never|do not|don't|without)\s+(accept(ing)?\s+)?(any\s+|new\s+|other\s+)?(missions?|contracts?|bount(y|ies))\b/.test(directive)
+      const mentions = /\b(missions?|contracts?|bount(y|ies))\b/.test(directive)
+      if (forbids || !mentions) {
+        return (
+          'BLOCKED by Admiral doctrine: your directive ' + (forbids ? 'forbids taking missions' : 'says nothing about missions') +
+          ', so none may be accepted. Do the job in your directive; when it is finished, post DONE in faction chat and stay docked — the next orders come from the Admiral.'
+        )
+      }
+    }
     if (bare === 'abandon_mission' || bare.endsWith('_abandon_mission')) {
       // Resolve the title so a doctrine-refused mission is exempt from the
       // churn limit — dropping one is obedience, not churn, and it must not
@@ -3369,25 +3398,38 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
       // the next turn, and reconciling that self-inflicted contradiction is what
       // consumed Morg'Thar's entire 2026-09-05.
       const scrub = scrubLiveState(String(args.content))
-      ctx.todo = scrub.text
+      // Memory is the durable copy: a TODO line that repeats a memory line is dropped;
+      // a line the agent marked done survives a few more writes, then goes.
+      const dup = dedupeTodoAgainstMemory(scrub.text, ctx.memory || '')
+      const aged = ageCompletedTodoLines(ctx.profileId, dup.text)
+      ctx.todo = aged.text
       updateProfile(ctx.profileId, { todo: ctx.todo })
-      ctx.log('system', scrub.removed.length
-        ? `TODO list updated (${scrub.removed.length} live-state line(s) stripped)`
-        : 'TODO list updated')
+      const bits = [
+        scrub.removed.length ? `${scrub.removed.length} live-state` : '',
+        dup.removed.length ? `${dup.removed.length} duplicate-of-memory` : '',
+        aged.removed.length ? `${aged.removed.length} completed` : '',
+      ].filter(Boolean)
+      ctx.log('system', bits.length ? `TODO list updated (${bits.join(', ')} line(s) stripped)` : 'TODO list updated')
       return 'TODO list updated.' + (scrub.removed.length ? scrubNotice(scrub.removed) : '')
+        + (dup.removed.length ? hygieneNotice('duplicate-of-memory', dup.removed) + ' Memory already holds them; the TODO is for live steps only.' : '')
+        + (aged.removed.length ? hygieneNotice('completed', aged.removed) + ' Finished items are cleared after a few turns; keep the TODO to open work.' : '')
     }
     case 'read_todo': {
       return ctx.todo || '(empty TODO list)'
     }
     case 'update_memory': {
       const scrubM = scrubLiveState(String(args.content))
-      ctx.memory = scrubM.text
+      const tasks = scrubMemoryTaskLines(scrubM.text)
+      ctx.memory = tasks.text
       updateProfile(ctx.profileId, { memory: ctx.memory })
       memoryDirtyFlags.set(ctx.profileId, true)
-      ctx.log('system', scrubM.removed.length
-        ? `Memory updated (${scrubM.removed.length} live-state line(s) stripped)`
-        : 'Memory updated')
+      const bitsM = [
+        scrubM.removed.length ? `${scrubM.removed.length} live-state` : '',
+        tasks.removed.length ? `${tasks.removed.length} turn-tracking` : '',
+      ].filter(Boolean)
+      ctx.log('system', bitsM.length ? `Memory updated (${bitsM.join(', ')} line(s) stripped)` : 'Memory updated')
       return 'Memory updated.' + (scrubM.removed.length ? scrubNotice(scrubM.removed) : '')
+        + (tasks.removed.length ? hygieneNotice('turn-tracking', tasks.removed) + ' Memory is for durable knowledge; step tracking belongs in the TODO.' : '')
     }
     case 'read_memory': {
       return ctx.memory || '(empty memory)'

@@ -3651,3 +3651,10 @@ export function storageSnapshotAgeMs(profileId: string, stationId: string): numb
   const t = Date.parse(row.at.includes('T') ? row.at : row.at.replace(' ', 'T') + 'Z')
   return Number.isFinite(t) ? Math.max(0, Date.now() - t) : null
 }
+
+/** The lowest-sequence queued step of EACH plan — one plan's blocked head must not hide another plan's ready step. */
+export function headQueuedPlanSteps(profileId: string): PlanStepRow[] {
+  return getDb().query(`SELECT * FROM directive_queue d WHERE d.profile_id = ? AND d.status = 'queued'
+    AND d.seq = (SELECT MIN(x.seq) FROM directive_queue x WHERE x.profile_id = d.profile_id AND x.plan_id = d.plan_id AND x.status = 'queued')
+    ORDER BY d.plan_id, d.seq, d.created_at`).all(profileId) as PlanStepRow[]
+}

@@ -133,3 +133,47 @@ describe('mission state is injected too — recording it is the same bug', () =>
     expect(scrubLiveState(rule).text).toContain(rule)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Memory vs TODO separation (2026-09-10): memory = durable knowledge, TODO = live
+// steps; nothing in both; finished items age out of the TODO.
+// ---------------------------------------------------------------------------
+import { dedupeTodoAgainstMemory, ageCompletedTodoLines, scrubMemoryTaskLines, resetNoteHygiene, COMPLETED_LINE_TTL_WRITES } from '../src/server/lib/note-hygiene'
+
+describe('memory vs TODO hygiene', () => {
+  test('a TODO line that repeats a memory line is dropped; the memory copy stays', () => {
+    const memory = '## Standing rules\n- Do NOT sell anything\n- Stay docked at The Obsidian Well\n'
+    const todo = 'TODO:\n- **Do not sell anything**\n- Craft convert_to_uf6 x25 next\n- Stay docked at the Obsidian Well.\n'
+    const r = dedupeTodoAgainstMemory(todo, memory)
+    expect(r.removed).toHaveLength(2)
+    expect(r.text).toContain('convert_to_uf6')
+    expect(r.text).not.toMatch(/sell anything/i)
+  })
+  test('short lines never count as duplicates', () => {
+    const r = dedupeTodoAgainstMemory('- Wait\n- Craft x', '- Wait\n- Craft x')
+    expect(r.removed).toHaveLength(0)
+  })
+  test(`a completed TODO line survives ${COMPLETED_LINE_TTL_WRITES} more writes, then goes`, () => {
+    resetNoteHygiene('p-h')
+    const todo = '- Fusion rods x28 ✅ COMPLETED\n- Next: convert_to_uf6 x25'
+    let r = ageCompletedTodoLines('p-h', todo)
+    for (let i = 1; i < COMPLETED_LINE_TTL_WRITES; i++) r = ageCompletedTodoLines('p-h', todo)
+    expect(r.removed).toHaveLength(0)
+    expect(r.text).toContain('COMPLETED')
+    r = ageCompletedTodoLines('p-h', todo)
+    expect(r.removed).toHaveLength(1)
+    expect(r.text).toBe('- Next: convert_to_uf6 x25')
+  })
+  test('"until X is DONE" is a plan, not a finished item', () => {
+    resetNoteHygiene('p-h2')
+    const todo = '- Wait until get_action_log shows the job DONE'
+    for (let i = 0; i <= COMPLETED_LINE_TTL_WRITES + 1; i++) expect(ageCompletedTodoLines('p-h2', todo).removed).toHaveLength(0)
+  })
+  test('turn-tracking and next-action scaffolding are stripped from memory', () => {
+    const memory = '## History\n- 2026-08-20: crafted fusion rods here\n- **TURN N+3:** Re-posted HALT\n**Next escalation:** re-assess in 2 turns\n- Current status: HOLDING\n'
+    const r = scrubMemoryTaskLines(memory)
+    expect(r.removed).toHaveLength(3)
+    expect(r.text).toContain('2026-08-20')
+    expect(r.text).not.toMatch(/TURN N|Next escalation|Current status/)
+  })
+})

@@ -76,3 +76,86 @@ export function scrubNotice(removed: string[]): string {
     + ` Writing them here guarantees this note contradicts reality on your next turn — which is what a "state mismatch" is.`
     + ` Record decisions and durable facts; never a snapshot.`
 }
+
+
+/**
+ * Memory holds durable knowledge; the TODO holds the live step list. Brian, 2026-09-10:
+ * "memory should be historical knowledge relevant to the overall mission. To-Dos
+ * should be tracked and, when completed, cleaned up after so many turns. What's in
+ * memory should not also be duplicated in To-Dos." Morg'Thar's memory that evening
+ * carried the same rule block twice, a turn-by-turn HOLD log, and the inventory the
+ * prompt already injects — 3,064 chars of which ~600 were knowledge.
+ */
+
+/** Normalise a line for duplicate detection: case, bullets, markdown, punctuation, spacing. */
+export function normalizeNoteLine(line: string): string {
+  return line.toLowerCase()
+    .replace(/[`*_~>#]/g, '')
+    .replace(/^[\s\-\d.)\[\]x✅✔]+/, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+/** TODO lines that repeat a memory line are dropped — the memory copy is the one that lasts. */
+export function dedupeTodoAgainstMemory(todo: string, memory: string): NoteScrub {
+  const mem = new Set(memory.split('\n').map(normalizeNoteLine).filter(l => l.length >= 12))
+  const removed: string[] = []
+  const kept = todo.split('\n').filter(line => {
+    const n = normalizeNoteLine(line)
+    if (n.length >= 12 && mem.has(n)) { removed.push(line.trim()); return false }
+    return true
+  })
+  return { text: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(), removed }
+}
+
+/** A TODO line the agent has marked finished. */
+export const COMPLETED_LINE = /(✅|✔|\[x\]|\bDONE\b|\bCOMPLETED?\b|\bFINISHED\b|^\s*[-*]?\s*\**Verified\**\s*:)/i
+/** How many further TODO writes a completed line survives before it is dropped. */
+export const COMPLETED_LINE_TTL_WRITES = 3
+
+const completedSeen = new Map<string, Map<string, number>>()
+
+/** Forget the aging counters for one agent (on stop / clean boot). */
+export function resetNoteHygiene(profileId: string): void { completedSeen.delete(profileId) }
+
+/**
+ * Age out completed TODO lines: a line marked done is kept for the next few writes
+ * (so the agent sees its own progress) and then dropped, instead of accreting into
+ * a permanent history that crowds out the live work.
+ */
+export function ageCompletedTodoLines(profileId: string, todo: string): NoteScrub {
+  let seen = completedSeen.get(profileId)
+  if (!seen) { seen = new Map(); completedSeen.set(profileId, seen) }
+  const removed: string[] = []
+  const present = new Set<string>()
+  const kept = todo.split('\n').filter(line => {
+    if (!COMPLETED_LINE.test(line)) return true
+    if (REASONING_RULE.test(line)) return true         // "until X is DONE" is a plan, not a finished item
+    const key = normalizeNoteLine(line)
+    if (!key) return true
+    present.add(key)
+    const n = (seen!.get(key) ?? 0) + 1
+    seen!.set(key, n)
+    if (n > COMPLETED_LINE_TTL_WRITES) { removed.push(line.trim()); seen!.delete(key); return false }
+    return true
+  })
+  for (const k of [...seen.keys()]) if (!present.has(k)) seen.delete(k)   // the agent already removed it
+  return { text: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(), removed }
+}
+const REASONING_RULE = /\b(until|when|once|unless|if|before|after)\b/i
+
+/** Turn-by-turn tracking and "next action" scaffolding belong in the TODO (or nowhere), never in memory. */
+const MEMORY_TASK_LINE = /^\s*[-*#>]*\s*\**\s*(TURN\s+N(\+\d+)?|Turn\s+\d+|Next (action|tool call|escalation|step)s?|HOLD STATUS|Current status|Awaiting|WAITING for)\b/i
+export function scrubMemoryTaskLines(memory: string): NoteScrub {
+  const removed: string[] = []
+  const kept = memory.split('\n').filter(line => {
+    if (MEMORY_TASK_LINE.test(line)) { removed.push(line.trim()); return false }
+    return true
+  })
+  return { text: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(), removed }
+}
+
+export function hygieneNotice(what: string, removed: string[]): string {
+  const shown = removed.slice(0, 3).map(l => `"${l.slice(0, 60)}"`).join(', ')
+  return ` ${removed.length} ${what} line(s) dropped (${shown}${removed.length > 3 ? ', …' : ''}).`
+}

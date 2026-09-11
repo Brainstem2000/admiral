@@ -16,7 +16,7 @@
 import type { PlanCondition, PlanStep } from '../../shared/types'
 import {
   activePlanStep, addLogEntry, findToolResultSince, getPlanStep, getProfile, getStorageQuantity,
-  isStorageDirty, listPlanSteps, nextQueuedPlanStep, storageSnapshotAgeMs, updatePlanStep, updateProfile, type PlanStepRow,
+  headQueuedPlanSteps, isStorageDirty, listPlanSteps, storageSnapshotAgeMs, updatePlanStep, updateProfile, type PlanStepRow,
 } from './db'
 import type { GameConnection } from './connections/interface'
 import { recordStorageFromCommand } from './tools'
@@ -188,10 +188,11 @@ export async function advancePlanQueue(ctx: PlanEvalContext): Promise<{ complete
     const why = await unmetReason(parseCondition(active.completion_json), active, ctx)
     if (why === null) out.completed = completePlanStep(active.id, 'completion condition met', ctx.log)
   }
-  const next = nextQueuedPlanStep(ctx.profileId)
-  if (next) {
+  // Plans are independent: evaluate the head step of every plan and apply the first
+  // whose condition holds (one per boundary). Within a plan, order is strict.
+  for (const next of headQueuedPlanSteps(ctx.profileId)) {
     const why = await unmetReason(parseCondition(next.condition_json), next, ctx)
-    if (why === null) out.applied = applyPlanStep(next.id, 'condition', ctx.log)
+    if (why === null) { out.applied = applyPlanStep(next.id, 'condition', ctx.log); break }
   }
   return out.completed || out.applied ? out : null
 }

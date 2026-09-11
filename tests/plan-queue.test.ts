@@ -33,6 +33,9 @@ describe('directive queue', () => {
     const r = await run(); expect(r.e).toBeNull(); expect(r.eStatus).toBe('queued'); expect(r.fDirective).toContain('COMMISSION'); expect(r.fStatus).toBe('active'); expect(r.fLog).toContain('FIRED')
   })
   test('a storage threshold gates on the recorded quantity', async () => {
-    const r = await run(); expect(r.gLow).toBeNull(); expect(r.gHigh).toBe('s3'); expect(r.count).toBe(3)
+    const r = await run(); expect(r.gLow).toBeNull(); expect(r.gHigh).toBe('s3'); expect(r.count).toBe(5)
+  })
+  test('one plan\'s blocked head does not hide another plan\'s ready step', async () => {
+    const r = await run(); expect(r.hApplied).toBe('h2'); expect(r.hBlockedStatus).toBe('queued')
   })
 })
