@@ -128,22 +128,29 @@ if (scopeProfileId) { where.push('profile_id = ?'); bindExtra.push(scopeProfileI
 if (atStation) { where.push('station_id = ?'); bindExtra.push(atStation) }
 const stockQ = db.query(
   `SELECT COALESCE(SUM(quantity),0) q FROM storage_inventory WHERE ${where.join(' AND ')}`)
-// --faction: add the faction lockbox (faction_storage_inventory, fed by `view target=faction`).
-// Any officer can withdraw from it where it exists, so for a scoped --for run it is real
-// stock — the Juggernaut count on 2026-09-10 missed shield_emitter 172, hull_plating 195,
+// --faction: the faction lockbox (faction_storage_inventory, fed by `view target=faction`)
+// may SUPPLY a line — an officer pulls it with withdraw(source=faction, target=self) —
+// but it is never "delivered": the yard draws from the agent's own storage. So the
+// lockbox is reported in its own column and counted only as a source for the gap.
+// The Juggernaut count on 2026-09-10 missed shield_emitter 172, hull_plating 195,
 // durasteel_plate 221 and weapon_housing 80 sitting in the War Citadel lockbox.
 const withFaction = process.argv.includes('--faction')
 const factionQ = db.query(
   `SELECT COALESCE(SUM(quantity),0) q FROM faction_storage_inventory WHERE item_id = ?${atStation ? ' AND station_id = ?' : ''}`)
-const stockCache = new Map<string, number>()
-const stock = (id: string) => {
-  if (!stockCache.has(id)) {
-    let q = (stockQ.get(id, ...bindExtra) as any).q as number
-    if (withFaction) q += (factionQ.get(...(atStation ? [id, atStation] : [id])) as any).q as number
-    stockCache.set(id, q)
-  }
-  return stockCache.get(id)!
+/** The agent's own storage in scope (never the lockbox). */
+const heldCache = new Map<string, number>()
+const held = (id: string) => {
+  if (!heldCache.has(id)) heldCache.set(id, (stockQ.get(id, ...bindExtra) as any).q as number)
+  return heldCache.get(id)!
 }
+/** Lockbox units in scope — at the yard when --at is given, else across every station. */
+const lockboxCache = new Map<string, number>()
+const lockbox = (id: string) => {
+  if (!lockboxCache.has(id)) lockboxCache.set(id, (factionQ.get(...(atStation ? [id, atStation] : [id])) as any).q as number)
+  return lockboxCache.get(id)!
+}
+/** What the resolver may draw on: own storage, plus the lockbox when --faction says an officer will pull it. */
+const stock = (id: string) => held(id) + (withFaction ? lockbox(id) : 0)
 
 /** Rough cost of obtaining `qty` of `id`, used only to CHOOSE between recipes. */
 /** Price of a unit nobody sells, nobody can mine, and no recipe makes: only a hunt or a wreck yields it. */
@@ -235,17 +242,67 @@ const hullArg = Bun.argv.slice(2).find(a => !a.startsWith('--')
   && a !== forAgent && a !== atStation)
 const hull = ships.find(s => s.id === hullArg)
 if (!hull) { console.error(`no such hull: ${hullArg}`); process.exit(1) }
-for (const m of hull.build_materials) plan(m.item_id, m.quantity)
+
+// THE LINES. The yard's own list is the hull's build_materials (authoritative per
+// the codex). Rows recorded in commission_requirements for this class that are not
+// yard lines (chain intermediates the Admiral chose to track) are appended and
+// flagged, so nothing the fleet committed to disappears from the report.
+const yardLines: Array<{ item_id: string; quantity: number; recorded: boolean }> =
+  (hull.build_materials ?? []).map((m: any) => ({ item_id: m.item_id, quantity: m.quantity, recorded: false }))
+const recordedRows = db.query('SELECT item_id, quantity FROM commission_requirements WHERE ship_class = ? ORDER BY item_id')
+  .all(hull.id) as Array<{ item_id: string; quantity: number }>
+for (const r of recordedRows) if (!yardLines.some(l => l.item_id === r.item_id)) yardLines.push({ item_id: r.item_id, quantity: r.quantity, recorded: true })
 
 const n = (x: number) => Math.round(x).toLocaleString('en-US')
 const scopeLabel = scopeAgentName
-  ? `stock counted: ${scopeAgentName} only${atStation ? ` at ${atStation}` : ''}${withFaction ? ' + the faction lockbox' : ''}`
+  ? `stock counted: ${scopeAgentName} only${atStation ? ` at ${atStation}` : ' across ALL stations'}${withFaction ? `; lockbox${atStation ? ` at ${atStation}` : ' at every station'} shown separately and usable as a source` : ''}`
   : atStation
     ? `stock counted: all agents at ${atStation}`
     : 'stock counted: FLEET-WIDE across every agent and station — '
       + 'a build needs it in ONE hold at ONE yard, so re-run with --for <agent> before tasking anyone'
 console.log(`=== ${hull.name} — shipyard tier ${hull.shipyard_tier}, min crew ${hull.minimum_crew} ===`)
-console.log(`    ${scopeLabel}\n`)
+console.log(`    ${scopeLabel}`)
+if (scopeProfileId && !atStation) {
+  // Summing one agent's storage across every station is how this script said
+  // "BUY subtotal 0" for the Juggernaut on 2026-09-11: a stale Obsidian Well
+  // snapshot still held 5 neutronium the agent had already hauled away, and the
+  // Haven lockbox held the targeting computers — none of it at the yard.
+  console.log('    WARNING: no yard given — held/lockbox below are summed across every station this agent has a snapshot at.')
+  console.log('             A commission draws from ONE station: re-run with --at <station_id> (e.g. --at crimson_war_citadel).')
+}
+console.log('')
+
+// Per-line: what the yard checks, in the frame that matters (the agent AT the yard).
+// The lockbox is its own column and its own source line — it is never "held".
+console.log(`YARD LINES (${yardLines.length}${recordedRows.length ? `, ${yardLines.filter(l => l.recorded).length} recorded-only` : ''}):`)
+console.log(`  ${'item'.padEnd(26)} ${'need'.padStart(5)} ${'held'.padStart(5)} ${'lockbox'.padStart(7)} ${'gap'.padStart(5)}  source of the gap`)
+for (const line of yardLines) {
+  const need = line.quantity
+  const own = Math.min(need, Math.max(0, held(line.item_id) - (reserved.get(line.item_id) ?? 0)))
+  const box = lockbox(line.item_id)
+  const gap = need - own
+  let source = ''
+  if (gap === 0) source = 'covered'
+  else {
+    const pull = withFaction ? Math.min(gap, Math.max(0, box - Math.max(0, (reserved.get(line.item_id) ?? 0) - held(line.item_id)))) : 0
+    const rest = gap - pull
+    const before = { buy: buy.get(line.item_id) ?? 0, mine: mine.get(line.item_id) ?? 0, make: make.get(line.item_id)?.qty ?? 0 }
+    plan(line.item_id, need)                   // reserves own stock (+ lockbox when --faction), resolves the rest
+    const d = {
+      buy: (buy.get(line.item_id) ?? 0) - before.buy, mine: (mine.get(line.item_id) ?? 0) - before.mine,
+      make: (make.get(line.item_id)?.qty ?? 0) - before.make,
+    }
+    const parts: string[] = []
+    if (pull > 0) parts.push(`LOCKBOX pull ${pull} (withdraw source=faction target=self)`)
+    if (d.buy > 0) { const s = supplier(line.item_id, d.buy); parts.push(`BUY ${d.buy} @${n(s?.best_ask ?? ask(line.item_id))} in ${s?.empire ?? '?'} (depth ${s?.ask_quantity_at_best ?? depth(line.item_id)})`) }
+    if (d.make > 0) parts.push(`CRAFT ${d.make} via ${[...(make.get(line.item_id)?.rids ?? [])].join(' | ')}`)
+    if (d.mine > 0) parts.push(`GATHER ${d.mine}: ${howToGet(line.item_id)}`)
+    if (!parts.length && rest > 0) parts.push(`unresolved ${rest}`)
+    source = parts.join('; ')
+  }
+  console.log(`  ${(line.item_id + (line.recorded ? ' (recorded)' : '')).padEnd(26)} ${String(need).padStart(5)} ${String(own).padStart(5)} ${(box ? String(box) : '-').padStart(7)} ${String(gap).padStart(5)}  ${source}`)
+}
+console.log('')
 let spend = 0
 console.log('BUY (market depth actually covers it):')
 for (const [id, q] of [...buy].sort((a, b) => ask(b[0]) * b[1] - ask(a[0]) * a[1])) {

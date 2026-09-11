@@ -18,7 +18,7 @@ bun run build          # build frontend + compile standalone `admiral` binary
 ```
 
 - Runtime is **Bun** (`bun:sqlite`, `bun build --compile`). Do not introduce Node-only APIs.
-- **Run the tests.** `bun test` — 722 across 85 files, all passing (≈9 min; several files wait on a rate-limited catalog fetch). (This line used
+- **Run the tests.** `bun test` — 726 across 86 files, all passing (≈9 min; several files wait on a rate-limited catalog fetch). (This line used
   to read "there is no automated test suite"; it was stale by every one of them.)
   Then `bun run build` must succeed and build **warning-free**, and boot the binary
   to exercise the relevant API/UI (see Verifying below).
