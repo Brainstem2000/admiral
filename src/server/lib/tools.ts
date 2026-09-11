@@ -112,9 +112,9 @@ export const allTools: Tool[] = [
   },
   {
     name: 'mine_until_full',
-    description: 'MACRO: mine repeatedly until the cargo hold is full (or the resource depletes). Runs as one bounded code loop — vastly cheaper than calling mine one turn at a time. Requires being at a mineable POI. Returns how much was mined and why it stopped.',
+    description: 'MACRO: ONE call mines until the cargo hold is full or the deposit is dry — do not call it in chunks. Runs as one code loop with a 3-hour guard and a hull-safety stop; vastly cheaper than calling mine one turn at a time. Requires being AT a mineable POI (travel to the belt first). Returns how much was mined and why it stopped; DONE means full, dry, or an error, PAUSED means a cap you set was reached.',
     parameters: Type.Object({
-      max_mines: Type.Optional(Type.Number({ description: 'Max mine actions before stopping (default 30, cap 60)' })),
+      max_mines: Type.Optional(Type.Number({ description: 'Optional cap on mine actions; omit to fill the hold in one call' })),
       stop_at_pct: Type.Optional(Type.Number({ description: 'Stop when cargo reaches this % full (default 100)' })),
     }),
   },
@@ -3638,6 +3638,7 @@ const MACRO_RETRYABLE = new Set(['action_pending', 'cooldown', 'in_transit', 'ra
 async function macroReadState(conn: GameConnection): Promise<{
   credits: number | null; cargoUsed: number | null; cargoCapacity: number | null
   systemId: string | null; docked: boolean; cargo: Array<{ item_id: string; quantity: number }>
+  hull: number | null; maxHull: number | null
 }> {
   let gs: Record<string, unknown> | null = conn.getLocalState?.() ?? null
   if (!gs) {
@@ -3664,6 +3665,8 @@ async function macroReadState(conn: GameConnection): Promise<{
   return {
     credits: typeof player.credits === 'number' ? player.credits : null,
     cargoUsed: used, cargoCapacity: cap, systemId: systemId ? String(systemId) : null, docked, cargo,
+    hull: typeof ship.hull === 'number' ? ship.hull : null,
+    maxHull: typeof ship.max_hull === 'number' ? ship.max_hull : null,
   }
 }
 
@@ -4594,28 +4597,36 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
   ].filter(Boolean).join(' ')
 }
 
+/** Runaway guard for a one-call-per-hold mining macro (see macroMineUntilFull). */
+const MINE_MACRO_DEADLINE_MS = 3 * 60 * 60_000
+
 async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
   const conn = ctx.connection
   const narrate = makeMacroNarrator(ctx, 'mine_until_full', reason)
-  // Bounds sized to fill a typical hold in ONE call: ~1 unit per ~10s tick means
-  // a 70-slot hold needs ~70 mines / ~12 min (observed live: 30 mines stopped at 60/70).
-  const maxMines = Math.min(Number(args.max_mines) || 80, 120)
+  // ONE CALL PER HOLD (Brian, 2026-09-11 08:25). The loop runs until the hold is full,
+  // the deposit is dry, or a safety bound trips. Before this the call was capped at
+  // 80 actions and the boundary text sent Ledger Voss ten jumps to sell 41% of a hold.
+  // `max_mines` is now an OPTIONAL explicit cap; the deadline is the runaway guard,
+  // sized for a 750-unit hold at the observed ~10s per action (~85 min) with margin;
+  // a hull falling under half is treated as an attack and ends the call.
+  const explicitCap = Number(args.max_mines) > 0 ? Math.floor(Number(args.max_mines)) : Infinity
   const stopPct = Math.min(Math.max(Number(args.stop_at_pct) || 100, 10), 100)
-  const deadline = Date.now() + 15 * 60_000
+  const deadline = Date.now() + MINE_MACRO_DEADLINE_MS
   const start = await macroReadState(conn)
   if (start.cargoCapacity === null) return 'MACRO ABORT: could not read cargo capacity — run get_status and retry.'
 
   let mines = 0
   let noYieldStrikes = 0
-  let stopReason = 'max_mines'
+  let stopReason = explicitCap === Infinity ? 'deadline (3h)' : 'max_mines'
   let lastUsed = start.cargoUsed ?? 0
 
-  while (mines < maxMines) {
+  while (mines < explicitCap) {
     if (!conn.isConnected()) { stopReason = 'disconnected'; break }
-    if (Date.now() > deadline) { stopReason = 'deadline (5min)'; break }
+    if (Date.now() > deadline) { stopReason = 'deadline (3h)'; break }
     const st = await macroReadState(conn)
     const used = st.cargoUsed ?? lastUsed
     if (st.cargoCapacity && used >= (st.cargoCapacity * stopPct) / 100) { stopReason = used >= st.cargoCapacity ? 'full' : `reached ${stopPct}%`; break }
+    if (st.hull !== null && st.maxHull && st.hull < st.maxHull * 0.5) { stopReason = `hull ${st.hull}/${st.maxHull} — under half, leaving the belt to you`; break }
 
     const act = await macroAction(ctx,'mine', undefined)
     mines++
@@ -4632,8 +4643,11 @@ async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContex
       noYieldStrikes = 0
     }
     lastUsed = afterUsed
-    ctx.log('system', `mine_until_full: ${mines} mines, cargo ${afterUsed}/${after.cargoCapacity ?? '?'}`)
-    narrate(`${mines} mines, cargo ${afterUsed}/${after.cargoCapacity ?? '?'}`)
+    // A full hold is hundreds of actions; log every tenth so the stream stays readable.
+    if (mines % 10 === 0 || mines === 1) {
+      ctx.log('system', `mine_until_full: ${mines} mines, cargo ${afterUsed}/${after.cargoCapacity ?? '?'}`)
+      narrate(`${mines} mines, cargo ${afterUsed}/${after.cargoCapacity ?? '?'}`)
+    }
     await macroSleep(macroStepDelayMs(conn))
   }
 
