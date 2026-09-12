@@ -18,10 +18,18 @@ getDb()
 
 function ctxFor(profileId: string, where: { system: string }) {
   const conn = {
-    mode: 'http_v2',
+    mode: 'lib_v2',
     isConnected: () => true,
     supportsNotifications: () => false,
-    execute: async () => ({ result: 'ok' }),
+    // A one-hop route to whatever is asked, and the jump succeeds: the goto
+    // completes, so its commitment stands (an aborted goto leaves none).
+    execute: async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'find_route') {
+        const t = String(args?.target_system ?? '')
+        return { result: { found: true, estimated_fuel: 4, fuel_available: 120, fuel_per_jump: 4, route: [{ jumps: 0, system_id: where.system }, { jumps: 1, system_id: t }] } }
+      }
+      return { result: 'ok' }
+    },
     onNotification: () => {},
     getLocalState: () => ({ location: { system_id: where.system, docked_at: null }, ship: { fuel: 120, max_fuel: 180 } }),
   } as any

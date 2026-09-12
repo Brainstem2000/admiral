@@ -13,12 +13,23 @@ import { describe, expect, test } from 'bun:test'
  * continued, which is why this is a gate and not another paragraph.
  */
 
+// The stub plots a one-hop route to whatever is asked and lets the jump
+// succeed, so goto_system completes and the commitment stands. (It used to
+// answer 'ok' to find_route, which made every goto abort on "no parseable
+// hops" — and an aborted goto no longer leaves a commitment behind, see
+// destination-gate-aborted-goto.test.ts.)
 function stubConnection() {
   return {
-    mode: 'http_v2',
+    mode: 'lib_v2',
     isConnected: () => true,
     supportsNotifications: () => false,
-    execute: async () => ({ result: 'ok' }),
+    execute: async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'find_route') {
+        const t = String(args?.target_system ?? '')
+        return { result: { found: true, estimated_fuel: 4, fuel_available: 100, fuel_per_jump: 4, route: [{ jumps: 0, system_id: 'origin' }, { jumps: 1, system_id: t }] } }
+      }
+      return { result: 'ok' }
+    },
     onNotification: () => {},
     getLocalState: () => null,
   } as any

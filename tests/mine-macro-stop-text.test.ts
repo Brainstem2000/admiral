@@ -24,4 +24,23 @@ describe('mine_until_full stop text', () => {
   test('a max_mines stop that reached the stop percentage is DONE', () => {
     expect(mineStopMessage(80, 60, 405, 450, 'max_mines', 90)).toContain('mine_until_full DONE')
   })
+  // Ledger Voss, 2026-09-12 04:15 CT: the WebSocket dropped mid-fill, the macro
+  // said "DONE … cargo now 94/?. Stopped: error [connection_failed]" and he left
+  // the belt to sell a quarter of a hold three jumps away.
+  test('a connection drop is an INTERRUPTION that says stay and call again, even with the cap unknown', () => {
+    const m = mineStopMessage(40, 20, 94, null, 'error [connection_failed] WebSocket connection closed.')
+    expect(m.startsWith('mine_until_full INTERRUPTED (not done)')).toBe(true)
+    expect(m).toContain('NOT a full hold')
+    expect(m).toContain('call mine_until_full again')
+    expect(m).not.toContain('DONE')
+    expect(mineStopMessage(40, 20, 94, 450, 'error [connect_timeout] No response to spacemolt/mine within 15000ms')).toContain('INTERRUPTED')
+    expect(mineStopMessage(12, 9, 60, 450, 'error [rate_limited] slow down')).toContain('INTERRUPTED')
+  })
+  test('a connection drop on a hold that is already full is still DONE', () => {
+    expect(mineStopMessage(90, 70, 450, 450, 'error [connection_failed] WebSocket connection closed.')).toContain('mine_until_full DONE')
+  })
+  test('a real game error (no equipment, wrong place) stays DONE', () => {
+    expect(mineStopMessage(1, 0, 92, 750, 'error [not_at_poi] travel to a belt first')).toContain('mine_until_full DONE')
+    expect(mineStopMessage(1, 0, 92, null, 'error [no_mining] No mining equipment installed.')).toContain('mine_until_full DONE')
+  })
 })

@@ -53,6 +53,8 @@ const KNOWN_LOCAL_TOOLS = new Set([
 // 5s base all land inside ~35s, so a blip lasting a minute burned the whole turn — Morg'Thar
 // lost one that way on 2026-08-19 at ~1% of his calls. 5 retries at a 10s base spans ~310s.
 const MAX_RETRIES = 5
+/** Stands in for a completed reply that carried no content blocks (see completeWithRetry). */
+export const EMPTY_REPLY_PLACEHOLDER = '(empty reply — nothing to do this round)'
 /** Abort/timeout retries are capped far below MAX_RETRIES — see the rationale
  *  at the throw site. One retry, then the turn ends. */
 const MAX_ABORT_RETRIES = 1
@@ -1397,6 +1399,22 @@ export async function completeWithRetry(
           throw new Error(result.errorMessage || 'LLM returned an error response')
         }
         if (result.content.length === 0) {
+          // An empty COMPLETED reply is the model saying "nothing to add" — most
+          // often after a tool round it was told to make its last ("one
+          // status_log and nothing else"). That is a no-op round for
+          // runAgentTurn to score, not a transport failure: CyberSpock, standing
+          // by docked on orders on 2026-09-12 04:26 CT, had every such reply
+          // retried five times per turn (six hosted calls per idle turn). A reply
+          // that carries no usage at all is still a broken call and keeps retrying.
+          const u = result.usage
+          const sawTokens = !!u && (Number(u.input ?? 0) + Number(u.cacheRead ?? 0)) > 0
+          if (result.stopReason === 'stop' && sawTokens) {
+            // Keep the transcript valid: this reply is appended to the context,
+            // and an assistant message with no content blocks is rejected by
+            // the API on every later call.
+            result.content = [{ type: 'text', text: EMPTY_REPLY_PLACEHOLDER } as any]
+            return result
+          }
           throw new Error('LLM returned empty response')
         }
         // A timed-out call can come back as a *successful-looking* result:

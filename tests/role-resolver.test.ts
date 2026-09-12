@@ -31,7 +31,12 @@ describe('resolveAgentRole on the fleet roster', () => {
     expect(resolveAgentRole({ name: 'Kestrel', directive: 'KESTREL — BOUNTY HUNTER. Kill pirates for contracts.', group_name: null })).toBe('hunter')
   })
 
-  test('a non-combat job word in the NAME beats a combat word in the directive head', () => {
-    expect(resolveAgentRole({ name: 'Anyone Prospector', directive: 'EXPLORER & HUNTER — survey belts, hunt what you find', group_name: null })).toBe('default')
+  // Reversed 2026-09-12 01:09 CT: CyberSpock's "- Smuggler" name kept hunt_here
+  // refused all night while his directive head said HUNTER. A non-combat word
+  // in the directive HEAD still wins (see prompt-role.test.ts); a non-combat
+  // word in the name only decides when the head says nothing about combat.
+  test('an explicit combat word in the directive head beats a non-combat job word in the NAME', () => {
+    expect(resolveAgentRole({ name: 'Anyone Prospector', directive: 'EXPLORER & HUNTER — survey belts, hunt what you find', group_name: null })).toBe('hunter')
+    expect(resolveAgentRole({ name: 'Anyone Prospector', directive: 'EXPLORER — survey belts and report', group_name: null })).toBe('default')
   })
 })

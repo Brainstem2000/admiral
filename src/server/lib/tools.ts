@@ -3693,6 +3693,10 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
 // ─── Macro tools: bounded deterministic loops over game commands ───────────
 
 const macroSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+/** How long goto_system waits for a mid-jump ship to arrive before re-asking
+ *  find_route, and how many times. Mutable so tests do not sleep for real. */
+export const gotoMacroTuning = { transitWaitMs: 8_000 }
+const GOTO_TRANSIT_RETRIES = 3
 
 /**
  * TOP OFF ALWAYS (Brian, 2026-09-02): after any successful manual `dock`, refuel
@@ -4063,6 +4067,9 @@ function checkRawJumpCommit(ctx: ToolContext, target: string): string | null {
 }
 
 async function executeMacroTool(name: string, args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
+  // The commitment as it stood before this call, so a goto that never leaves
+  // can hand it back (see the goto_system case below).
+  const priorCommitment = name === 'goto_system' ? lastDestinations.get(ctx.profileId) : undefined
   if (name === 'goto_system') {
     const target = String(args.target_system ?? args.system ?? '')
     const refusal = checkDestinationCommit(ctx, target)
@@ -4085,7 +4092,19 @@ async function executeMacroTool(name: string, args: Record<string, unknown>, ctx
   try {
     switch (name) {
       case 'mine_until_full': return await macroMineUntilFull(args, ctx, reason)
-      case 'goto_system': return await macroGotoSystem(args, ctx, reason)
+      case 'goto_system': {
+        const out = await macroGotoSystem(args, ctx, reason)
+        // A course that was never flown is not a commitment. The gate records
+        // the destination BEFORE the macro runs, so a goto that aborted on a
+        // typo left the typo committed: Ledger Voss, 2026-09-12 04:35 CT, was
+        // then refused the corrected system name four times in a row ("you set
+        // course for 82_erisani 4s ago"). Restore whatever stood before.
+        if (out.startsWith('MACRO ABORT')) {
+          if (priorCommitment) lastDestinations.set(ctx.profileId, priorCommitment)
+          else lastDestinations.delete(ctx.profileId)
+        }
+        return out
+      }
       case 'hunt_here': return await macroHuntHere(args, ctx, reason)
       case 'sell_cargo': return await macroSellCargo(args, ctx, reason)
       default: return `Error: unknown macro tool ${name}`
@@ -4865,6 +4884,11 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
 
 /** Runaway guard for a one-call-per-hold mining macro (see macroMineUntilFull). */
 const MINE_MACRO_DEADLINE_MS = 3 * 60 * 60_000
+/** Stop reasons that mean the CONNECTION failed, not the work: the game session
+ *  dropped (WebSocket closed / failed before open), a command timed out, or the
+ *  server throttled us. Anything else in an `error […]` stop (no_mining,
+ *  not_at_poi, deposit_too_sparse) is a real verdict and stays a DONE. */
+const TRANSIENT_STOP_RX = /error \[(connection_failed|connection_lost|connect_timeout|timeout|rate_limited|server_error|internal_error|service_unavailable)\]|WebSocket connection (closed|failed)/i
 const KEEP_MAX_DUMPS = 8   // mine_until_full(keep=…): dump cycles per call before it hands the belt back
 
 async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
@@ -4977,6 +5001,19 @@ export function mineStopMessage(mines: number, minedUnits: number, used: number 
   const usedTxt = used ?? '?'; const capTxt = cap ?? '?'
   const capped = stopReason === 'max_mines' || stopReason.startsWith('deadline')
   const target = cap ? Math.floor((cap * stopPct) / 100) : null
+  // A connection blip mid-macro is not a verdict on the deposit or the hold.
+  // Ledger Voss, 2026-09-12 04:15 CT: the WebSocket dropped 40 mines into a
+  // fill, the macro said "DONE … cargo now 94/?. Stopped: error
+  // [connection_failed]", and he read DONE as "hold full", left the belt and
+  // flew three jumps to the sale station with a quarter of a hold. The cap is
+  // often unknown at that moment (the state read failed too), so the rule
+  // cannot lean on the percentage: any transient stop that has not proven the
+  // hold full is an INTERRUPTION that says "stay and call again".
+  if (TRANSIENT_STOP_RX.test(stopReason) && (used === null || target === null || used < target)) {
+    return `mine_until_full INTERRUPTED (not done): ${mines} mine actions, +${minedUnits} cargo units, cargo now ${usedTxt}/${capTxt}. ` +
+      `Stopped: ${stopReason} — a connection blip, NOT a full hold and NOT a worked-out deposit. ` +
+      `Stay at this POI and call mine_until_full again as soon as commands work; do not leave to sell.`
+  }
   const notFull = capped && used !== null && target !== null && used < target
   if (notFull) {
     const pct = cap ? Math.round((used / cap) * 100) : 0
@@ -5035,13 +5072,34 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
     if (!dockPoi) return `goto_system DONE: already in ${target}.`
   } else {
     // Plot the route
-    const routeResp = await conn.execute('find_route', { target_system: target })
+    let routeResp = await conn.execute('find_route', { target_system: target })
+    // `no_current_system` is the server saying the ship is between systems — a
+    // jump still resolving, typically right after a reconnect. Ledger Voss and
+    // Morg'Thar both got it within a minute of each other on 2026-09-12 04:19 CT
+    // after a WebSocket blip, and each burned a turn re-plotting by hand with
+    // find_route + jump. Arrival is seconds away: wait for it instead of aborting.
+    let waited = false
+    for (let attempt = 1; attempt <= GOTO_TRANSIT_RETRIES && routeResp.error?.code === 'no_current_system'; attempt++) {
+      ctx.log('system', `goto_system: find_route says no_current_system (ship mid-jump) — waiting ${Math.round(gotoMacroTuning.transitWaitMs / 1000)}s for arrival (${attempt}/${GOTO_TRANSIT_RETRIES})`)
+      await macroSleep(gotoMacroTuning.transitWaitMs)
+      routeResp = await conn.execute('find_route', { target_system: target })
+      waited = true
+    }
+    // The origin read above predates the arrival; re-read it so the route's
+    // first entry (the system we are now in) is filtered out of the hops below
+    // instead of being flown as a no-op jump.
+    if (waited) Object.assign(start, await macroReadState(conn))
+    if (routeResp.error?.code === 'no_current_system') {
+      return `MACRO ABORT: the ship is still mid-jump (find_route: no_current_system after ${GOTO_TRANSIT_RETRIES} waits). ` +
+        `Wait for arrival — get_status stops saying IN TRANSIT — then call goto_system(target_system="${target}") again. Do not re-plot by hand.`
+    }
     const rc = (routeResp.structuredContent ?? routeResp.result) as Record<string, unknown> | undefined
     captureSystemLinks(rc, 'macro_find_route')
     if (routeResp.error || !rc) return `MACRO ABORT: find_route failed${routeResp.error ? ` [${routeResp.error.code}]` : ''}. Check the system name with search_systems.`
     if (rc.found === false) return `MACRO ABORT: no route to ${target}: ${rc.message ?? 'unreachable'}.`
     const route = Array.isArray(rc.route) ? (rc.route as Array<Record<string, unknown>>) : []
     const hopIds = route
+      .filter((h) => !(typeof h.jumps === 'number' && h.jumps === 0))   // the origin entry
       .map((h) => String(h.system_id ?? h.id ?? h.system ?? ''))
       .filter((id) => id && id !== start.systemId)
     if (hopIds.length === 0) return `MACRO ABORT: route to ${target} had no parseable hops — jump manually.`
