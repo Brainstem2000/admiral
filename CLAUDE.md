@@ -18,7 +18,7 @@ bun run build          # build frontend + compile standalone `admiral` binary
 ```
 
 - Runtime is **Bun** (`bun:sqlite`, `bun build --compile`). Do not introduce Node-only APIs.
-- **Run the tests.** `bun test` — 727 across 86 files, all passing (≈9 min; several files wait on a rate-limited catalog fetch). (This line used
+- **Run the tests.** `bun test` — 741 across 87 files, all passing (≈9 min; several files wait on a rate-limited catalog fetch). (This line used
   to read "there is no automated test suite"; it was stale by every one of them.)
   Then `bun run build` must succeed and build **warning-free**, and boot the binary
   to exercise the relevant API/UI (see Verifying below).
@@ -140,6 +140,10 @@ src/shared/types.ts shared TS interfaces
   `loaded_ammo_name` off a truncated `get_ship`. The ship had seven weapons and
   two ammo types. A directive fact is injected into every prompt and outranks
   what the game is telling the agent, so a wrong one is worse than none.
+- **Never run more than TWO agents on the local model at once** (Brian, 2026-09-11). oMLX
+  serves one resident model through a shared paged cache; two 60-70K-token loops already
+  saturated it on 9/11 (73 → 15 tok/s until a restart). Park or move an agent to hosted
+  before switching a third profile to `custom`/`ollama`/`lmstudio`.
 - **All local agents must share ONE model.** oMLX (the local MLX server) keeps a
   single model resident and swaps on demand, so two different local models across
   the fleet thrash: measured 2026-09-01, alternating gpt-oss-120b (59GB) and
@@ -195,7 +199,7 @@ future session must not re-derive or get wrong:
 
 ## Verifying a change
 
-1. `bun test` (722 must pass), then `bun scripts/typecheck.ts` (must print OK —
+1. `bun test` (741 must pass), then `bun scripts/typecheck.ts` (must print OK —
    it fails on the crash class and tolerates the Bun-global noise), then
    `bun run build` (must succeed, and warning-free).
 2. `./admiral`, then hit the relevant endpoint(s) under `http://127.0.0.1:3031/api/...`
