@@ -184,6 +184,13 @@ src/shared/types.ts shared TS interfaces
   `mine_until_full(keep=<ore>)` is the sanctioned use: it dumps the belt's other ores as the hold
   fills and keeps mining the ore that pays. Covered by `tests/jettison-gate.test.ts` and
   `tests/mine-until-full-one-call.test.ts`.
+- **A test must never open `data/admiral.db`.** Tests that import `tools.ts`/`db.ts` in the
+  test process are pointed at a throwaway data directory by `tests/preload.ts` (bunfig.toml
+  `[test] preload`, via the `__ADMIRAL_DATA_DIR` global that `db.ts` honours); subprocess
+  helpers keep their own chdir workspaces. On 2026-09-12 three gate tests wrote six fake
+  `system_links` rows into the live map and the route planner announced a 5-jump path that
+  did not exist. A test that needs intel rows seeds them (see
+  `tests/destination-gate-stationless.test.ts`).
 - **Cron schedules** are validated on create (`validateCronExpression`) — reject
   malformed expressions rather than storing ones that silently never fire.
 - **Tables are pruned** periodically (`pruneOldData` in `index.ts`): logs, financial
