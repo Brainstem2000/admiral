@@ -339,4 +339,15 @@ describe('buildSystemPrompt renders by role', () => {
     // Materially smaller than the same profile rendered as default.
     expect(sys.length).toBeLessThan(buildSystemPrompt(NOVA, FULL_LIST).length * 0.6)
   })
+
+  test('an explicit hunter directive outranks a non-combat job title in the profile name', async () => {
+    const { resolveAgentRole } = await import('../src/server/lib/role')
+    // CyberSpock kept his "- Smuggler" name when he took the Juggernaut on 2026-09-12;
+    // hunt_here refused him all night because the name won over the directive.
+    expect(resolveAgentRole({ name: 'CyberSpock - Smuggler', directive: '## CYBERSPOCK — Juggernaut HUNTER: bounty hunting and culls.' })).toBe('hunter')
+    // A non-combat HEAD still wins over everything, including a Warrior name.
+    expect(resolveAgentRole({ name: "Morg'Thar - Warrior", directive: '## MORG — standby at the Well, no pirate hunting.' })).toBe('default')
+    // And a non-combat name with a neutral directive stays default.
+    expect(resolveAgentRole({ name: 'Cass Margin - Trader', directive: '## CASS — haul the lockbox lines to Krynn.' })).toBe('default')
+  })
 })

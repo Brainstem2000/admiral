@@ -27,8 +27,15 @@ const COMBAT_GROUP_RX = /combat|hunt(er|ing)?|warrior/i
 export function resolveAgentRole(profile: Pick<Profile, 'name' | 'directive'> & { group_name?: string | null }): AgentRole {
   const head = (profile.directive || '').slice(0, 600)
   if (NON_COMBAT_HEAD_RX.test(head)) return 'default'
+  // The directive is the order; the name is a label that outlives reassignments.
+  // "CyberSpock - Smuggler" took over the Juggernaut on 2026-09-12 under a
+  // directive headed "Juggernaut HUNTER" and hunt_here refused him all night
+  // ("not a combat agent") because the job title in his name won here. An
+  // explicit combat head now outranks a non-combat name; a non-combat HEAD
+  // still wins over everything, as before.
+  if (COMBAT_HEAD_RX.test(head)) return 'hunter'
   if (NON_COMBAT_NAME_RX.test(profile.name || '')) return 'default'
-  if (COMBAT_HEAD_RX.test(head) || COMBAT_NAME_RX.test(profile.name || '') || COMBAT_GROUP_RX.test(profile.group_name || '')) {
+  if (COMBAT_NAME_RX.test(profile.name || '') || COMBAT_GROUP_RX.test(profile.group_name || '')) {
     return 'hunter'
   }
   return 'default'
