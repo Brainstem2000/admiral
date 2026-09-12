@@ -5,7 +5,14 @@ import type { Provider, Profile, LogEntry } from '../../shared/types'
 import type { GalaxyMapData } from '../../shared/galaxy-types'
 import { refreshStationsFeed, MIN_PLAUSIBLE_STATIONS } from './stations-feed'
 
-const DB_DIR = path.join(process.cwd(), 'data')
+// Tests running IN the test process (no subprocess helper) used to open the
+// real data/admiral.db: on 2026-09-12 three destination-gate tests wrote six
+// fake system_links rows (markab-stillwater, origin-*) into the live map, and
+// the fleet's route planner then announced a 5-jump "path" that did not exist.
+// tests/preload.ts points every in-process test at a throwaway directory via
+// this global; it is a global, not an env var, so subprocess helpers — which
+// chdir into their own workspaces — are unaffected.
+const DB_DIR = (globalThis as { __ADMIRAL_DATA_DIR?: string }).__ADMIRAL_DATA_DIR ?? path.join(process.cwd(), 'data')
 const DB_PATH = path.join(DB_DIR, 'admiral.db')
 
 let db: Database | null = null

@@ -1,7 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import { getDb, systemHasStation } from '../src/server/lib/db'
 
-getDb()
+// The test process runs on a throwaway database (tests/preload.ts), so the
+// intel rows this used to read from data/admiral.db are seeded here instead.
+const seed = getDb()
+for (const [id, name, station] of [['adhara', 'Adhara', 0], ['pipirima', 'Pipirima', 0], ['gudja', 'Gudja', 0], ['krynn', 'Krynn', 1], ['blood_forge', 'Blood Forge', 1]] as const) {
+  seed.query('INSERT OR REPLACE INTO fleet_intel_systems (system_id, system_name, has_station, discovered_by) VALUES (?, ?, ?, ?)').run(id, name, station, 'test-seed')
+}
 
 /**
  * Passing through a stationless system is not "re-routing without working it".
@@ -12,8 +17,8 @@ getDb()
  * Forge, all on 2026-09-10 — four refusals, no churn prevented. Arrival at a
  * stationless system now satisfies the commitment for a FORWARD move; bouncing
  * back to where the course was set, and leaving a station system unworked,
- * stay refused. Reads real intel rows (adhara/pipirima/gudja have no station,
- * krynn does); writes nothing.
+ * stay refused. Intel rows are seeded into the test database (adhara/pipirima/
+ * gudja have no station, krynn does).
  */
 
 function ctxFor(profileId: string, where: { system: string }) {
