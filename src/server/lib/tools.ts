@@ -5113,7 +5113,7 @@ const MINE_MACRO_DEADLINE_MS = 3 * 60 * 60_000
  *  dropped (WebSocket closed / failed before open), a command timed out, or the
  *  server throttled us. Anything else in an `error […]` stop (no_mining,
  *  not_at_poi, deposit_too_sparse) is a real verdict and stays a DONE. */
-const TRANSIENT_STOP_RX = /error \[(connection_failed|connection_lost|connect_timeout|timeout|rate_limited|server_error|internal_error|service_unavailable)\]|WebSocket connection (closed|failed)|^interrupted \(/i
+const TRANSIENT_STOP_RX = /error \[(connection_failed|connection_lost|connect_timeout|timeout|rate_limited|server_error|internal_error|service_unavailable)\]|WebSocket connection (closed|failed)|^interrupted \(|^disconnected$/i
 const KEEP_MAX_DUMPS = 8   // mine_until_full(keep=…): dump cycles per call before it hands the belt back
 
 async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {

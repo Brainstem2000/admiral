@@ -35,6 +35,7 @@ describe('mine_until_full stop text', () => {
     expect(m).not.toContain('DONE')
     expect(mineStopMessage(40, 20, 94, 450, 'error [connect_timeout] No response to spacemolt/mine within 15000ms')).toContain('INTERRUPTED')
     expect(mineStopMessage(12, 9, 60, 450, 'error [rate_limited] slow down')).toContain('INTERRUPTED')
+    expect(mineStopMessage(12, 9, 60, 450, 'disconnected')).toContain('INTERRUPTED')
   })
   test('a connection drop on a hold that is already full is still DONE', () => {
     expect(mineStopMessage(90, 70, 450, 450, 'error [connection_failed] WebSocket connection closed.')).toContain('mine_until_full DONE')
