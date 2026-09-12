@@ -2210,6 +2210,21 @@ export function getKnownLinks(): Array<{ a: string; b: string }> {
 }
 
 /** Upsert the last-known character state (position/ship/wallet) for offline visibility. */
+/**
+ * "n/max" when both are known, else the bare figure. The fuel-floor gate parses
+ * this column; lib_v2's list_ships/get_ship give fuel and max_fuel as separate
+ * numbers, and storing only the bare number left the gate blind for every
+ * lib_v2 profile — Ledger Voss jumped 29 → 13 → 9 → 5 → 1 fuel on 2026-09-11
+ * without a single checkpoint and was stranded at HD 147513.
+ */
+export function fuelText(fuel: unknown, max: unknown): string {
+  const f = Number(fuel), m = Number(max)
+  if (fuel === undefined || fuel === null || fuel === '') return ''
+  if (typeof fuel === 'string' && /\//.test(fuel)) return fuel
+  if (Number.isFinite(f) && Number.isFinite(m) && m > 0) return `${f}/${m}`
+  return String(fuel)
+}
+
 export function upsertProfileLastState(profileId: string, s: {
   system?: string; poi?: string; ship_class?: string; ship_name?: string
   hull?: string; fuel?: string; cargo?: string; credits?: number

@@ -1566,6 +1566,52 @@ export function recordCargoFromCommand(command: string, data: unknown, profileId
   )
 }
 
+/**
+ * The fuel-floor decision, kept pure so it can be tested without the game.
+ *
+ * `fuelText` is the profile_last_state column: "n/max" when the writer knew the
+ * tank size, a bare "n" when it did not (lib_v2's list_ships gives the two as
+ * separate numbers). The first version parsed only "n/max" and silently stood
+ * down on a bare number — which is what every lib_v2 profile wrote — so on
+ * 2026-09-11 Ledger Voss jumped 29 → 13 → 9 → 5 → 1 fuel with a full hold and
+ * no checkpoint, and was stranded in lawless HD 147513 until a stranger with a
+ * pump answered his distress call. A bare number now uses the absolute 10-unit
+ * floor; and the repeat-to-proceed valve, which exists so a ship already below
+ * the floor can still jump TOWARD fuel, opens only toward a system with a
+ * station — his last jump repeated toward a stationless belt system.
+ */
+export function fuelFloorVerdict(i: {
+  fuelText: string; floorPct: number; cellRestore: number
+  dest: string; destHasStation: boolean | null; repeat: boolean
+}): { block: string | null; proceedOnRepeat: boolean } {
+  const t = i.fuelText.trim()
+  let fuel: number | null = null
+  let max: number | null = null
+  const m = /^(\d+)\s*\/\s*(\d+)/.exec(t)
+  if (m) { fuel = Number(m[1]); max = Number(m[2]) }
+  else if (/^\d+$/.test(t)) fuel = Number(t)
+  if (fuel === null) return { block: null, proceedOnRepeat: false }   // no reading at all: the gate stands down
+  const floor = max && max > 0 ? Math.max(10, Math.round(max * (i.floorPct / 100))) : 10
+  if (fuel >= floor || fuel + i.cellRestore >= floor) return { block: null, proceedOnRepeat: false }
+  if (i.repeat && i.destHasStation === true) return { block: null, proceedOnRepeat: true }
+  const tank = max ? `${fuel}/${max}` : `${fuel}`
+  const tail = i.repeat
+    ? `You repeated this jump, but ${i.dest} has no station the fleet knows of — arriving there on fumes ` +
+      `is a trap, not a rescue. Jump only toward a system WITH a station (get_system lists them), or call ` +
+      `distress_signal(distress_type=fuel) and hold where you are.`
+    : `If there is NO fuel here and this jump moves you toward a system WITH A STATION whose tank you have ` +
+      `verified works (get_poi shows reserves), repeat the exact same jump now to proceed — the checkpoint ` +
+      `clears once per leg, and only toward a station.`
+  return {
+    block:
+      `CHECKPOINT by fuel floor: tank ${tank} is under the ${floor}-unit floor and your cargo cells can only ` +
+      `restore ${i.cellRestore}. A jump on a dry tank strands the ship wherever it lands. If you can fix fuel ` +
+      `HERE, do that instead: station tank refuel (2-20cr/unit), or buy cells up to the 8-cell reserve and ` +
+      `run \`refuel\`. ${tail}`,
+    proceedOnRepeat: false,
+  }
+}
+
 export function checkDoctrineGuards(
   command: string,
   commandArgs: Record<string, unknown> | undefined,
@@ -1795,35 +1841,19 @@ export function checkDoctrineGuards(
     const bareJ = command.replace(/^spacemolt_/, '').replace(/^nav_/, '').replace(/^ship_/, '')
     if (bareJ === 'jump' && getPreference('fuel_floor_gate') !== 'off') {
       const st = getProfileLastState(profileId)
-      const m = /^(\d+)\s*\/\s*(\d+)/.exec(String(st?.fuel ?? ''))
-      if (m) {
-        const fuel = Number(m[1])
-        const max = Number(m[2])
-        const floorPct = Number(getPreference('fuel_floor_pct') ?? 20) || 20
-        const floor = Math.max(10, Math.round(max * (floorPct / 100)))
-        if (max > 0 && fuel < floor) {
-          const restore = getCargoQuantity(profileId, 'fuel_cell') * 20
-            + getCargoQuantity(profileId, 'premium_fuel_cell') * 50
-            + getCargoQuantity(profileId, 'military_fuel_cell') * 100
-          if (fuel + restore < floor) {
-            const dest = String(commandArgs?.system_id ?? commandArgs?.destination ?? commandArgs?.system ?? '?')
-            const prior = fuelFloorBlocks.get(profileId)
-            if (prior && prior.dest === dest && Date.now() - prior.at < 10 * 60 * 1000) {
-              fuelFloorBlocks.delete(profileId)
-            } else {
-              fuelFloorBlocks.set(profileId, { dest, at: Date.now() })
-              return (
-                `CHECKPOINT by fuel floor: tank ${fuel}/${max} is under the ${floor}-unit floor and your ` +
-                `cargo cells can only restore ${restore}. A jump on a dry tank strands the ship wherever ` +
-                `it lands. If you can fix fuel HERE, do that instead: station tank refuel (2-20cr/unit), ` +
-                `or buy cells up to the 8-cell reserve and run \`refuel\`. If there is NO fuel here and ` +
-                `this jump moves you toward a station whose tank you have verified works (get_poi shows ` +
-                `reserves), repeat the exact same jump now to proceed — the checkpoint clears once per leg.`
-              )
-            }
-          }
-        }
-      }
+      const floorPct = Number(getPreference('fuel_floor_pct') ?? 20) || 20
+      const restore = getCargoQuantity(profileId, 'fuel_cell') * 20
+        + getCargoQuantity(profileId, 'premium_fuel_cell') * 50
+        + getCargoQuantity(profileId, 'military_fuel_cell') * 100
+      const dest = String(commandArgs?.system_id ?? commandArgs?.destination ?? commandArgs?.system ?? commandArgs?.id ?? '?')
+      const prior = fuelFloorBlocks.get(profileId)
+      const repeat = !!prior && prior.dest === dest && Date.now() - prior.at < 10 * 60 * 1000
+      const v = fuelFloorVerdict({
+        fuelText: String(st?.fuel ?? ''), floorPct, cellRestore: restore, dest,
+        destHasStation: systemHasStation(dest), repeat,
+      })
+      if (v.proceedOnRepeat) fuelFloorBlocks.delete(profileId)
+      else if (v.block) { fuelFloorBlocks.set(profileId, { dest, at: Date.now() }); return v.block }
     }
   }
 

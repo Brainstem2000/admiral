@@ -18,7 +18,7 @@ bun run build          # build frontend + compile standalone `admiral` binary
 ```
 
 - Runtime is **Bun** (`bun:sqlite`, `bun build --compile`). Do not introduce Node-only APIs.
-- **Run the tests.** `bun test` — 741 across 87 files, all passing (≈9 min; several files wait on a rate-limited catalog fetch). (This line used
+- **Run the tests.** `bun test` — 746 across 88 files, all passing (≈9 min; several files wait on a rate-limited catalog fetch). (This line used
   to read "there is no automated test suite"; it was stale by every one of them.)
   Then `bun run build` must succeed and build **warning-free**, and boot the binary
   to exercise the relevant API/UI (see Verifying below).
@@ -159,6 +159,13 @@ src/shared/types.ts shared TS interfaces
 - **Qwen3.8 defaults to `reasoning_effort: xhigh`** in its chat template
   (`reasoning_effort|default('xhigh')`), which is why it burned whole timeouts
   thinking. Set it to `low` before judging that family on speed.
+- **The fuel-floor gate must read a bare fuel figure, not only `n/max`.** lib_v2's
+  `list_ships`/`get_ship` report fuel and max_fuel as separate numbers; the gate parsed only
+  "n/max", so it stood down silently for every lib_v2 profile and Ledger Voss jumped
+  29 → 13 → 9 → 5 → 1 fuel with a full hold on 2026-09-11 and was stranded in lawless
+  HD 147513. `fuelText()` now stores "n/max", `fuelFloorVerdict()` judges a bare number
+  against the absolute 10-unit floor, and the repeat-to-proceed valve opens only toward a
+  system with a known station. Covered by `tests/fuel-floor-gate.test.ts`.
 - **Cron schedules** are validated on create (`validateCronExpression`) — reject
   malformed expressions rather than storing ones that silently never fire.
 - **Tables are pruned** periodically (`pruneOldData` in `index.ts`): logs, financial
@@ -199,7 +206,7 @@ future session must not re-derive or get wrong:
 
 ## Verifying a change
 
-1. `bun test` (741 must pass), then `bun scripts/typecheck.ts` (must print OK —
+1. `bun test` (746 must pass), then `bun scripts/typecheck.ts` (must print OK —
    it fails on the crash class and tolerates the Bun-global noise), then
    `bun run build` (must succeed, and warning-free).
 2. `./admiral`, then hit the relevant endpoint(s) under `http://127.0.0.1:3031/api/...`

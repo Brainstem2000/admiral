@@ -183,7 +183,7 @@ async function refreshOfflineWallets() {
       // the capture hooks re-sync the ship registry and module manifest. All silent —
       // no LLM is involved and nothing lands in the agent's context.
       try {
-        const { upsertProfileLastState } = await import('./lib/db')
+        const { upsertProfileLastState, fuelText } = await import('./lib/db')
         const agent = agentManager.getAgent(p.id)
         let shipClass = '', shipName = '', hull = '', fuel = '', cargo = ''
         if (agent) {
@@ -195,9 +195,14 @@ async function refreshOfflineWallets() {
               shipClass = String(active.class_id ?? '')
               shipName = String(active.class_name ?? '')
               hull = String(active.hull ?? '')
-              fuel = String(active.fuel ?? '')
+              fuel = fuelText(active.fuel, active.max_fuel)
             }
-            await agent.executeCommand('get_ship', {}, { silent: true })
+            const gsr = await agent.executeCommand('get_ship', {}, { silent: true }) as Record<string, unknown>
+            const sc = gsr?.structuredContent as Record<string, unknown> | undefined
+            const shipObj = (sc?.ship ?? sc) as Record<string, unknown> | undefined
+            if (shipObj && Number.isFinite(Number(shipObj.fuel)) && Number.isFinite(Number(shipObj.max_fuel))) {
+              fuel = fuelText(shipObj.fuel, shipObj.max_fuel)
+            }
           } catch { /* enrichment optional */ }
         }
         upsertProfileLastState(p.id, {
@@ -229,7 +234,7 @@ setInterval(refreshOfflineWallets, 20 * 60 * 1000)
 // durable sheet, so the fleet map, offline fallbacks, and post-disconnect
 // cards inherit a current wallet instead of a fossil.
 async function snapshotConnectedState() {
-  const { listProfiles: lp, upsertProfileLastState } = await import('./lib/db')
+  const { listProfiles: lp, upsertProfileLastState, fuelText } = await import('./lib/db')
   const { agentManager } = await import('./lib/agent-manager')
   for (const p of lp()) {
     try {
@@ -251,7 +256,7 @@ async function snapshotConnectedState() {
         ship_class: String(ship?.class_id ?? ship?.ship_class ?? ''),
         ship_name: String(ship?.class_name ?? ship?.name ?? ''),
         hull: String(ship?.hull ?? ''),
-        fuel: String(ship?.fuel ?? ''),
+        fuel: fuelText(ship?.fuel, ship?.max_fuel),
         cargo: '',
         credits,
       })
