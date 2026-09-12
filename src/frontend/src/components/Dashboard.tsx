@@ -7,6 +7,20 @@ import { ProfileView } from './ProfileView'
 import { FleetMap } from './FleetMap'
 import { NewProfileWizard } from './NewProfileWizard'
 import { AdmiralTour } from './AdmiralTour'
+
+const TOUR_SEEN_KEY = 'admiral-tour-seen'
+let tourSeenThisLoad = false
+function tourSeen(): boolean {
+  if (tourSeenThisLoad) return true
+  try { if (localStorage.getItem(TOUR_SEEN_KEY)) return true } catch { /* storage blocked */ }
+  try { if (sessionStorage.getItem(TOUR_SEEN_KEY)) return true } catch { /* storage blocked */ }
+  return false
+}
+function markTourSeen(): void {
+  tourSeenThisLoad = true
+  try { localStorage.setItem(TOUR_SEEN_KEY, '1') } catch { /* storage blocked */ }
+  try { sessionStorage.setItem(TOUR_SEEN_KEY, '1') } catch { /* storage blocked */ }
+}
 import { AnalyticsPane } from './AnalyticsPane'
 import { IntelDashboard } from './IntelDashboard'
 import { CharacterPage } from './character/CharacterPage'
@@ -53,15 +67,17 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
 
   const activeProfile = profiles.find(p => p.id === activeId)
 
-  // Auto-show tour for new users who haven't seen it
+  // Auto-show the tour for new users who haven't seen it — but only on the Fleet
+  // editor, where every element the tour points at exists. Started on any other
+  // view, driver.js floats each popover in the middle of the screen with nothing
+  // highlighted, and the NUDGE step read as a stray "nudge prompt" to the operator
+  // (2026-09-12). The flag is written the moment the tour STARTS, not only when it
+  // completes, and mirrored to sessionStorage plus a module flag, so a blocked or
+  // throwing localStorage can never bring it back on every refresh.
   useEffect(() => {
-    if (profiles.length > 0 && activeProfile && !showTour) {
-      try {
-        const seen = localStorage.getItem('admiral-tour-seen')
-        if (!seen) setShowTour(true)
-      } catch { /* ignore */ }
-    }
-  }, [profiles.length, !!activeProfile]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (view !== 'profiles' || profiles.length === 0 || !activeProfile || showTour) return
+    if (!tourSeen()) { markTourSeen(); setShowTour(true) }
+  }, [view, profiles.length, !!activeProfile]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Poll statuses + game state for all profiles in one request
   useEffect(() => {
@@ -242,7 +258,8 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
           <ThemeToggle />
           <button
             onClick={() => {
-              try { localStorage.removeItem('admiral-tour-seen') } catch {}
+              // A deliberate replay: the tour needs the editor's elements on screen.
+              setView('profiles')
               setShowTour(true)
             }}
             className="flex items-center justify-center w-7 h-7 text-muted-foreground hover:text-foreground transition-colors border border-border"
@@ -404,7 +421,7 @@ export function Dashboard({ profiles: initialProfiles, providers, registrationCo
         <AdmiralTour
           onComplete={() => {
             setShowTour(false)
-            try { localStorage.setItem('admiral-tour-seen', '1') } catch {}
+            markTourSeen()
           }}
         />
       )}

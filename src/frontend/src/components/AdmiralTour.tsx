@@ -92,6 +92,8 @@ const TOUR_STEPS: DriveStep[] = [
 
 export function AdmiralTour({ onComplete }: Props) {
   useEffect(() => {
+    let completed = false
+    const finish = () => { if (!completed) { completed = true; onComplete() } }
     const d = driver({
       showProgress: true,
       animate: true,
@@ -103,15 +105,17 @@ export function AdmiralTour({ onComplete }: Props) {
       nextBtnText: 'Next',
       prevBtnText: 'Back',
       doneBtnText: 'Start Playing',
-      onDestroyed: () => {
-        onComplete()
-      },
+      onDestroyed: finish,
       steps: TOUR_STEPS,
     })
 
     d.drive()
 
     return () => {
+      // Only destroy here. Under React StrictMode the effect runs, is cleaned up
+      // and runs again on the same mount; calling onComplete from this cleanup
+      // would unmount the tour before its first popover rendered. driver.js
+      // fires onDestroyed itself when a live tour is torn down.
       d.destroy()
     }
     // onComplete is stable (from Dashboard), safe to omit

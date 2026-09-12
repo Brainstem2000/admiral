@@ -501,17 +501,28 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
 
   // Global keyboard shortcuts (when not in an input)
   useEffect(() => {
+    const mountedAt = Date.now()
     function handleKeyDown(e: KeyboardEvent) {
-      const tag = (e.target as HTMLElement)?.tagName
+      const target = e.target as HTMLElement | null
+      const tag = target?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      if (target?.isContentEditable) return
       if (e.metaKey || e.ctrlKey || e.altKey) return
       if (editing) return
       if (showDirectiveModal || showNudgeModal) return
 
-      // Enter opens nudge modal (only when agent is running)
-      if (e.key === 'Enter' && status.running) {
-        e.preventDefault()
-        openNudgeModal()
+      // Enter opens the nudge modal (only when the agent is running) — and only
+      // from an unfocused page. A focused button or link gets Enter as its own
+      // click (the nav bar's "Fleet" button after a click, for one), a synthetic
+      // or auto-repeated Enter is not a shortcut, and a key arriving in the first
+      // moment after mount is a refresh artefact, not a request.
+      if (e.key === 'Enter') {
+        const focused = document.activeElement
+        const unfocused = !focused || focused === document.body
+        if (status.running && unfocused && e.isTrusted && !e.repeat && Date.now() - mountedAt > 750) {
+          e.preventDefault()
+          openNudgeModal()
+        }
         return
       }
 
