@@ -9,6 +9,7 @@ import {
   listProfiles,
   getItemHistory,
   getStorageDirty,
+  getStorageLedger,
 } from '../lib/db'
 import { getShip } from '../lib/catalog'
 
@@ -20,7 +21,10 @@ import { getShip } from '../lib/catalog'
  * recordStorageFromCommand / recordCargoFromCommand in tools.ts), so this
  * reflects what the game actually reported rather than what an agent remembered
  * writing down. Both are FREE queries agents run constantly, so the ledger stays
- * warm at zero tick cost.
+ * warm at zero tick cost. Storage rows also move between views: every deposit,
+ * withdrawal, gift, fill, craft and ship switch applies its delta at once and is
+ * journaled in storage_ledger (GET /api/inventory/ledger/:id) — `observed_at` on
+ * a row is the last authoritative view of its station, `updated_at` the last delta.
  *
  * Read `usable`, not `total`. Crafting and supply_commission pull only from ONE
  * agent's storage at ONE station, so a fleet-wide total is a fiction as far as
@@ -81,9 +85,11 @@ inventory.get('/profile/:id', (c) => {
   const id = c.req.param('id')
   const station = c.req.query('station') || undefined
   const rows = getStorageForProfile(id, station)
-  const byStation: Record<string, Array<{ item_id: string; quantity: number; updated_at: string }>> = {}
+  // updated_at = last ledger delta; observed_at = last authoritative view_storage
+  // of that station (null when the row exists only from deltas).
+  const byStation: Record<string, Array<{ item_id: string; quantity: number; updated_at: string; observed_at: string | null }>> = {}
   for (const r of rows) {
-    ;(byStation[r.station_id] ??= []).push({ item_id: r.item_id, quantity: r.quantity, updated_at: r.updated_at })
+    ;(byStation[r.station_id] ??= []).push({ item_id: r.item_id, quantity: r.quantity, updated_at: r.updated_at, observed_at: r.observed_at ?? null })
   }
   const cargo = getCargoForProfile(id).map(r => ({ item_id: r.item_id, quantity: r.quantity, updated_at: r.updated_at }))
   const itemIds = [...new Set([...rows.map(r => r.item_id), ...cargo.map(r => r.item_id)])]
@@ -166,6 +172,22 @@ inventory.get('/history/:itemId', (c) => {
     data: JSON.parse(String(r.data ?? '{}')),
   }))
   return c.json({ item_id: itemId, count: rows.length, events: rows })
+})
+
+/**
+ * GET /api/inventory/ledger/:id[?item=&station=&limit=] — the append-only journal
+ * behind one agent's storage rows: every delta with its source (command /
+ * action_log / snapshot), confidence (exact / placed / unplaced) and the
+ * action-log event it was matched to. "No question about its legitimacy".
+ */
+inventory.get('/ledger/:id', (c) => {
+  const id = c.req.param('id')
+  const rows = getStorageLedger(id, {
+    itemId: c.req.query('item') || undefined,
+    stationId: c.req.query('station') || undefined,
+    limit: Number(c.req.query('limit') ?? 200) || 200,
+  })
+  return c.json({ profile_id: id, rows, count: rows.length })
 })
 
 /**

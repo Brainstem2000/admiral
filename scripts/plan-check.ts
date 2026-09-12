@@ -76,6 +76,17 @@ function bfsFactory(db: Database) {
   }
 }
 
+/** Age of a storage row's last authoritative view: "(seen 26h ago — STALE)" past 24h, "(never viewed — ledger only)" when NULL. */
+export function storageAge(observedAt: string | null | undefined, now = Date.now()): { label: string; stale: boolean; hours: number | null } {
+  if (!observedAt) return { label: '(never viewed — ledger only, UNVERIFIED)', stale: true, hours: null }
+  const t = Date.parse(observedAt.includes('T') ? observedAt : `${observedAt.replace(' ', 'T')}Z`)
+  if (!Number.isFinite(t)) return { label: '(seen: unknown)', stale: true, hours: null }
+  const hours = Math.max(0, (now - t) / 3_600_000)
+  const h = Math.floor(hours)
+  const ago = hours < 1 ? `${Math.max(1, Math.round(hours * 60))}m ago` : h < 48 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`
+  return hours >= 24 ? { label: `(seen ${ago} — STALE)`, stale: true, hours } : { label: `(seen ${ago})`, stale: false, hours }
+}
+
 /** Where the agent actually is — from their own most recent live reading, not a cached table. */
 function currentSystem(db: Database, profileId: string): string | null {
   const hop = db.query(
@@ -122,6 +133,10 @@ async function main() {
   const { data: cat } = await cached(CATALOG, 'catalog.json', 6 * 60 * 60_000)
   const size = new Map<string, number>((cat.items ?? []).map((i: any) => [i.id, i.size ?? 1]))
   const jumps = bfsFactory(db)
+  // observed_at (last authoritative view_storage) arrived with migration v7; a database the
+  // server has not restarted into yet still has only updated_at, which until then WAS the
+  // snapshot time — so it is the right fallback rather than an error.
+  const observedCol = (db.query('PRAGMA table_info(storage_inventory)').all() as Array<{ name: string }>).some((c) => c.name === 'observed_at') ? 'observed_at' : 'updated_at'
   const here = currentSystem(db, profile.id)
 
   console.log(`\n### plan-check — ${profile.name}`)
@@ -134,11 +149,14 @@ async function main() {
     const want = Number(qtyRaw ?? 0) || 0
     console.log(`\n  ── ${item} ×${want}`)
 
-    // 1. does this agent hold it, and where
+    // 1. does this agent hold it, and where. observed_at is the last AUTHORITATIVE
+    //    view_storage of that station; the ledger moves quantities between views,
+    //    but a station nobody has looked at for a day is not a verified fact.
     const rows = db.query(
-      'SELECT station_id, quantity FROM storage_inventory WHERE profile_id = ? AND item_id = ? AND quantity > 0 ORDER BY quantity DESC',
-    ).all(profile.id, item) as Array<{ station_id: string; quantity: number }>
+      `SELECT station_id, quantity, ${observedCol} AS observed_at FROM storage_inventory WHERE profile_id = ? AND item_id = ? AND quantity > 0 ORDER BY quantity DESC`,
+    ).all(profile.id, item) as Array<{ station_id: string; quantity: number; observed_at: string | null }>
     const total = rows.reduce((a, b) => a + b.quantity, 0)
+    const verified = rows.filter((r) => storageAge(r.observed_at).stale === false).reduce((a, b) => a + b.quantity, 0)
     if (!rows.length) {
       console.log(`     HOLDS: none. (fleet-wide: ${(db.query('SELECT SUM(quantity) q FROM storage_inventory WHERE item_id = ?').get(item) as any)?.q ?? 0})`)
     } else {
@@ -147,9 +165,12 @@ async function main() {
         const d = sys && here ? jumps(here, sys) : null
         const far = d != null && d > 10
         if (far) warn++
-        console.log(`     HOLDS: ${String(r.quantity).padStart(6)} at ${r.station_id.replace('_station', '')}${d != null ? `  (${d} jumps${far ? ' — FAR' : ''})` : '  (distance unknown)'}`)
+        const age = storageAge(r.observed_at)
+        if (age.stale) warn++
+        console.log(`     HOLDS: ${String(r.quantity).padStart(6)} at ${r.station_id.replace('_station', '')}${d != null ? `  (${d} jumps${far ? ' — FAR' : ''})` : '  (distance unknown)'}  ${age.label}`)
       }
       if (total < want) { fatal++; console.log(`     ✗ SHORT ${want - total} — agent holds ${total} in total`) }
+      else if (verified < want) { fatal++; console.log(`     ✗ UNVERIFIED — only ${verified} of the ${total} held was viewed in the last 24h; run view_storage (or scripts/refresh-storage.ts) before relying on it`) }
     }
 
     // 2. commission reserve

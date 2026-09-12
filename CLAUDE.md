@@ -18,7 +18,7 @@ bun run build          # build frontend + compile standalone `admiral` binary
 ```
 
 - Runtime is **Bun** (`bun:sqlite`, `bun build --compile`). Do not introduce Node-only APIs.
-- **Run the tests.** `bun test` — 767 across 92 files, all passing (≈9 min; several files wait on a rate-limited catalog fetch). (This line used
+- **Run the tests.** `bun test` — 779 across 93 files, all passing (≈11 min; several files wait on a rate-limited catalog fetch). (This line used
   to read "there is no automated test suite"; it was stale by every one of them.)
   Then `bun run build` must succeed and build **warning-free**, and boot the binary
   to exercise the relevant API/UI (see Verifying below).
@@ -191,6 +191,25 @@ src/shared/types.ts shared TS interfaces
   `system_links` rows into the live map and the route planner announced a 5-jump path that
   did not exist. A test that needs intel rows seeds them (see
   `tests/destination-gate-stationless.test.ts`).
+- **Storage is a ledger, not a snapshot.** `storage_inventory` used to be refreshed only by
+  `view_storage`, so every deposit, withdrawal, gift, market fill, craft and ship switch left
+  it wrong until the next view — on 2026-09-12 it said CyberSapper held 4 focused_crystal at
+  War Citadel while the live view showed 0 (and 766 fury_crystal). Now EVERY change goes
+  through `applyStorageDelta()` in `db.ts`, which upserts the row and journals a
+  `storage_ledger` row in the same transaction (source `command` / `action_log` /
+  `snapshot`, confidence `exact` / `placed` / `unplaced`). Command results apply at once
+  (`recordStorageMutationFromCommand` in `tools.ts`, on BOTH command paths); action-log
+  events attach to the command row that already applied them (±3 min, same item and signed
+  quantity) or are placed from `position_history` (the sender's position for a received
+  gift, the job's facility for crafting), else journaled `unplaced` with station NULL and
+  the profile marked dirty. A `view_storage` still replaces the station wholesale but
+  RECONCILES first — one `snapshot` ledger row per drifted item, logged as
+  "storage reconciled at X: N items drifted". `observed_at` is the last authoritative view;
+  `updated_at` the last delta — plan-check, ship-match and the briefing tag rows older than
+  a day as STALE and never count them as verified. Never write `storage_inventory` any
+  other way, and never apply a spot `trading.exchange_fill` from the event (it cannot tell
+  cargo from storage delivery; the buy result's `delivered_to_storage` can). Covered by
+  `tests/storage-ledger.test.ts`.
 - **Cron schedules** are validated on create (`validateCronExpression`) — reject
   malformed expressions rather than storing ones that silently never fire.
 - **Tables are pruned** periodically (`pruneOldData` in `index.ts`): logs, financial
@@ -231,7 +250,7 @@ future session must not re-derive or get wrong:
 
 ## Verifying a change
 
-1. `bun test` (767 must pass), then `bun scripts/typecheck.ts` (must print OK —
+1. `bun test` (779 must pass), then `bun scripts/typecheck.ts` (must print OK —
    it fails on the crash class and tolerates the Bun-global noise), then
    `bun run build` (must succeed, and warning-free).
 2. `./admiral`, then hit the relevant endpoint(s) under `http://127.0.0.1:3031/api/...`

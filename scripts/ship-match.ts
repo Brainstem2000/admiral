@@ -42,11 +42,22 @@ async function cached(url: string, name: string): Promise<any> {
       if (age < 30 * 60_000) return JSON.parse(await f.text())
     }
   } catch { /* fall through to refetch */ }
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`${url} -> ${res.status}`)
-  const text = await res.text()
-  await Bun.write(path, text)
-  return JSON.parse(text)
+  try {
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`${url} -> ${res.status}`)
+    const text = await res.text()
+    await Bun.write(path, text)
+    return JSON.parse(text)
+  } catch (err) {
+    // The catalog endpoint rate-limits (429); a stale disk copy beats no answer —
+    // same fallback plan-check.ts uses. Say so, since ages and prices may lag.
+    const f = Bun.file(path)
+    if (await f.exists()) {
+      console.log(`  ⚠ ${name}: refetch failed (${(err as Error).message}); using the disk copy from ${new Date((await f.stat()).mtimeMs).toISOString()}`)
+      return JSON.parse(await f.text())
+    }
+    throw err
+  }
 }
 
 /** The agent's skill sheet, scraped from the most recent get_status that carried one. */
@@ -119,7 +130,19 @@ async function main() {
   }
 
   const ships: Ship[] = cat.ships
-  const heldQ = db.query('SELECT SUM(quantity) q FROM storage_inventory WHERE item_id = ?')
+  // Per-row so each holding carries the age of its last view_storage: a row nobody
+  // has viewed in 24h is printed STALE and does NOT count toward "fleet has it".
+  const observedCol = (db.query('PRAGMA table_info(storage_inventory)').all() as Array<{ name: string }>).some((c) => c.name === 'observed_at') ? 'observed_at' : 'updated_at'   // pre-v7 DB: updated_at was the snapshot time
+  const heldRows = db.query(`SELECT profile_id, station_id, quantity, ${observedCol} AS observed_at FROM storage_inventory WHERE item_id = ? AND quantity > 0 ORDER BY quantity DESC`)
+  const STALE_MS = 24 * 3_600_000
+  const ageLabel = (observedAt: string | null): { label: string; stale: boolean } => {
+    if (!observedAt) return { label: 'never viewed — ledger only', stale: true }
+    const t = Date.parse(observedAt.includes('T') ? observedAt : `${observedAt.replace(' ', 'T')}Z`)
+    if (!Number.isFinite(t)) return { label: 'seen: unknown', stale: true }
+    const h = Math.floor((Date.now() - t) / 3_600_000)
+    const ago = h < 1 ? 'seen <1h ago' : h < 48 ? `seen ${h}h ago` : `seen ${Math.floor(h / 24)}d ago`
+    return Date.now() - t >= STALE_MS ? { label: `${ago} — STALE`, stale: true } : { label: ago, stale: false }
+  }
 
   if (hull) {
     const s = ships.find((x) => x.id === hull)
@@ -134,16 +157,24 @@ async function main() {
     console.log(`=== ${s.name} — build feasibility (needs shipyard tier ${s.shipyard_tier}) ===`)
     let buy = 0
     const craft: string[] = []
+    const names = new Map(profiles.map((p) => [p.id, p.name.split(' ')[0]]))
     for (const m of s.build_materials ?? []) {
-      const have = (heldQ.get(m.item_id) as { q: number } | null)?.q ?? 0
+      const rows = heldRows.all(m.item_id) as Array<{ profile_id: string; station_id: string; quantity: number; observed_at: string | null }>
+      const haveAll = rows.reduce((n, r) => n + r.quantity, 0)
+      const have = rows.filter((r) => !ageLabel(r.observed_at).stale).reduce((n, r) => n + r.quantity, 0)   // verified only
       const short = Math.max(0, m.quantity - have)
       const a = ask[m.item_id]
       let note = 'fleet has it'
       if (short > 0) {
         if (a) { buy += short * a.p; note = `buy ${short} @${a.p} = ${(short * a.p).toLocaleString()} (ask depth ${a.q})` }
         else { craft.push(`${m.item_id} x${short}`); note = 'NO MARKET ASK — must craft' }
+        if (haveAll > have) note += `  [+${haveAll - have} more on STALE rows — verify before counting]`
       }
       console.log(`  ${short === 0 ? '[x]' : '[ ]'} ${m.item_id.padEnd(24)} need ${String(m.quantity).padStart(4)}  fleet ${String(have).padStart(6)}   ${note}`)
+      for (const r of rows.slice(0, 3)) {
+        const age = ageLabel(r.observed_at)
+        console.log(`        HOLDS ${String(r.quantity).padStart(6)}  ${names.get(r.profile_id) ?? r.profile_id} @ ${r.station_id.replace('_station', '')}  (${age.label})`)
+      }
     }
     console.log(`  --- purchasable gap ~${Math.round(buy).toLocaleString()}`)
     if (craft.length) console.log(`  must craft: ${craft.join(', ')}`)

@@ -54,8 +54,10 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
           out.push({ item_id: c.item_id, quantity: c.quantity, location: 'Ship cargo', inCargo: true, updated_at: c.updated_at ?? '', bid: bids[c.item_id] })
         }
         for (const [station, items] of Object.entries(d.stations ?? {})) {
-          for (const it of items as Array<{ item_id: string; quantity: number; updated_at: string }>) {
-            out.push({ item_id: it.item_id, quantity: it.quantity, location: station, inCargo: false, updated_at: it.updated_at ?? '', bid: bids[it.item_id] })
+          for (const it of items as Array<{ item_id: string; quantity: number; updated_at: string; observed_at?: string | null }>) {
+            // "Seen" is the last AUTHORITATIVE view_storage of the station; a row that
+            // exists only from ledger deltas has no observed_at and shows as never seen.
+            out.push({ item_id: it.item_id, quantity: it.quantity, location: station, inCargo: false, updated_at: it.observed_at ?? '', bid: bids[it.item_id] })
           }
         }
         setRows(out)
@@ -229,7 +231,7 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
         </table>
       </div>
       <p className="px-3 py-2 border-t border-border/40 text-[10px] text-muted-foreground/60">
-        “Seen” is snapshot age — <span style={{ color: 'hsl(var(--smui-orange))' }}>orange</span> rows are 48h+ old and may be stale until the agent next docks there.
+        “Seen” is the age of the last view_storage of that station (quantities move with every deposit, withdrawal, gift, fill and craft in between — see /api/inventory/ledger) — <span style={{ color: 'hsl(var(--smui-orange))' }}>orange</span> rows are 48h+ unverified.
         Realisable values marked * are capped by bid depth; ? means the bid predates depth capture and the value is an unvalidated ceiling.
       </p>
     </DossierCard>

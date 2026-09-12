@@ -14,11 +14,11 @@ import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing
 import { fetchGameCommands, formatCommandList } from './schema'
 import { isCodeDefect } from './swallow'
 import { captureFactionFromCommand } from './faction-ledger'
-import { allTools, toolsForRole, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest, reputationLockedSystemIds, jettisonSiteFrom, clearDestinationCommit } from './tools'
+import { allTools, toolsForRole, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, recordStorageMutationFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest, reputationLockedSystemIds, jettisonSiteFrom, clearDestinationCommit } from './tools'
 import { directiveForbidsSystem } from './directive-rules'
 import { runAgentTurn, VOLATILE_STATE_HEADER, VOLATILE_STATE_END, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
-import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles, FORBIDDEN_SYSTEMS, assessSystemDanger } from './db'
+import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles, FORBIDDEN_SYSTEMS, assessSystemDanger, recordPosition, describeStorageDrift } from './db'
 import { advancePlanQueue } from './plan-queue'
 import { FleetIntelCollector, buildDepositBriefing } from './fleet-intel'
 import { safeTruncate } from './text-safe'
@@ -210,8 +210,23 @@ export class Agent {
     const data = result.structuredContent ?? result.result
     if (data && typeof data === 'object' && ('player' in data || 'ship' in data || 'location' in data)) {
       this._gameState = data as Record<string, unknown>
+      this.notePosition(this._gameState)
       this.enrichFactionInfo()
     }
+  }
+
+  /**
+   * Append the docked station (or "undocked") to position_history whenever a
+   * game state is cached. Station-less storage events from the action log
+   * (deposit/withdraw/gift) are placed against this history, so it must track
+   * every state we see, not only tool results. Throttled inside recordPosition.
+   */
+  private notePosition(gs: Record<string, unknown> | null): void {
+    try {
+      const loc = gs?.location as Record<string, unknown> | undefined
+      if (!loc || typeof loc !== 'object' || !('docked_at' in loc)) return
+      recordPosition(this.profileId, typeof loc.docked_at === 'string' && loc.docked_at ? loc.docked_at : null)
+    } catch { /* position history must never break the loop */ }
   }
 
   private enrichFactionInfo(): void {
@@ -729,6 +744,7 @@ export class Agent {
         // Connection keeps its own state cache (lib_v2) — refresh the
         // dashboard-facing snapshot for free, no get_status round-trip.
         this._gameState = localState
+        this.notePosition(localState)
         this.enrichFactionInfo()
 
         // ...but that cache only advances on the player's OWN mutation deltas.
@@ -754,9 +770,14 @@ export class Agent {
           try {
             const r = await ingestActionLog(this.profileId, this.connection)
             if (r.added > 0) {
+              const st = r.storage
               this.log('system', `ledger: +${r.added} action events` +
                 (r.cargoApplied ? `, ${r.cargoApplied} cargo moves` : '') +
-                (r.dirty ? ', storage marked stale' : ''))
+                (st.applied ? `, ${st.applied} storage moves applied` : '') +
+                (st.attached ? `, ${st.attached} matched to command rows` : '') +
+                (st.reflected ? `, ${st.reflected} already in a snapshot` : '') +
+                (st.unplaced ? `, ${st.unplaced} UNPLACED` : '') +
+                (r.dirty ? ` — storage marked stale${st.dirtyReasons[0] ? ` (${st.dirtyReasons[0]})` : ''}` : ''))
             }
           } catch { /* ledger upkeep must never break the turn loop */ }
         }
@@ -997,7 +1018,8 @@ export class Agent {
         getProfile(this.profileId)?.name ?? 'manual',
       )
       const payload = (result as { structuredContent?: unknown }).structuredContent ?? result.result
-      recordStorageFromCommand(command, payload, this.profileId)
+      const snap = recordStorageFromCommand(command, payload, this.profileId)
+      if (snap?.drift.length) this.log('system', describeStorageDrift(snap.station, snap.drift))
       try {
         const loc = (this.connection?.getLocalState?.() as { location?: { docked_at?: string | null } } | null)?.location
         captureFactionFromCommand(command, args, payload, this.profileId, getProfile(this.profileId)?.name ?? 'manual', { station: loc?.docked_at ?? null })
@@ -1018,6 +1040,10 @@ export class Agent {
         const payload = (result as { structuredContent?: unknown }).structuredContent ?? result.result
         const text = typeof result.result === 'string' ? result.result : JSON.stringify(result.result ?? '')
         bookLedgerFromCommand(command, args, payload, text, this.profileId, getProfile(this.profileId)?.name ?? 'manual')
+        // Storage ledger, same chokepoint rule: a manual/silent deposit or gift
+        // moves storage exactly like an LLM-driven one and must be journaled.
+        const loc = (this.connection?.getLocalState?.() as { location?: { docked_at?: string | null } } | null)?.location
+        recordStorageMutationFromCommand(command, args, payload, { profileId: this.profileId, station: loc?.docked_at ?? null })
       } catch { /* ledger must never break command execution */ }
     }
 

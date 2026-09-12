@@ -4,7 +4,8 @@ import type { GameConnection } from './connections/interface'
 import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
 import { scrubLiveState, scrubNotice, dedupeTodoAgainstMemory, ageCompletedTodoLines, scrubMemoryTaskLines, hygieneNotice, resetNoteHygiene } from './note-hygiene'
 import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor, refuseAbandon, noteAbandon, knownTitle, isRefusedMissionTitle } from './mission-guard'
-import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, isStorageDirty, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS, systemHasStation, cheapestRecentAsk } from './db'
+import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, isStorageDirty, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS, systemHasStation, cheapestRecentAsk, applyStorageDelta, markStorageDirty, findProfileByPlayer, recordPosition, describeStorageDrift, getCargoForProfile, type StorageDrift } from './db'
+import { swallow } from './swallow'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { captureFactionFromCommand } from './faction-ledger'
@@ -711,7 +712,12 @@ export function observeTacticalResult(
       else if (typeof loc.system_name === 'string' && loc.system_name) t.systemId = normalizeSystemId(loc.system_name)
       if (typeof loc.system_name === 'string' && loc.system_name) t.systemName = loc.system_name
       if (typeof loc.poi_id === 'string' && loc.poi_id) t.poiId = loc.poi_id
-      if ('docked_at' in loc) t.dockedAt = typeof loc.docked_at === 'string' && loc.docked_at ? loc.docked_at : null
+      if ('docked_at' in loc) {
+        t.dockedAt = typeof loc.docked_at === 'string' && loc.docked_at ? loc.docked_at : null
+        // position_history: what places station-less storage events (deposit,
+        // withdraw, gift) from the action log. Throttled inside recordPosition.
+        try { recordPosition(profileId, t.dockedAt) } catch (err) { swallow('tools.recordPosition', err) }
+      }
       if (typeof loc.empire === 'string' && loc.empire) t.localEmpire = loc.empire
       const pc = typeof loc.nearby_pirate_count === 'number' ? loc.nearby_pirate_count
         : Array.isArray(loc.nearby_pirates) ? loc.nearby_pirates.length : null
@@ -986,14 +992,17 @@ function checkCraftInputs(ctx: ToolContext, deep: string, commandArgs: Record<st
   const station = currentLocation(ctx).dockedAt
   if (!station) return null   // the docked-state gate already covers this
 
-  // `storage_inventory` is a SNAPSHOT refreshed only by view_storage. A deposit
-  // or withdrawal since then makes every figure in it fiction, and a guard that
-  // blocks on fiction is worse than no guard at all — it invents a blocker the
-  // agent cannot clear by doing the right thing. CyberSpock deposited lead_ingot
-  // x3 at Blood Forge on 2026-09-07 and this gate kept answering "station storage
-  // has 0", so he looped craft -> BLOCKED -> withdraw -> deposit -> craft three
-  // times across 45 minutes. When the cache is stale, defer to the game: it costs
-  // one tick to be told the truth, which is cheaper than an unbreakable loop.
+  // `storage_inventory` is a ledger (deposits and withdrawals apply their delta
+  // the moment the result comes back — see recordStorageMutationFromCommand), so
+  // a deposit the agent just made IS in the figure this gate reads. The dirty flag
+  // now marks an UNPLACED change: an event the ledger could not pin to a station.
+  // Then every figure may be fiction, and a guard that blocks on fiction is worse
+  // than no guard at all — it invents a blocker the agent cannot clear by doing
+  // the right thing. (Pre-ledger, CyberSpock deposited lead_ingot x3 at Blood
+  // Forge on 2026-09-07 and this gate kept answering "station storage has 0", so
+  // he looped craft -> BLOCKED -> withdraw -> deposit -> craft three times across
+  // 45 minutes.) When the ledger is unsure, defer to the game: it costs one tick
+  // to be told the truth, which is cheaper than an unbreakable loop.
   if (isStorageDirty(ctx.profileId)) return null
 
   const recipe = codexGet('recipe', recipeId)
@@ -1496,7 +1505,7 @@ export interface ToolContext {
  * constantly, so the table stays warm at zero extra cost and can never disagree
  * with what the game actually reported.
  */
-export function recordStorageFromCommand(command: string, data: unknown, profileId: string): void {
+export function recordStorageFromCommand(command: string, data: unknown, profileId: string): { station: string; drift: StorageDrift[] } | null {
   const sc = data as {
     action?: string
     base_id?: string
@@ -1514,12 +1523,14 @@ export function recordStorageFromCommand(command: string, data: unknown, profile
   // fallback for responses that omit it.
   const bare = command.replace(/^spacemolt_/, '').replace(/^storage_/, '')
   const byName = bare === 'view_storage' || bare.endsWith('_view_storage')
-  if (sc?.action !== 'view_storage' && !byName) return
+  if (sc?.action !== 'view_storage' && !byName) return null
   const station = sc?.base_id
-  if (!station || !Array.isArray(sc?.items)) return // shape we don't recognise — record nothing
+  if (!station || !Array.isArray(sc?.items)) return null // shape we don't recognise — record nothing
   // A real snapshot supersedes any "we know something moved but not where" flag.
   clearStorageDirty(profileId)
-  recordStorageSnapshot(
+  // The snapshot RECONCILES against the ledger (see recordStorageSnapshot): the
+  // drift it returns is what the callers log as "storage reconciled at X".
+  const drift = recordStorageSnapshot(
     profileId,
     station,
     sc.items
@@ -1534,6 +1545,214 @@ export function recordStorageFromCommand(command: string, data: unknown, profile
         module_count: typeof s.modules === 'number' ? s.modules : 0,
       })),
   )
+  return { station, drift }
+}
+
+type ResultRecord = Record<string, unknown>
+const strField = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
+const numField = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+
+/** Unwrap {result:{...}} and lib_v2 {..., details:{...}} to the action-bearing payload (same rule as the credit ledgers). */
+function unwrapActionPayload(data: unknown): ResultRecord {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
+  let r = data as ResultRecord
+  if (!('action' in r) && r.result && typeof r.result === 'object' && !Array.isArray(r.result)) r = r.result as ResultRecord
+  if (!('action' in r) && r.details && typeof r.details === 'object' && !Array.isArray(r.details)) r = r.details as ResultRecord
+  return r
+}
+
+/**
+ * Apply what a SUCCESSFUL mutation result says it did to station storage — the
+ * command-time half of the storage ledger (confidence 'exact': the game told us
+ * the item, the quantity and, via base_id or the docked station, the station).
+ * The action-log ingester later attaches the matching event to these rows
+ * instead of applying it again (attachStorageLedgerEvent), so a deposit counts
+ * once whichever side sees it first.
+ *
+ * Shared by BOTH command paths (executeTool and Agent.executeCommand), like the
+ * credit ledger — a capture on one path silently misses the other.
+ *
+ * Hooked, from the response types in @spacemolt/lib and the game docs:
+ *   deposit_items / withdraw_items / bulk_deposit / bulk_withdraw  ±quantity
+ *   transfer (source/destination 'storage')                        ±quantity
+ *   faction_deposit_items with source=storage (v1 shape)            −quantity
+ *   send_gift with an item: sender −qty when source=storage, and the recipient
+ *     (when a fleet profile) +qty at the SAME base — gifts land in the
+ *     recipient's storage at the sender's base (game docs); base_id is in the result
+ *   buy / create_buy_order: delivered_to_storage                    +N
+ *   create_sell_order: from_storage −N, returned_to_storage +N
+ *   cancel_order: returned_items (+, at the order's station from own_order_fills)
+ *   switch_ship / scrap_ship / sell_ship: cargo_to_storage +, modules_to_storage +1 each
+ *   craft / recycle (job): escrowed.inputs −qty (inputs are escrowed from station storage at enqueue)
+ * Marked DIRTY instead of guessed (the response does not itemise the storage share):
+ *   supply_commission (cargo first, then storage), commission_ship with
+ *   provide_materials, refit_ship returning modules/cargo, bulk_transfer, trade_accept.
+ * NOT hooked on purpose: install_mod / uninstall_mod (the docs say the module
+ * must be in cargo and is returned to cargo), sell (from cargo), jettison, loot,
+ * use_item, gift_ship (ships live in storage_ships, not item storage).
+ */
+export function recordStorageMutationFromCommand(
+  command: string,
+  commandArgs: Record<string, unknown> | undefined,
+  resultData: unknown,
+  opts: { profileId: string; station?: string | null },
+): { rows: number; dirty: string | null; mirrored: Array<{ profileId: string; itemId: string; quantity: number; station: string | null }> } {
+  const out = { rows: 0, dirty: null as string | null, mirrored: [] as Array<{ profileId: string; itemId: string; quantity: number; station: string | null }> }
+  const profileId = opts.profileId
+  const dirtyFor = new Map<string, string>()
+  try {
+    if (!resultData || typeof resultData !== 'object' || (resultData as ResultRecord).error) return out
+    const r = unwrapActionPayload(resultData)
+    const bare = command.replace(/^spacemolt_/, '')
+    let deep = bare.replace(GROUP_PREFIX_RX, '')
+    const argAction = strField(commandArgs?.action)
+    if (argAction && !deep.endsWith(argAction)) deep = argAction     // v2 group form: `ship` + {action:'switch_ship'}
+    const action = strField(r.action) || deep
+    const docked = strField(r.base_id) || strField(r.station_id) || strField(opts.station) || null
+    const noteDirty = (pid: string, why: string) => { if (!dirtyFor.has(pid)) dirtyFor.set(pid, why) }
+    const apply = (pid: string, station: string | null, itemId: string, delta: number, ref: string, confidence: 'exact' | 'placed' = 'exact', itemName?: string) => {
+      const q = Math.trunc(delta)
+      if (!itemId || !q) return
+      if (station) applyStorageDelta(pid, station, itemId, q, { source: 'command', ref, confidence, itemName })
+      else { applyStorageDelta(pid, null, itemId, q, { source: 'command', ref, confidence: 'unplaced', itemName }); noteDirty(pid, `${ref}: station unknown`) }
+      out.rows++
+    }
+    const line = (o: ResultRecord) => ({ id: strField(o.item_id), qty: numField(o.quantity), name: strField(o.name) || strField(o.item_name) })
+    /** Bulk market envelopes ({kind:'bulk', results:[...]}) carry one single-shaped result per order. */
+    const singles = (): ResultRecord[] => {
+      if (Array.isArray(r.results) && (r.kind === 'bulk' || r.mode === 'bulk' || r.kind === 'bulk_craft')) {
+        return (r.results as unknown[]).filter((x): x is ResultRecord => !!x && typeof x === 'object')
+          .filter((x) => x.success !== false && !x.error)
+          .map((x) => (x.result && typeof x.result === 'object' ? { ...(x.result as ResultRecord), item_id: x.item_id ?? (x.result as ResultRecord).item_id, order_id: x.order_id ?? (x.result as ResultRecord).order_id } : x))
+      }
+      return [r]
+    }
+
+    switch (action) {
+      case 'deposit_items': { const l = line(r); apply(profileId, docked, l.id, +l.qty, bare, 'exact', l.name); break }
+      case 'withdraw_items': { const l = line(r); apply(profileId, docked, l.id, -l.qty, bare, 'exact', l.name); break }
+      case 'bulk_deposit':
+      case 'bulk_withdraw': {
+        const sign = action === 'bulk_deposit' ? +1 : -1
+        for (const res of Array.isArray(r.results) ? (r.results as unknown[]) : []) {
+          if (!res || typeof res !== 'object' || (res as ResultRecord).success === false) continue
+          const l = line(res as ResultRecord)
+          apply(profileId, docked, l.id, sign * l.qty, bare)
+        }
+        break
+      }
+      case 'bulk_transfer': noteDirty(profileId, 'bulk_transfer: personal storage share not itemised'); break
+      case 'transfer': {
+        // lib_v2 answers { action: transfer, source, destination, item_id, quantity }
+        const l = line(r)
+        const src = strField(r.source) || strField(commandArgs?.source)
+        const dst = strField(r.destination) || strField(r.target) || strField(commandArgs?.target)
+        if (src === 'storage') apply(profileId, docked, l.id, -l.qty, bare)
+        if (dst === 'storage') apply(profileId, docked, l.id, +l.qty, bare)
+        break
+      }
+      case 'faction_deposit_items': {
+        // v1 shape omits the source; only a storage-sourced deposit touches personal storage.
+        if (strField(commandArgs?.source) === 'storage') { const l = line(r); apply(profileId, docked, l.id, -l.qty, bare) }
+        break
+      }
+      case 'send_gift': {
+        const l = line(r)
+        const qty = l.qty || numField(commandArgs?.quantity)
+        const id = l.id || strField(commandArgs?.item_id)
+        if (!id || !qty || numField(r.credits_sent) > 0) break          // credit gifts are the money ledger's
+        const base = strField(r.base_id) || docked
+        const fromStorage = strField(r.source) === 'storage' || strField(commandArgs?.source) === 'storage'
+        if (fromStorage) apply(profileId, base, id, -qty, bare)
+        const who = strField(r.recipient) || strField(commandArgs?.recipient) || strField(commandArgs?.target)
+        const recipient = findProfileByPlayer(who)
+        if (recipient && recipient.id !== profileId) {
+          // Fleet-internal mirror: the recipient side is silent, and the gift lands
+          // in THEIR storage at THIS base. Same idea as the credit ledger's ~mirror rows.
+          apply(recipient.id, base, id, +qty, `${bare}~mirror`)
+          out.mirrored.push({ profileId: recipient.id, itemId: id, quantity: qty, station: base })
+        }
+        break
+      }
+      case 'buy':
+      case 'create_buy_order': {
+        for (const s of singles()) { const n = numField(s.delivered_to_storage); if (n > 0) apply(profileId, docked, strField(s.item_id), +n, bare) }
+        break
+      }
+      case 'create_sell_order': {
+        for (const s of singles()) {
+          const id = strField(s.item_id)
+          const fromStorage = numField(s.from_storage)
+          const returned = numField(s.returned_to_storage)
+          if (fromStorage > 0) apply(profileId, docked, id, -fromStorage, bare)
+          if (returned > 0) apply(profileId, docked, id, +returned, bare)
+        }
+        break
+      }
+      case 'cancel_order': {
+        for (const s of singles()) {
+          const ret = s.returned_items as ResultRecord | undefined
+          if (!ret || typeof ret !== 'object') continue
+          const l = line(ret)
+          if (!l.id || !l.qty) continue
+          // The order's station is where the escrow returns; own_order_fills learned
+          // it from view_orders. The docked station is only a fallback.
+          let station: string | null = null
+          try {
+            const row = getDb().query('SELECT station FROM own_order_fills WHERE profile_id = ? AND order_id = ?').get(profileId, strField(s.order_id)) as { station: string | null } | null
+            station = row?.station || null
+          } catch { station = null }
+          apply(profileId, station ?? docked, l.id, +l.qty, bare, 'placed')
+        }
+        break
+      }
+      case 'switch_ship':
+      case 'scrap_ship':
+      case 'sell_ship': {
+        const cargo = Array.isArray(r.cargo_to_storage) ? (r.cargo_to_storage as ResultRecord[]) : null
+        const mods = Array.isArray(r.modules_to_storage) ? (r.modules_to_storage as ResultRecord[]) : null
+        for (const c of cargo ?? []) { const l = line(c); apply(profileId, docked, l.id, +l.qty, bare, 'exact', l.name) }
+        for (const m of mods ?? []) apply(profileId, docked, strField(m.module_type) || strField(m.item_id), +1, bare, 'exact', strField(m.name))
+        // "Cargo from your current ship is moved to station storage" — if the response
+        // did not itemise it and the last cargo reading was non-empty, something moved
+        // that we cannot place: say so rather than guess from a snapshot.
+        if (action === 'switch_ship' && !cargo && getCargoForProfile(profileId).some((c) => c.quantity > 0)) {
+          noteDirty(profileId, 'switch_ship: response listed no cargo_to_storage')
+        }
+        break
+      }
+      case 'craft':
+      case 'recycle':
+      case 'job_add': {
+        // A queued job escrows its inputs from station storage at enqueue (game
+        // docs). The crafting.queued event later attaches to these rows.
+        for (const s of singles()) {
+          const esc = s.escrowed as ResultRecord | undefined
+          const inputs = esc && Array.isArray(esc.inputs) ? (esc.inputs as ResultRecord[]) : []
+          for (const i of inputs) { const l = line(i); apply(profileId, docked, l.id, -l.qty, bare, 'exact', l.name) }
+        }
+        break
+      }
+      case 'refit_ship':
+        if (numField(r.modules_returned) > 0 || numField(r.cargo_returned) > 0) noteDirty(profileId, 'refit_ship: returned modules/cargo not itemised')
+        break
+      case 'supply_commission':
+        if (numField(r.supplied) > 0) noteDirty(profileId, 'supply_commission: cargo-then-storage split not itemised')
+        break
+      case 'commission_ship':
+        if (commandArgs?.provide_materials === true) noteDirty(profileId, 'commission_ship: materials drawn from storage, not itemised')
+        break
+      case 'trade_accept':
+        noteDirty(profileId, 'trade_accept: item exchange, storage effect unknown')
+        break
+      default: break
+    }
+  } catch (err) {
+    swallow('tools.recordStorageMutationFromCommand', err)
+  }
+  for (const [pid, why] of dirtyFor) { try { markStorageDirty(pid, why) } catch { /* never break execution */ } }
+  out.dirty = dirtyFor.get(profileId) ?? null
+  return out
 }
 
 /**
@@ -3224,7 +3443,8 @@ export async function executeTool(
     try {
       FleetIntelCollector.processCommandResult(command, resultData, ctx.profileName)
       if (resp.notifications) FleetIntelCollector.processNotifications(resp.notifications, ctx.profileName)
-      recordStorageFromCommand(command, resultData, ctx.profileId)
+      const snap = recordStorageFromCommand(command, resultData, ctx.profileId)
+      if (snap?.drift.length) ctx.log('system', describeStorageDrift(snap.station, snap.drift))
       recordCargoFromCommand(command, resultData, ctx.profileId)
       captureFactionFromCommand(command, commandArgs, resultData, ctx.profileId, ctx.profileName, { station: currentLocation(ctx).dockedAt })
     } catch { /* never break game execution */ }
@@ -3239,6 +3459,11 @@ export async function executeTool(
     // every connection and command path funnels notifications through.
     if (!isQuery) {
       bookLedgerFromCommand(command, commandArgs, resultData, result, ctx.profileId, ctx.profileName)
+      // Storage ledger: apply what this mutation did to station storage NOW, from
+      // the result, with the docked station — the action-log event attaches later.
+      try {
+        recordStorageMutationFromCommand(command, commandArgs, resultData, { profileId: ctx.profileId, station: currentLocation(ctx).dockedAt ?? null })
+      } catch (err) { swallow('tools.storageMutationHook', err) }
       // Decrement Admiral sell quotas on successful locked-item sells/listings
       // (listing counts: escrowed stock has left vault control).
       try {

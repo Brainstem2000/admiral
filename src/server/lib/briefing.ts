@@ -933,14 +933,26 @@ export function buildSituationalBriefing(profileId: string): string {
       // 0028449658...); an agent cannot fly to a hash. Render the display
       // name (and system, when the facility capture knows it) instead.
       const byStation = new Map<string, string[]>()
+      const stationAge = new Map<string, number>()   // age of the station's last authoritative read, in hours (Infinity = never viewed)
       for (const r of rows) {
         const key = stationDisplayName(r.station_id)
         const list = byStation.get(key) ?? []
         list.push(`${r.item_id} x${quant(r.quantity)}`)
         byStation.set(key, list)
+        // Staleness = age of the last view_storage of that station (observed_at),
+        // NOT of the last delta: a row can move all day without anyone looking.
+        // Quantized to whole hours so the line only changes hourly (prompt cache).
+        // A row that exists only from deltas (observed_at NULL) says nothing about
+        // the station's age; the station's viewed rows do. Never viewed = Infinity.
+        const seen = r.observed_at ? Date.parse(r.observed_at.includes('T') ? r.observed_at : `${r.observed_at.replace(' ', 'T')}Z`) : NaN
+        const hours = Number.isFinite(seen) ? Math.floor((Date.now() - seen) / 3_600_000) : Infinity
+        const prev = stationAge.get(key)
+        stationAge.set(key, prev === undefined ? hours : Math.min(prev, hours))
       }
-      const parts = [...byStation.entries()].map(([st, items]) => `${st}: ${items.join(', ')}`)
-      lines.push(`YOUR STORAGE (fleet-tracked, may lag — verify with view_storage when acting): ${parts.join(' | ')}`)
+      const ageTag = (h: number) => h === Infinity ? ' (never verified — ledger only)'
+        : h >= 24 ? ` (seen ${Math.floor(h / 24)}d ago — STALE)` : h > 6 ? ` (seen ${h}h ago)` : ''
+      const parts = [...byStation.entries()].map(([st, items]) => `${st}${ageTag(stationAge.get(st) ?? 0)}: ${items.join(', ')}`)
+      lines.push(`YOUR STORAGE (fleet-tracked ledger; a station tagged STALE has not been viewed in a day — verify with view_storage when acting): ${parts.join(' | ')}`)
     }
   }
 

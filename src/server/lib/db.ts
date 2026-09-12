@@ -200,6 +200,27 @@ VERSIONED_MIGRATIONS.push({
   },
 })
 
+VERSIONED_MIGRATIONS.push({
+  version: 7,
+  name: 'storage-inventory-observed-at (storage is a ledger, not a snapshot)',
+  up: (d) => {
+    const has = (t: string, c: string) =>
+      (d.query(`PRAGMA table_info(${t})`).all() as { name: string }[]).some(x => x.name === c)
+    // Every pre-existing row was written by a view_storage snapshot, so its
+    // updated_at IS its last authoritative observation. From here on updated_at
+    // moves with every applied delta and observed_at only with snapshots.
+    if (!has('storage_inventory', 'observed_at')) {
+      d.exec('ALTER TABLE storage_inventory ADD COLUMN observed_at TEXT')
+      d.exec('UPDATE storage_inventory SET observed_at = updated_at WHERE observed_at IS NULL')
+    }
+    // Seed the per-station snapshot clock from the same rows (storage_snapshots
+    // is created by migrate() before this runs).
+    d.exec(`INSERT OR IGNORE INTO storage_snapshots (profile_id, station_id, observed_at, item_count)
+      SELECT profile_id, station_id, MAX(updated_at), COUNT(*) FROM storage_inventory
+      WHERE updated_at IS NOT NULL GROUP BY profile_id, station_id`)
+  },
+})
+
 function runVersionedMigrations(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -697,6 +718,20 @@ function migrate(db: Database): void {
   // A snapshot REPLACES that (profile, station) pair wholesale rather than
   // merging — an item absent from a fresh read is genuinely gone, and merging
   // would resurrect it forever.
+  //
+  // Since 2026-09-12 the table is a LEDGER, not only a snapshot: every deposit,
+  // withdrawal, gift, market fill, craft and ship switch is applied as a signed
+  // delta the moment its command result or action-log event is seen, and every
+  // one of those deltas is written to `storage_ledger` (append-only) so each
+  // quantity here can be explained row by row. `updated_at` is the last delta;
+  // `observed_at` is the last AUTHORITATIVE view_storage snapshot of that
+  // station (NULL = never seen, only inferred from deltas). A snapshot still
+  // replaces the station wholesale, but it RECONCILES first: each item whose
+  // quantity differs from the ledger's expectation gets a `source='snapshot'`
+  // ledger row, so drift is recorded rather than silently overwritten. Before
+  // this, the table was refreshed only by view_storage and told the Admiral
+  // CyberSapper held 4 focused_crystal at War Citadel while the live view showed
+  // 0 (and 766 fury_crystal nobody knew about).
   db.exec(`
     CREATE TABLE IF NOT EXISTS storage_inventory (
       profile_id TEXT NOT NULL,
@@ -705,11 +740,70 @@ function migrate(db: Database): void {
       item_name TEXT DEFAULT '',
       quantity INTEGER NOT NULL,
       updated_at TEXT DEFAULT (datetime('now')),
+      observed_at TEXT,
       PRIMARY KEY (profile_id, station_id, item_id),
       FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_stinv_item ON storage_inventory(item_id);
     CREATE INDEX IF NOT EXISTS idx_stinv_station ON storage_inventory(station_id);
+
+    -- Append-only journal of EVERY change to storage_inventory (see the note
+    -- above). source: 'command' (a successful game command result, applied at
+    -- once), 'action_log' (an event from get_action_log), 'snapshot' (drift a
+    -- view_storage read corrected). confidence: 'exact' (the game named the
+    -- station), 'placed' (station inferred from position_history / the sender's
+    -- position / the job's facility), 'unplaced' (station unknown — the row is
+    -- journaled with station_id NULL, NOT applied, and the profile is marked
+    -- dirty until the next view_storage). event_id links a row to the
+    -- action_events row that confirmed it, so an event whose effect was already
+    -- applied from the command result is attached rather than applied twice.
+    CREATE TABLE IF NOT EXISTS storage_ledger (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id TEXT NOT NULL,
+      station_id TEXT,
+      item_id TEXT NOT NULL,
+      delta INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      ref TEXT NOT NULL,
+      confidence TEXT NOT NULL,
+      event_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_stledger_profile ON storage_ledger(profile_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_stledger_item ON storage_ledger(profile_id, item_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_stledger_event ON storage_ledger(profile_id, event_id) WHERE event_id IS NOT NULL;
+
+    -- When each (profile, station) was last read authoritatively. Kept apart
+    -- from storage_inventory because an EMPTY station leaves no rows there, and
+    -- the action-log applier needs the time regardless: an event older than the
+    -- station's last snapshot is already inside that snapshot and must not be
+    -- applied on top of it (a craft completes, the agent views storage, the
+    -- ingest sees the completion a minute later — without this the outputs
+    -- would count twice).
+    CREATE TABLE IF NOT EXISTS storage_snapshots (
+      profile_id TEXT NOT NULL,
+      station_id TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      item_count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (profile_id, station_id),
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+
+    -- Where each agent was docked, over time. Storage events from the action
+    -- log (deposit/withdraw/gift) name the item and quantity but NOT the
+    -- station, so this is what places them: the newest observation at or before
+    -- the event's time. station_id NULL records "seen undocked", so an event
+    -- after an undock is not pinned to the station left behind. Appended (throttled)
+    -- from every cached game state and every command result carrying a location.
+    CREATE TABLE IF NOT EXISTS position_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id TEXT NOT NULL,
+      station_id TEXT,
+      observed_at TEXT NOT NULL,
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_poshist ON position_history(profile_id, observed_at);
 
     CREATE TABLE IF NOT EXISTS storage_ships (
       profile_id TEXT NOT NULL,
@@ -1549,6 +1643,12 @@ export function pruneOldData(opts?: {
   // string comparison to hold at day boundaries.
   const eventsCutoffIso = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19) + 'Z'
   const events = db.query('DELETE FROM action_events WHERE created_at < ?').run(eventsCutoffIso).changes
+  // position_history only exists to place storage events within minutes of
+  // their time; two weeks covers any ingest lag. storage_ledger is the audit
+  // trail behind every storage figure — kept a full year (ISO timestamps).
+  const isoCutoff = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
+  try { db.query('DELETE FROM position_history WHERE observed_at < ?').run(isoCutoff(14)) } catch { /* table absent on old DBs */ }
+  try { db.query('DELETE FROM storage_ledger WHERE created_at < ?').run(isoCutoff(365)) } catch { /* table absent on old DBs */ }
 
   // profile_state_history: the triggers already skip no-op writes, so every row is a
   // real change — but at ~7.5KB average a directive/memory edit war still grows the
@@ -1677,13 +1777,13 @@ export function getStorageTotalForProfile(profileId: string, itemId: string): nu
  *  the briefing's own-assets summary. Rows are what capture hooks last saw, so
  *  callers should label them as possibly lagging. */
 export function getStorageSummaryForProfile(profileId: string, maxLines = 14): Array<{
-  station_id: string; item_id: string; quantity: number; updated_at: string
+  station_id: string; item_id: string; quantity: number; updated_at: string; observed_at: string | null
 }> {
   return db.query(
-    `SELECT station_id, item_id, quantity, updated_at FROM storage_inventory
+    `SELECT station_id, item_id, quantity, updated_at, observed_at FROM storage_inventory
      WHERE profile_id = ? AND quantity > 0
      ORDER BY quantity DESC LIMIT ?`,
-  ).all(profileId, maxLines) as Array<{ station_id: string; item_id: string; quantity: number; updated_at: string }>
+  ).all(profileId, maxLines) as Array<{ station_id: string; item_id: string; quantity: number; updated_at: string; observed_at: string | null }>
 }
 
 /**
@@ -1827,27 +1927,177 @@ export function decrementSellQuota(profileId: string, itemId: string, quantity: 
 
 export interface StorageItem { item_id: string; item_name?: string; quantity: number }
 export interface StorageShip { ship_id: string; class?: string; custom_name?: string; module_count?: number }
-export interface StorageRow extends StorageItem { profile_id: string; station_id: string; updated_at: string }
+export interface StorageRow extends StorageItem { profile_id: string; station_id: string; updated_at: string; observed_at?: string | null }
+
+export type StorageLedgerSource = 'command' | 'action_log' | 'snapshot'
+export type StorageLedgerConfidence = 'exact' | 'placed' | 'unplaced'
+export interface StorageLedgerRow {
+  id: number; profile_id: string; station_id: string | null; item_id: string; delta: number
+  source: StorageLedgerSource; ref: string; confidence: StorageLedgerConfidence; event_id: number | null; created_at: string
+}
+/** One item whose snapshot quantity disagreed with the ledger's running figure. */
+export interface StorageDrift { item_id: string; before: number; after: number; delta: number }
+
+/** ISO-8601 UTC with milliseconds — the ledger's clock (sorts as text, parses with Date.parse). */
+function nowIso(): string { return new Date().toISOString() }
+
+/**
+ * THE one write path for storage_inventory. Applies a signed delta to one
+ * (profile, station, item) — insert on first sight, delete at <= 0 — and
+ * journals it in storage_ledger inside the same transaction, so the table can
+ * never move without a row that says why. An 'unplaced' delta (station
+ * unknown) is journaled only: applying it somewhere would be fiction, so the
+ * caller marks the profile dirty and the next view_storage settles it.
+ * Returns the ledger row id.
+ */
+export function applyStorageDelta(
+  profileId: string,
+  stationId: string | null,
+  itemId: string,
+  delta: number,
+  meta: { source: StorageLedgerSource; ref: string; confidence: StorageLedgerConfidence; eventId?: number | null; itemName?: string; at?: string },
+): number {
+  const d = Math.trunc(Number(delta))
+  if (!itemId || !Number.isFinite(d) || d === 0) return 0
+  const confidence: StorageLedgerConfidence = stationId ? meta.confidence : 'unplaced'
+  const at = meta.at ?? nowIso()
+  const tx = db.transaction(() => {
+    if (stationId && confidence !== 'unplaced') {
+      db.query(`INSERT INTO storage_inventory (profile_id, station_id, item_id, item_name, quantity, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(profile_id, station_id, item_id) DO UPDATE SET
+          quantity = quantity + excluded.quantity,
+          item_name = CASE WHEN excluded.item_name <> '' THEN excluded.item_name ELSE item_name END,
+          updated_at = excluded.updated_at`)
+        .run(profileId, stationId, itemId, meta.itemName ?? '', d, at)
+      db.query('DELETE FROM storage_inventory WHERE profile_id = ? AND station_id = ? AND item_id = ? AND quantity <= 0')
+        .run(profileId, stationId, itemId)
+    }
+    const r = db.query(`INSERT INTO storage_ledger (profile_id, station_id, item_id, delta, source, ref, confidence, event_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(profileId, stationId, itemId, d, meta.source, meta.ref, confidence, meta.eventId ?? null, at)
+    return Number(r.lastInsertRowid)
+  })
+  return tx()
+}
+
+/**
+ * Attach an action-log event to the command-time ledger row that already
+ * applied it: same profile, item and signed delta, written within ±windowMs of
+ * the event and not yet attached to any event. Returns true when a row was
+ * claimed — the caller must then NOT apply the event again.
+ */
+export function attachStorageLedgerEvent(profileId: string, itemId: string, delta: number, eventAt: string, eventId: number, windowMs = 3 * 60_000): boolean {
+  const t = Date.parse(eventAt)
+  if (!Number.isFinite(t)) return false
+  const lo = new Date(t - windowMs).toISOString()
+  const hi = new Date(t + windowMs).toISOString()
+  const row = db.query(`SELECT id FROM storage_ledger WHERE profile_id = ? AND item_id = ? AND delta = ?
+    AND source = 'command' AND event_id IS NULL AND created_at BETWEEN ? AND ? ORDER BY ABS(julianday(created_at) - julianday(?)) LIMIT 1`)
+    .get(profileId, itemId, Math.trunc(delta), lo, hi, eventAt) as { id: number } | null
+  if (!row) return false
+  db.query('UPDATE storage_ledger SET event_id = ? WHERE id = ?').run(eventId, row.id)
+  return true
+}
+
+/** Newest ledger rows for one agent (optionally one item), newest first. */
+export function getStorageLedger(profileId: string, opts: { itemId?: string; stationId?: string; limit?: number } = {}): StorageLedgerRow[] {
+  const where = ['profile_id = ?']
+  const args: unknown[] = [profileId]
+  if (opts.itemId) { where.push('item_id = ?'); args.push(opts.itemId) }
+  if (opts.stationId) { where.push('station_id = ?'); args.push(opts.stationId) }
+  args.push(Math.min(Math.max(1, opts.limit ?? 200), 2000))
+  return db.query(`SELECT * FROM storage_ledger WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...(args as never[])) as StorageLedgerRow[]
+}
+
+/** Last authoritative view_storage of one (profile, station) as ISO text, or null when never read. */
+export function stationStorageObservedAt(profileId: string, stationId: string): string | null {
+  const row = db.query('SELECT observed_at FROM storage_snapshots WHERE profile_id = ? AND station_id = ?')
+    .get(profileId, stationId) as { observed_at: string } | null
+  return row?.observed_at ?? null
+}
+
+/**
+ * Note where an agent is (station id, or null for "seen undocked"). Throttled:
+ * a repeat of the newest row within 60s is dropped, so the 2s turn loop does
+ * not write thirty identical rows a minute while a change of station always
+ * lands immediately. The time defaults to now; callers replaying a dated
+ * observation may pass it.
+ */
+export function recordPosition(profileId: string, stationId: string | null, at?: string): boolean {
+  const when = at ?? nowIso()
+  const last = db.query('SELECT station_id, observed_at FROM position_history WHERE profile_id = ? ORDER BY observed_at DESC, id DESC LIMIT 1')
+    .get(profileId) as { station_id: string | null; observed_at: string } | null
+  if (last && (last.station_id ?? null) === (stationId ?? null)) {
+    const age = Date.parse(when) - Date.parse(last.observed_at)
+    if (Number.isFinite(age) && age >= 0 && age < 60_000) return false
+  }
+  db.query('INSERT INTO position_history (profile_id, station_id, observed_at) VALUES (?, ?, ?)').run(profileId, stationId, when)
+  return true
+}
+
+/**
+ * Where was this agent at `atIso`? The newest observation at or before that
+ * time, no older than maxAgeMs. `station_id` null means the agent was last
+ * seen UNDOCKED — the caller must treat that as "unknown", never as the
+ * previous station.
+ */
+export function positionAt(profileId: string, atIso: string, maxAgeMs = 10 * 60_000): { station_id: string | null; observed_at: string } | null {
+  const t = Date.parse(atIso)
+  if (!Number.isFinite(t)) return null
+  const floor = new Date(t - maxAgeMs).toISOString()
+  const row = db.query(`SELECT station_id, observed_at FROM position_history WHERE profile_id = ? AND observed_at <= ? AND observed_at >= ?
+    ORDER BY observed_at DESC, id DESC LIMIT 1`).get(profileId, atIso, floor) as { station_id: string | null; observed_at: string } | null
+  return row ?? null
+}
 
 /**
  * Replace this agent's recorded holdings at one station with a fresh snapshot.
  * Wholesale replace, not merge: an item missing from a new read has actually
  * left the station, and merging would keep it on the books forever.
+ *
+ * RECONCILES before replacing: every item whose ledger figure differs from the
+ * read gets a `source='snapshot'` ledger row for the difference, so the journal
+ * explains the correction instead of the table silently jumping. Returns that
+ * drift list so the caller can log "storage reconciled at X: 3 items drifted".
+ * Stamps observed_at (this table) and storage_snapshots (the station clock,
+ * kept even when the station is empty).
  */
 export function recordStorageSnapshot(
   profileId: string,
   stationId: string,
   items: StorageItem[],
   ships: StorageShip[] = [],
-): void {
+): StorageDrift[] {
+  const at = nowIso()
+  const drift: StorageDrift[] = []
   const tx = db.transaction(() => {
-    db.query('DELETE FROM storage_inventory WHERE profile_id = ? AND station_id = ?').run(profileId, stationId)
-    const ins = db.query(`INSERT INTO storage_inventory (profile_id, station_id, item_id, item_name, quantity)
-      VALUES (?, ?, ?, ?, ?)`)
+    const before = new Map<string, number>()
+    for (const r of db.query('SELECT item_id, quantity FROM storage_inventory WHERE profile_id = ? AND station_id = ?')
+      .all(profileId, stationId) as Array<{ item_id: string; quantity: number }>) before.set(r.item_id, r.quantity)
+    const after = new Map<string, StorageItem>()
     for (const it of items) {
       if (!it.item_id || !(it.quantity > 0)) continue
-      ins.run(profileId, stationId, it.item_id, it.item_name ?? '', it.quantity)
+      const cur = after.get(it.item_id)
+      after.set(it.item_id, cur ? { ...cur, quantity: cur.quantity + it.quantity } : it)
     }
+    for (const id of new Set([...before.keys(), ...after.keys()])) {
+      const b = before.get(id) ?? 0
+      const a = after.get(id)?.quantity ?? 0
+      if (a !== b) drift.push({ item_id: id, before: b, after: a, delta: a - b })
+    }
+    const insLedger = db.query(`INSERT INTO storage_ledger (profile_id, station_id, item_id, delta, source, ref, confidence, created_at)
+      VALUES (?, ?, ?, ?, 'snapshot', 'view_storage', 'exact', ?)`)
+    for (const d of drift) insLedger.run(profileId, stationId, d.item_id, d.delta, at)
+
+    db.query('DELETE FROM storage_inventory WHERE profile_id = ? AND station_id = ?').run(profileId, stationId)
+    const ins = db.query(`INSERT INTO storage_inventory (profile_id, station_id, item_id, item_name, quantity, updated_at, observed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    for (const it of after.values()) ins.run(profileId, stationId, it.item_id, it.item_name ?? '', it.quantity, at, at)
+    db.query(`INSERT INTO storage_snapshots (profile_id, station_id, observed_at, item_count) VALUES (?, ?, ?, ?)
+      ON CONFLICT(profile_id, station_id) DO UPDATE SET observed_at = excluded.observed_at, item_count = excluded.item_count`)
+      .run(profileId, stationId, at, after.size)
+
     db.query('DELETE FROM storage_ships WHERE profile_id = ? AND station_id = ?').run(profileId, stationId)
     const insShip = db.query(`INSERT INTO storage_ships (profile_id, station_id, ship_id, class, custom_name, module_count)
       VALUES (?, ?, ?, ?, ?, ?)`)
@@ -1857,6 +2107,31 @@ export function recordStorageSnapshot(
     }
   })
   tx()
+  return drift
+}
+
+/**
+ * The fleet profile behind a player name as the game spells it in gift events
+ * and send_gift results (`sender`/`recipient`): the login username first, then
+ * the player id, then the profile's display name. Null for outsiders.
+ */
+export function findProfileByPlayer(nameOrId: string | null | undefined): Profile | null {
+  const key = String(nameOrId ?? '').trim().toLowerCase()
+  if (!key || key.startsWith('faction:') || key.startsWith('empire:')) return null
+  const all = listProfiles()
+  return all.find(p => (p.username ?? '').toLowerCase() === key)
+    ?? all.find(p => (p.player_id ?? '').toLowerCase() === key)
+    ?? all.find(p => p.name.toLowerCase() === key)
+    ?? null
+}
+
+/** "3 items drifted (fury_crystal −30, focused_crystal −4, …)" — the log line for a reconciled snapshot; '' when nothing drifted. */
+export function describeStorageDrift(stationId: string, drift: StorageDrift[], max = 6): string {
+  if (!drift.length) return ''
+  const sorted = [...drift].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+  const parts = sorted.slice(0, max).map(d => `${d.item_id} ${d.delta > 0 ? '+' : '−'}${Math.abs(d.delta)}`)
+  const more = drift.length > max ? `, +${drift.length - max} more` : ''
+  return `storage reconciled at ${stationId}: ${drift.length} item${drift.length === 1 ? '' : 's'} drifted (${parts.join(', ')}${more})`
 }
 
 /** Everything one agent holds, newest-read first. Omit stationId for all stations. */
@@ -1909,7 +2184,16 @@ export interface ActionEvent {
  * this list and nothing else — deriving "which were new" from a count and array
  * order silently double-counts the moment the feed returns anything out of order.
  */
-export function recordActionEvents(profileId: string, category: string, events: ActionEvent[]): number[] {
+export function recordActionEvents(
+  profileId: string,
+  category: string,
+  events: ActionEvent[],
+  /** Runs INSIDE the insert transaction with the genuinely-new events, oldest
+   *  first — the storage-ledger applier lives here so an event and its ledger
+   *  effect commit together or not at all (a crash between them would leave
+   *  an event marked ingested whose storage effect never landed). */
+  onInserted?: (inserted: ActionEvent[]) => void,
+): number[] {
   const inserted: number[] = []
   const tx = db.transaction(() => {
     const ins = db.query(`INSERT OR IGNORE INTO action_events
@@ -1927,6 +2211,10 @@ export function recordActionEvents(profileId: string, category: string, events: 
         ON CONFLICT(profile_id, category) DO UPDATE SET
           last_event_id = MAX(last_event_id, excluded.last_event_id), updated_at = datetime('now')`)
         .run(profileId, category, maxId)
+    }
+    if (onInserted && inserted.length) {
+      const ids = new Set(inserted)
+      onInserted(events.filter(e => ids.has(e.event_id)).sort((a, b) => a.event_id - b.event_id))
     }
   })
   tx()
@@ -2370,12 +2658,17 @@ export function markStorageDirty(profileId: string, reason: string): void {
 }
 
 /**
- * Has this agent moved goods since the last `view_storage` snapshot?
+ * Has this agent moved goods somewhere the ledger could not place since the last
+ * `view_storage` snapshot?
  *
- * `storage_inventory` is a SNAPSHOT, refreshed only by view_storage. A deposit or
- * withdrawal changes the real station storage and leaves the cache untouched, so
- * any figure read from it afterwards is fiction. `markStorageDirty` records that.
+ * `storage_inventory` is a ledger since 2026-09-12 (every command result and
+ * action-log event applies its delta), so most movement no longer dirties it. The
+ * flag now means "an UNPLACED change is journaled" — an event whose station could
+ * not be determined, or a command whose storage share is not itemised
+ * (supply_commission, commission_ship with materials, refit_ship, trade_accept) —
+ * and any figure read for that profile may be off until the next view_storage.
  *
+ * History: before the ledger existed the whole table was a snapshot, and:
  * Written because checkCraftInputs trusted the cache: CyberSpock deposited
  * lead_ingot x3 at Blood Forge on 2026-09-07, and the craft guard kept answering
  * "station storage has 0" from the stale snapshot. He looped
@@ -3676,9 +3969,12 @@ export function findToolResultSince(profileId: string, sinceId: number, needle: 
   ).get(profileId, sinceId, `%${needle.toLowerCase()}%`) as { id: number; summary: string } | undefined
 }
 
-/** Age of the newest storage snapshot row for one station, in ms; null when never recorded. */
+/** Age of the last AUTHORITATIVE view_storage of one station, in ms; null when never read.
+ *  Reads the snapshot clock, not updated_at — deltas move updated_at without anyone having looked. */
 export function storageSnapshotAgeMs(profileId: string, stationId: string): number | null {
-  const row = getDb().query('SELECT MAX(updated_at) AS at FROM storage_inventory WHERE profile_id = ? AND station_id = ?').get(profileId, stationId) as { at: string | null } | undefined
+  const d = getDb()
+  const snap = d.query('SELECT observed_at AS at FROM storage_snapshots WHERE profile_id = ? AND station_id = ?').get(profileId, stationId) as { at: string | null } | undefined
+  const row = snap?.at ? snap : d.query('SELECT MAX(observed_at) AS at FROM storage_inventory WHERE profile_id = ? AND station_id = ?').get(profileId, stationId) as { at: string | null } | undefined
   if (!row?.at) return null
   const t = Date.parse(row.at.includes('T') ? row.at : row.at.replace(' ', 'T') + 'Z')
   return Number.isFinite(t) ? Math.max(0, Date.now() - t) : null

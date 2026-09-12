@@ -1,9 +1,14 @@
 /**
  * Refresh every agent's storage_inventory at every station they hold stock in.
  *
- * storage_inventory is written only by a `view_storage` call, and an agent only
- * views the station it is standing in — so a record goes stale the moment they
- * leave and stays stale until they come back. On 2026-09-05 that produced four
+ * storage_inventory is a ledger since 2026-09-12 (deposits, withdrawals, gifts,
+ * fills and crafts apply their delta as they happen), but a `view_storage` read is
+ * still the only AUTHORITATIVE figure: it reconciles the ledger, writes a
+ * storage_ledger row for every item that drifted, and stamps observed_at — which
+ * plan-check/ship-match/the briefing use to call a station STALE after a day.
+ * Before the ledger, the table was written only by view_storage, and an agent only
+ * views the station it is standing in — so a record went stale the moment they
+ * left and stayed stale until they came back. On 2026-09-05 that produced four
  * wrong plans in one afternoon: CyberSpock's 50 circuit_board at War Citadel had
  * been gone for hours, Vera's 82 were actually 32, and a fury_alloy haul was
  * routed against a hull and a stock that no longer existed.
