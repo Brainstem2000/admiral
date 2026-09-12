@@ -10,6 +10,7 @@ import {
   getItemHistory,
   getStorageDirty,
 } from '../lib/db'
+import { getShip } from '../lib/catalog'
 
 /**
  * Fleet inventory ledger — the machine-kept answer to "what do we own, where,
@@ -92,17 +93,39 @@ inventory.get('/profile/:id', (c) => {
     total_units: rows.reduce((n, r) => n + r.quantity, 0),
     stations: byStation,
     cargo,
-    ships: getStorageShips(id),
+    ships: getStorageShips(id).map(withHull),
     // Last known value per item from the fleet's own market observations:
     // { item_id: { price, qty, station, observed_at } }
     bids: getBestKnownBids(itemIds),
   })
 })
 
-/** GET /api/inventory/ships — every parked ship the fleet owns, fleet-wide. */
+/**
+ * Join one storage_ships row to the catalog so a reader can see what the hull
+ * IS, not just its id. `class` on the row is the catalog class_id (list_ships
+ * and get_ship both write it); the added fields are the catalog's display
+ * name, tier (0–5), class label (Miner, Bulk Hauler, Assault…), category and
+ * faction. Every added field is null when the catalog has no entry for the id
+ * — the dashboard shows "—" for those rather than guessing. Purely additive:
+ * nothing the row already carried is renamed or removed.
+ */
+function withHull(row: Record<string, unknown>): Record<string, unknown> {
+  const hull = getShip(String(row.class ?? ''))
+  return {
+    ...row,
+    is_active: row.station_id === '__active__',
+    class_name: hull?.name ?? null,
+    tier: typeof hull?.tier === 'number' ? hull.tier : null,
+    hull_class: hull?.class ?? null,
+    category: hull?.category ?? null,
+    faction: hull?.faction ?? null,
+  }
+}
+
+/** GET /api/inventory/ships — every ship the fleet owns, fleet-wide, with its catalog tier/class. */
 inventory.get('/ships', (c) => {
   const names = new Map(listProfiles().map(p => [p.id, p.name]))
-  const ships = getStorageShips().map(s => ({ ...s, agent: names.get(String(s.profile_id)) ?? s.profile_id }))
+  const ships = getStorageShips().map(s => ({ ...withHull(s), agent: names.get(String(s.profile_id)) ?? s.profile_id }))
   return c.json({ ships, count: ships.length })
 })
 

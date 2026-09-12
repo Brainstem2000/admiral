@@ -11,6 +11,38 @@ import { CommandPanel } from './CommandPanel'
 import { QuickCommands } from './QuickCommands'
 import { LogPane } from './LogPane'
 import { SidePane } from './SidePane'
+import { FleetShipsTable, type FleetShip } from './FleetShipsTable'
+
+/**
+ * Frontend fallback for the catalog join /api/inventory/ships does server-side.
+ * Used only when a row arrives without `tier` (the running backend predates the
+ * join): one /api/codex/ship/:id read per distinct class id, all local and free.
+ * A 404 stays null, which the table renders as "—" — never a guessed tier.
+ */
+async function joinHullsFromCodex(ships: FleetShip[]): Promise<FleetShip[]> {
+  const ids = [...new Set(ships.map(s => s.class).filter(Boolean))]
+  const hulls = new Map<string, Record<string, unknown> | null>()
+  await Promise.all(ids.map(async id => {
+    try {
+      const r = await fetch(`/api/codex/ship/${encodeURIComponent(id)}`)
+      hulls.set(id, r.ok ? (await r.json()) as Record<string, unknown> : null)
+    } catch {
+      hulls.set(id, null)
+    }
+  }))
+  return ships.map(s => {
+    const h = hulls.get(s.class)
+    return {
+      ...s,
+      is_active: s.is_active ?? s.station_id === '__active__',
+      class_name: typeof h?.name === 'string' ? h.name : null,
+      tier: typeof h?.tier === 'number' ? h.tier : null,
+      hull_class: typeof h?.class === 'string' ? h.class : null,
+      category: typeof h?.category === 'string' ? h.category : null,
+      faction: typeof h?.faction === 'string' ? h.faction : null,
+    }
+  })
+}
 
 /**
  * Parse the rendered text from MCP v2 get_status into structured player data.
@@ -112,7 +144,8 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
   const [showDirectiveModal, setShowDirectiveModal] = useState(false)
   const [directiveValue, setDirectiveValue] = useState(profile.directive || '')
   const [showNudgeModal, setShowNudgeModal] = useState(false)
-  const [quickResult, setQuickResult] = useState<{ title: string; text: string; loading?: boolean } | null>(null)
+  // `text` renders as preformatted output; `ships` renders the Fleet ships table instead.
+  const [quickResult, setQuickResult] = useState<{ title: string; text?: string; ships?: FleetShip[]; loading?: boolean } | null>(null)
   const [nudgeValue, setNudgeValue] = useState('')
   const [nudgeHistoryIndex, setNudgeHistoryIndex] = useState(-1)
   const [nudgePending, setNudgePending] = useState('')
@@ -592,19 +625,13 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
     try {
       const resp = await fetch('/api/inventory/ships')
       const d = await resp.json()
-      const ships = (d.ships ?? []) as Array<{ agent: string; class: string; custom_name: string; station_id: string; module_count: number; updated_at: string }>
+      let ships = (d.ships ?? []) as FleetShip[]
       if (!ships.length) { setQuickResult({ title: 'Fleet ships', text: 'No ships on record yet.' }); return }
-      const loc = (s: { station_id: string }) =>
-        s.station_id === '__active__' ? 'ACTIVE (flying)' : s.station_id.replace(/_/g, ' ')
-      const rows = ships
-        .slice()
-        .sort((a, b) => a.agent.localeCompare(b.agent) || a.class.localeCompare(b.class))
-        .map(s => {
-          const name = s.custom_name ? `${s.class} “${s.custom_name}”` : s.class
-          return `${s.agent.split(' - ')[0].padEnd(16)} ${name.padEnd(24)} ${loc(s).padEnd(30)} ${s.module_count} mod · seen ${String(s.updated_at).slice(5, 16)}Z`
-        })
-      const header = `${'OWNER'.padEnd(16)} ${'SHIP'.padEnd(24)} ${'WHERE'.padEnd(30)} FIT / LAST SEEN\n${'-'.repeat(88)}`
-      setQuickResult({ title: `Fleet ships — ${ships.length} hulls`, text: `${header}\n${rows.join('\n')}` })
+      // A backend that predates the catalog join sends rows without `tier`;
+      // fill the hull facts from the codex route so the column is not blank
+      // merely because the server has not been restarted yet.
+      if (ships.some(s => !('tier' in s))) ships = await joinHullsFromCodex(ships)
+      setQuickResult({ title: `Fleet ships — ${ships.length} hulls`, ships })
     } catch (e) {
       setQuickResult({ title: 'Fleet ships', text: `Request failed: ${e instanceof Error ? e.message : String(e)}` })
     }
@@ -1151,16 +1178,22 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
       {/* Quick command result overlay */}
       {quickResult && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80" onClick={() => setQuickResult(null)}>
-          <div className="bg-card border border-border shadow-lg w-full max-w-3xl mx-4 max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+          <div className={`bg-card border border-border shadow-lg w-full ${quickResult.ships ? 'max-w-4xl' : 'max-w-3xl'} mx-4 max-h-[80vh] flex flex-col`} onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
               <span className="font-jetbrains text-xs font-semibold tracking-[1.5px] text-primary uppercase">{quickResult.title}</span>
               <button onClick={() => setQuickResult(null)} className="text-muted-foreground hover:text-foreground transition-colors">
                 <X size={14} />
               </button>
             </div>
-            <pre className={`px-4 py-3 text-[11.5px] leading-relaxed whitespace-pre overflow-auto font-jetbrains ${quickResult.loading ? 'text-muted-foreground animate-pulse' : 'text-foreground'}`}>
-              {quickResult.text}
-            </pre>
+            {quickResult.ships ? (
+              <div className="px-4 py-3 overflow-auto">
+                <FleetShipsTable ships={quickResult.ships} />
+              </div>
+            ) : (
+              <pre className={`px-4 py-3 text-[11.5px] leading-relaxed whitespace-pre overflow-auto font-jetbrains ${quickResult.loading ? 'text-muted-foreground animate-pulse' : 'text-foreground'}`}>
+                {quickResult.text}
+              </pre>
+            )}
           </div>
         </div>
       )}
