@@ -68,4 +68,10 @@ describe('collectTargets', () => {
       expect(collectTargets(junk)).toEqual([])
     }
   })
+
+  test('carries get_nearby\'s own role so the hunt gate can tell a grazer from a predator', () => {
+    const t = collectTargets(ALKAID)
+    expect(t.every(x => x.role === 'grazer')).toBe(true)
+    expect(collectTargets({ creatures: [{ creature_id: 'c1', name: 'Thing', hull: 10 }] })[0].role).toBeNull()
+  })
 })

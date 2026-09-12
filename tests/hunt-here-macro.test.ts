@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { executeTool } from '../src/server/lib/tools'
+import { executeTool, targetVerdict, weaponDps } from '../src/server/lib/tools'
 
 /**
  * hunt_here: scan, engage, kill, loot, repeat — as ONE tool call.
@@ -11,8 +11,10 @@ import { executeTool } from '../src/server/lib/tools'
  * grazers. goto_system solved the same problem for travel.
  *
  * The safety rules live in code, not in the prompt: police are never shot, a
- * target tougher than half our hull is skipped, and the loop breaks off the
- * moment hull falls under the floor.
+ * target our guns cannot kill quickly is skipped (targetVerdict: under half our
+ * hull, OR dead inside ~5 ticks, OR a grazer dead inside ~20 — the hull-only
+ * version refused 60-hull grazers to a 90-damage railgun on 2026-09-11), and
+ * the loop breaks off the moment hull falls under the floor.
  */
 
 interface Scenario {
@@ -24,7 +26,10 @@ interface Scenario {
   battleTicks?: number      // how many reads report an active battle
   failAttack?: string
   failAttackTimes?: number
-  lootNeedsWreckId?: boolean
+  lootNeedsId?: boolean         // the server rejects `wreck_id` and wants the older `id` signature
+  maxHull?: number          // our ship's max hull (default 1785, the Devastator the macro was written for)
+  modules?: any[]           // structured get_ship modules, so the macro can read our firepower
+  activeMissions?: string   // text form of get_active_missions, so the macro has paid quarry
 }
 
 function harness(s: Scenario) {
@@ -35,7 +40,7 @@ function harness(s: Scenario) {
   let advCalls = 0
   let reads = 0
   let battleReads = 0
-  const hullSeq = s.hullSeq ?? [1785]
+  const hullSeq = s.hullSeq ?? [s.maxHull ?? 1785]
   const conn = {
     mode: 'lib_v2',
     isConnected: () => true,
@@ -47,7 +52,7 @@ function harness(s: Scenario) {
       const inBattle = battleReads < (s.battleTicks ?? 0)
       if (inBattle) battleReads++
       return {
-        ship: { hull, max_hull: 1785 },
+        ship: { hull, max_hull: s.maxHull ?? 1785 },
         location: { system_id: 'krynn', docked_at: s.docked && !undocked ? 'crimson_war_citadel' : null, poi_id: 'start_poi' },
         ...(inBattle ? { active_battle: { battle_id: 'b1', your_zone: 'outer' } } : {}),
       }
@@ -55,6 +60,8 @@ function harness(s: Scenario) {
     execute: async (cmd: string, args?: any) => {
       calls.push({ cmd, args })
       if (cmd === 'undock') { undocked = true; return { result: 'ok' } }
+      if (cmd === 'get_ship' && s.modules) return { result: { modules: s.modules } }
+      if (cmd === 'get_active_missions' && s.activeMissions) return { result: s.activeMissions }
       if (cmd === 'advance') {
         advCalls++
         if (advCalls > (s.battleTicks ?? 0)) return { error: { code: 'not_in_battle', message: 'You are not in a battle.' } }
@@ -79,8 +86,8 @@ function harness(s: Scenario) {
           cargo: [{ item_id: 'creature_carapace', quantity: 2 }] },
         { id: 'wr_other', type: 'creature', victim_name: 'Someone Else', killer_name: 'Rival Pilot', cargo: [] },
       ] } }
-      if (cmd === 'loot' && s.lootNeedsWreckId && args && args.id !== undefined) {
-        return { error: { code: 'invalid_payload', message: 'Unknown parameter(s): id' } }
+      if (cmd === 'loot' && s.lootNeedsId && args && args.wreck_id !== undefined) {
+        return { error: { code: 'invalid_payload', message: 'Unknown parameter(s): wreck_id' } }
       }
       return { result: 'ok' }
     },
@@ -227,27 +234,30 @@ describe('hunt_here', () => {
   }, 120_000)
 
 
-  test('loots its own wreck using the id the payload actually uses', async () => {
-    // The wrecks payload names it `id`, not `wreck_id`, and the wreck only
-    // appears a tick after the kill. Getting either wrong made three
-    // Belt-Grazer kills at Nekkar Belt report "No wrecks looted".
+  test('loots its own wreck: reads the wreck `id`, sends it as `wreck_id`', async () => {
+    // The wrecks payload names the wreck `id`, not `wreck_id`, and the wreck
+    // only appears a tick after the kill. Getting either wrong made three
+    // Belt-Grazer kills at Nekkar Belt report "No wrecks looted". The loot
+    // command itself wants `wreck_id` — the live server answered every `id`
+    // attempt on 2026-09-11 with "Valid parameters: wreck_id, item_id,
+    // module_id, quantity" — so that key goes first.
     const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 1 })
     const out = await executeTool('hunt_here', { max_kills: 1 }, ctx)
     const loot = calls.find(c => c.cmd === 'loot')
-    expect(loot?.args?.id).toBe('wr_1')
+    expect(loot?.args?.wreck_id).toBe('wr_1')
     expect(out).toContain('creature_carapace x2')
   }, 90_000)
 
   test('does not loot a wreck another pilot made', async () => {
     const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 1 })
     await executeTool('hunt_here', { max_kills: 1 }, ctx)
-    expect(calls.filter(c => c.cmd === 'loot').map(c => c.args?.id)).not.toContain('wr_other')
+    expect(calls.filter(c => c.cmd === 'loot').map(c => c.args?.wreck_id ?? c.args?.id)).not.toContain('wr_other')
   }, 90_000)
 
   test('falls back to the other documented loot signature', async () => {
-    const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 1, lootNeedsWreckId: true })
+    const { ctx, calls } = harness({ targets: GRAZERS, battleTicks: 1, lootNeedsId: true })
     const out = await executeTool('hunt_here', { max_kills: 1 }, ctx)
-    expect(calls.some(c => c.cmd === 'loot' && c.args?.wreck_id === 'wr_1')).toBe(true)
+    expect(calls.some(c => c.cmd === 'loot' && c.args?.id === 'wr_1')).toBe(true)
     expect(out).toContain('creature_carapace')
   }, 90_000)
 
@@ -302,4 +312,91 @@ describe('combat tools are not offered to non-combat roles', () => {
       expect(other, t).toContain(t)
     }
   })
+
+  // ---- firepower-aware gate (2026-09-11) ----------------------------------
+  // Morg'Thar's Shard: hull 110, Railgun II (90 kinetic, cd 3) + Autocannon II
+  // (18 kinetic, cd 1). Effective vs armour at the kinetic 50% share:
+  // 90*0.5/3 + 18*0.5/1 = 24 per tick.
+  const SHARD_GUNS = [
+    { module_id: 'rg', type_id: 'railgun_ii', name: 'Railgun II', type: 'weapon', slot: 'weapon',
+      stats: { cooldown: 3, damage: 90, damage_type: 'kinetic', reach: 5, special: 'armor_bypass_50' }, magazine_size: 7, current_ammo: 7 },
+    { module_id: 'ac', type_id: 'autocannon_ii', name: 'Autocannon II', type: 'weapon', slot: 'weapon',
+      stats: { cooldown: 1, damage: 18, damage_type: 'kinetic', reach: 2 }, magazine_size: 650, current_ammo: 648 },
+    { module_id: 'sh', type_id: 'shield_i', name: 'Shield I', type: 'defense', slot: 'defense', stats: { shield: 40 } },
+  ]
+  const GRAZER_60 = { creatures: [{ creature_id: 'crt_small', name: 'Belt-Grazer', species: 'belt_grazer', role: 'grazer', hull: 60, max_hull: 60 }], pirates: [], empire_npcs: [], nearby: [] }
+
+  test('a glass cannon hunts prey heavier than half its hull when its guns drop it fast', async () => {
+    // The Shard at hull 100 caps "half our hull" at 50; every Belt-Grazer is 60.
+    // The hull-only rule sent Morg'Thar through four systems without a shot.
+    const { ctx, calls } = harness({ targets: GRAZER_60, hullSeq: [100], maxHull: 110, modules: SHARD_GUNS, battleTicks: 1 })
+    const out = await executeTool('hunt_here', { max_kills: 1, species: 'belt_grazer' }, ctx)
+    expect(calls.find(c => c.cmd === 'attack')?.args?.id).toBe('crt_small')
+    expect(out).toContain('1 CONFIRMED kill')
+  }, 60_000)
+
+  test('the firepower rule does not open the door to a leviathan', async () => {
+    const { ctx, calls } = harness({
+      targets: { creatures: [{ creature_id: 'crt_big', name: 'Molt Leviathan', species: 'molt_leviathan', role: 'predator', hull: 1600, max_hull: 1600 }], pirates: [], empire_npcs: [], nearby: [] },
+      hullSeq: [100], maxHull: 110, modules: SHARD_GUNS,
+    })
+    const out = await executeTool('hunt_here', { max_kills: 1 }, ctx)
+    expect(calls.some(c => c.cmd === 'attack')).toBe(false)
+    expect(out).toContain('too tough')
+    expect(out).toContain('ticks to kill')      // the refusal shows its arithmetic
+  }, 60_000)
+
+  test('a dry railgun leaves the autocannon, which still clears a grazer inside the grazer window', async () => {
+    const dry = SHARD_GUNS.map(m => m.module_id === 'rg' ? { ...m, current_ammo: 0 } : m)
+    const { ctx, calls } = harness({ targets: GRAZER_60, hullSeq: [100], maxHull: 110, modules: dry, battleTicks: 1 })
+    await executeTool('hunt_here', { max_kills: 1, species: 'belt_grazer' }, ctx)
+    expect(calls.find(c => c.cmd === 'attack')?.args?.id).toBe('crt_small')
+  }, 60_000)
+
+  test('weaponDps reads structured modules, skips dry magazines, and parses the text table', () => {
+    expect(weaponDps(SHARD_GUNS)).toBeCloseTo(24, 5)
+    expect(weaponDps(SHARD_GUNS.map(m => m.module_id === 'rg' ? { ...m, current_ammo: 0 } : m))).toBeCloseTo(9, 5)
+    expect(weaponDps([{ name: 'Shield I', type: 'defense', stats: { shield: 40 } }])).toBeNull()
+    expect(weaponDps(undefined)).toBeNull()
+    const text = 'Modules (2):\nid\ttype\tslot\tsize\tstats\nrg\trailgun_ii\tweapon\t10\tdmg:90 type:kinetic cd:3 ammo:7/7 loaded:Ferrous Slug Case reach:5\nac\tautocannon_ii\tweapon\t10\tdmg:18 type:kinetic cd:1 ammo:0/650 loaded:Standard Rounds Box reach:2\n'
+    expect(weaponDps(undefined, text)).toBeCloseTo(15, 5)   // the empty autocannon contributes nothing
+  })
+
+  test('targetVerdict: half-hull rule kept, fast kills and grazers admitted, the rest refused with numbers', () => {
+    const grazer = { kind: 'creature', role: 'grazer' }
+    const predator = { kind: 'creature', role: 'predator' }
+    expect(targetVerdict({ ...predator, hull: 40 }, 100, null)).toBeNull()            // under half our hull: always
+    expect(targetVerdict({ ...predator, hull: 60 }, 100, 24)).toBeNull()              // 3 ticks: fast kill, hull ratio irrelevant
+    expect(targetVerdict({ ...grazer, hull: 220 }, 100, 24)).toBeNull()               // pilot-whale, 10 ticks: grazer window
+    expect(targetVerdict({ ...predator, hull: 220 }, 100, 24)).toContain('10 ticks') // same hull, fights back: refused
+    expect(targetVerdict({ ...predator, hull: 1600 }, 100, 24)).toContain('67 ticks')   // 1600/24
+    expect(targetVerdict({ ...grazer, hull: 600 }, 100, 24)).toContain('25 ticks')   // past the stalemate window even for a grazer
+    expect(targetVerdict({ ...grazer, hull: 90 }, 100, null)).toBeNull()              // guns unreadable: grazer up to parity
+    expect(targetVerdict({ ...grazer, hull: 120 }, 100, null)).toContain('could not be read')
+    expect(targetVerdict({ ...predator, hull: 60 }, 100, null)).toContain('could not be read')
+    expect(targetVerdict({ ...predator, hull: null }, 100, 24)).toBeNull()            // unknown hull: legacy, engage
+  })
+
+  test('a species filter that hides everything names what is present instead of calling the POI worked out', async () => {
+    const { ctx, calls } = harness({
+      targets: { creatures: [{ creature_id: 'crt_w', name: 'Frost-Wyrm', species: 'frost_wyrm', role: 'predator', hull: 80, max_hull: 80 }], pirates: [], empire_npcs: [], nearby: [] },
+      hullSeq: [100], maxHull: 110, modules: SHARD_GUNS,
+    })
+    const out = await executeTool('hunt_here', { species: 'rime_grazer' }, ctx)
+    expect(calls.some(c => c.cmd === 'attack')).toBe(false)
+    expect(out).toContain('no "rime_grazer" at this POI')
+    expect(out).toContain('Frost-Wyrm (hull 80)')
+    expect(out).not.toContain('worked out')
+  }, 60_000)
+
+  test('a misspelt species argument does not stop the hunt when the paid quarry is standing right there', async () => {
+    const { ctx, calls } = harness({
+      targets: { creatures: [{ creature_id: 'crt_h', name: 'Hoarfrost Grazer', species: 'hoarfrost_grazer', role: 'grazer', hull: 60, max_hull: 60 }], pirates: [], empire_npcs: [], nearby: [] },
+      hullSeq: [100], maxHull: 110, modules: SHARD_GUNS, battleTicks: 1,
+      activeMissions: 'Active missions (1/5):\n--- Ice-Field Thinning ---\nObjectives:\n  - Hunt 6 Hoarfrost-Grazers: 0/6\n',
+    })
+    const out = await executeTool('hunt_here', { species: 'rime_grazer', max_kills: 1 }, ctx)
+    expect(calls.find(c => c.cmd === 'attack')?.args?.id).toBe('crt_h')
+    expect(out).toContain('hunting the paid quarry')
+  }, 90_000)
 })

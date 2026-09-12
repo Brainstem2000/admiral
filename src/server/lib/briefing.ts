@@ -205,6 +205,8 @@ export interface NearbyTarget {
   hull: number | null
   maxHull: number | null
   inCombat: boolean
+  /** get_nearby's own classification ('grazer' | 'predator' | 'scavenger'), lower-cased; null when absent. */
+  role: string | null
 }
 
 /**
@@ -238,6 +240,7 @@ export function collectTargets(raw: unknown): NearbyTarget[] {
         hull: num(e.hull),
         maxHull: num(e.max_hull),
         inCombat: e.in_combat === true,
+        role: typeof e.role === 'string' && e.role.trim() ? e.role.trim().toLowerCase() : null,
       })
     }
   }
