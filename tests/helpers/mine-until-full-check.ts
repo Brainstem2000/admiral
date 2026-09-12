@@ -84,4 +84,5 @@ const out: Record<string, unknown> = {}
 { const h = harness({ capacity: 12, perMine: 2 }); out.fullText = String(await executeTool('mine_until_full', { resource: 'silicon_ore' }, h.ctx)); out.fullMines = h.mines(); out.fullCargo = h.state.cargo_used }
 { const h = harness({ capacity: 12, perMine: 2 }); out.capText = String(await executeTool('mine_until_full', { resource: 'silicon_ore', max_mines: 2 }, h.ctx)); out.capMines = h.mines() }
 { const h = harness({ capacity: 100, perMine: 2, hullDropAfter: 2 }); out.hullText = String(await executeTool('mine_until_full', { resource: 'silicon_ore' }, h.ctx)); out.hullMines = h.mines() }
+{ const h = harness({ capacity: 100, perMine: 2 }); let n = 0; h.ctx.interruptPending = () => (h.mines() >= 2 ? 'Admiral nudge pending' : null); out.interruptText = String(await executeTool('mine_until_full', { resource: 'silicon_ore' }, h.ctx)); out.interruptMines = h.mines(); void n }
 console.log('__RESULT__' + JSON.stringify(out))

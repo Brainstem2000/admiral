@@ -5113,7 +5113,7 @@ const MINE_MACRO_DEADLINE_MS = 3 * 60 * 60_000
  *  dropped (WebSocket closed / failed before open), a command timed out, or the
  *  server throttled us. Anything else in an `error […]` stop (no_mining,
  *  not_at_poi, deposit_too_sparse) is a real verdict and stays a DONE. */
-const TRANSIENT_STOP_RX = /error \[(connection_failed|connection_lost|connect_timeout|timeout|rate_limited|server_error|internal_error|service_unavailable)\]|WebSocket connection (closed|failed)/i
+const TRANSIENT_STOP_RX = /error \[(connection_failed|connection_lost|connect_timeout|timeout|rate_limited|server_error|internal_error|service_unavailable)\]|WebSocket connection (closed|failed)|^interrupted \(/i
 const KEEP_MAX_DUMPS = 8   // mine_until_full(keep=…): dump cycles per call before it hands the belt back
 
 async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
@@ -5153,6 +5153,13 @@ async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContex
   while (mines < explicitCap) {
     if (!conn.isConnected()) { stopReason = 'disconnected'; break }
     if (Date.now() > deadline) { stopReason = 'deadline (3h)'; break }
+    // A nudge, a directive rewrite or a plan step must reach the agent NOW, as
+    // it does mid-hunt and mid-route. Without this probe a mining call ran on
+    // for up to three hours with the operator's message queued behind it:
+    // Ledger Voss, 2026-09-12 09:36 CT, was told to sell and kept mining for
+    // forty minutes because the macro never looked.
+    const interrupt = ctx.interruptPending?.()
+    if (interrupt) { stopReason = `interrupted (${interrupt})`; break }
     const st = await macroReadState(conn)
     const used = st.cargoUsed ?? lastUsed
     if (st.cargoCapacity && used >= (st.cargoCapacity * stopPct) / 100) {
@@ -5235,9 +5242,11 @@ export function mineStopMessage(mines: number, minedUnits: number, used: number 
   // cannot lean on the percentage: any transient stop that has not proven the
   // hold full is an INTERRUPTION that says "stay and call again".
   if (TRANSIENT_STOP_RX.test(stopReason) && (used === null || target === null || used < target)) {
+    const why = stopReason.startsWith('interrupted')
+      ? 'the Admiral has new guidance for you — read it FIRST, then call mine_until_full again only if it still applies'
+      : 'a connection blip, NOT a full hold and NOT a worked-out deposit. Stay at this POI and call mine_until_full again as soon as commands work; do not leave to sell'
     return `mine_until_full INTERRUPTED (not done): ${mines} mine actions, +${minedUnits} cargo units, cargo now ${usedTxt}/${capTxt}. ` +
-      `Stopped: ${stopReason} — a connection blip, NOT a full hold and NOT a worked-out deposit. ` +
-      `Stay at this POI and call mine_until_full again as soon as commands work; do not leave to sell.`
+      `Stopped: ${stopReason} — ${why}.`
   }
   const notFull = capped && used !== null && target !== null && used < target
   if (notFull) {

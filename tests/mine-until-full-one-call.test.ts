@@ -42,4 +42,9 @@ describe('mine_until_full: one call per hold', () => {
   test('a dump cycle that adds no kept ore ends the call instead of dumping forever', async () => {
     const r = await run(); expect(r.keepStallJettisoned).toBe(2); expect(r.keepStallText).toContain('not yielding it')
   }, 60_000)
+  // Ledger Voss, 2026-09-12 09:36 CT: told to go and sell, he mined for another
+  // forty minutes because the macro never looked for the pending nudge.
+  test('a pending nudge or directive change stops the call between mines and says so', async () => {
+    const r = await run(); expect(r.interruptMines).toBe(2); expect(r.interruptText).toContain('INTERRUPTED (not done)'); expect(r.interruptText).toContain('Admiral nudge pending'); expect(r.interruptText).toContain('read it FIRST')
+  }, 60_000)
 })
