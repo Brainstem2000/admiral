@@ -4665,7 +4665,11 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
     // The tool restriction is the load-bearing part." Advice is not a control.
     // A kill that costs more ammo than its loot is worth is a LOSS, so the
     // macro declines to make it and says where the paying quarry is instead.
-    if (quarry.size > 0 && !isMissionQuarry(target, quarry) && !wantSpecies && args.allow_loot_only !== true) {
+    // A species argument used to bypass this refusal, so a full contract kept
+    // getting "fed": Morg'Thar killed eight more Belt-Grazers at Smelt Reef on
+    // 2026-09-12 with Grazer Cull already at 8/8 — ammo spent, nothing paid.
+    // Naming the species does not make an unpaid kill paid.
+    if (quarry.size > 0 && !isMissionQuarry(target, quarry) && args.allow_loot_only !== true) {
       // Remember the POI we are ACTUALLY standing at, not the one getLocalState
       // reports. That cache does not reflect the macro's own travel, so the
       // first version recorded the POI it had already left and kept
@@ -4682,7 +4686,7 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
       const here = [...new Set(beatable.map((t) => t.name))].slice(0, 4).join(', ')
       stopReason =
         `NOTHING PAID HERE — refusing to spend ammo. This POI holds ${here}, and none of it ` +
-        `advances a contract. You are paid for: ${[...quarry].join(', ')}. ` +
+        `advances a contract${wantSpecies ? ` (your species "${wantSpecies}" is not on any open objective — a finished contract must be turned in with complete_mission first)` : ''}. You are paid for: ${[...quarry].join(', ')}. ` +
         `MOVE: gas_cloud POIs hold sift-rays, ice_field POIs hold rime-grazers, and pirates ` +
         `do not spawn in High Security systems (check Security on get_system's first line). ` +
         `Killing what is here loses money — measured at 765cr of loot for 21 kills. ` +

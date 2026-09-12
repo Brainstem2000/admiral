@@ -399,4 +399,13 @@ describe('combat tools are not offered to non-combat roles', () => {
     expect(calls.find(c => c.cmd === 'attack')?.args?.id).toBe('crt_h')
     expect(out).toContain('hunting the paid quarry')
   }, 90_000)
+
+  test('a species argument does not turn an unpaid kill into a paid one', async () => {
+    // Grazer Cull already 8/8 (not an open objective); only sift-rays still pay.
+    const { ctx, calls } = harness({ targets: GRAZER_60, hullSeq: [100], maxHull: 110, modules: SHARD_GUNS, battleTicks: 1,
+      activeMissions: 'Active missions (2/5):\n--- Grazer Cull ---\nObjectives:\n  - Hunt 8 Belt-Grazers: 8/8 [DONE]\n--- Nebula Drift Hunt ---\nObjectives:\n  - Hunt 6 Sift-Rays: 1/6\n' })
+    const out = await executeTool('hunt_here', { species: 'belt_grazer', max_kills: 1 }, ctx)
+    expect(calls.some(c => c.cmd === 'attack')).toBe(false)
+    expect(out).toContain('NOTHING PAID HERE'); expect(out).toContain('complete_mission')
+  }, 60_000)
 })
