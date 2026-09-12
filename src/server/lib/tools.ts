@@ -128,7 +128,7 @@ export const allTools: Tool[] = [
   },
   {
     name: 'hunt_here',
-    description: 'MACRO: hunt everything beatable at your CURRENT POI in one bounded code loop — scan, pick a target, attack, close range, kill it, loot the wreck, repeat. Skips empire NPCs and police, skips anything tougher than your hull allows, and breaks off if your hull drops below the floor. Use this instead of attack/advance/loot by hand. Returns kills, loot and why it stopped.',
+    description: 'MACRO: hunt everything beatable at your CURRENT POI in one bounded code loop — scan, pick a target, attack, close range, kill it, loot the wreck, repeat. Skips empire NPCs and police, skips anything your guns cannot kill quickly, and breaks off if your hull drops below the floor. Use this instead of attack/advance/loot by hand. Returns kills, loot and why it stopped.',
     parameters: Type.Object({
       poi: Type.Optional(Type.String({ description: 'POI id to hunt at (e.g. "krynn_asteroid_belt"). The macro undocks and travels there first. Omit to hunt where you already are.' })),
       max_kills: Type.Optional(Type.Number({ description: 'Stop after this many kills (default 3, max 8)' })),
@@ -4013,8 +4013,10 @@ async function executeMacroTool(name: string, args: Record<string, unknown>, ctx
  * same class of problem for travel — one call the model cannot half-execute.
  *
  * Safety is in code, not in the prompt: empire NPCs and police are never
- * targeted, anything whose hull exceeds `MAX_TARGET_HULL_RATIO` of our own is
- * skipped, and the loop breaks off the moment hull falls under the floor.
+ * targeted, a target our guns cannot kill quickly is skipped (see
+ * `targetVerdict` — a hull-only rule refused 60-hull grazers to a 90-damage
+ * railgun on 2026-09-11), and the loop breaks off the moment hull falls under
+ * the floor.
  */
 /**
  * Longest route goto_system will fly in one macro. This is a STRANDING GUARD,
@@ -4191,9 +4193,103 @@ export function isMissionQuarry(
   return quarry.has(creatureKey(t.name)) || quarry.has(creatureKey(t.species))
 }
 
-const MAX_TARGET_HULL_RATIO = 0.5   // never pick a target tougher than half our hull
+const MAX_TARGET_HULL_RATIO = 0.5   // a target under half our hull is always fair game (the original rule)
+const FAST_KILL_TICKS = 5           // ...and so is anything our guns drop inside ~5 combat ticks
+const GRAZER_KILL_TICKS = 20        // grazers never fight back: only the 30-tick stalemate rule limits them
+const GRAZER_HULL_RATIO_BLIND = 1.0 // grazer, guns unreadable: engage up to hull parity
 const HUNT_TICK_MS = 10_000         // the game's combat tick
 const HUNT_BATTLE_MAX_TICKS = 45    // ~7.5 min per fight before we disengage
+
+/**
+ * Share of a weapon's listed damage that lands on an ARMOURED target, by damage
+ * type — creatures "have hull and armor but no shields" (docs/wildlife), and
+ * docs/combat rates kinetic and void "Reduced 50%" against armour, EM at 50%
+ * base damage, explosive at 1.5x, thermal and energy close to full. The target's
+ * own armour value is unknown at scan time, so these stay conservative.
+ */
+const DAMAGE_VS_ARMOR: Record<string, number> = { kinetic: 0.5, void: 0.5, em: 0.5, energy: 0.9, thermal: 1, explosive: 1.5 }
+
+/**
+ * Effective damage per combat tick from the weapons that can actually fire:
+ * sum of `damage x DAMAGE_VS_ARMOR[type] / cooldown` over every weapon with a
+ * loaded magazine (a dry gun contributes nothing; an energy weapon with no
+ * ammo fields always fires). Reads the lib's structured module list
+ * (`stats.{damage,damage_type,cooldown}`, `current_ammo`) and falls back to the
+ * http text table ("dmg:90 type:kinetic cd:3 ammo:7/7"). Null when no weapon
+ * with a damage figure could be found — callers then fall back to hull ratios.
+ */
+export function weaponDps(modules: unknown, text?: string): number | null {
+  let dps = 0
+  let weapons = 0
+  const share = (type: unknown) => DAMAGE_VS_ARMOR[String(type ?? '').toLowerCase()] ?? 0.75
+  if (Array.isArray(modules)) {
+    for (const m of modules) {
+      if (!m || typeof m !== 'object') continue
+      const mod = m as Record<string, unknown>
+      const stats = (mod.stats && typeof mod.stats === 'object' ? mod.stats : mod) as Record<string, unknown>
+      const dmg = Number(stats.damage ?? stats.dmg ?? mod.damage ?? mod.dmg)
+      if (!Number.isFinite(dmg) || dmg <= 0) continue
+      const isWeapon = mod.type === 'weapon' || mod.slot === 'weapon' || mod.ammo !== undefined || mod.current_ammo !== undefined
+      if (!isWeapon) continue
+      weapons++
+      const cd = Math.max(Number(stats.cooldown ?? stats.cd ?? mod.cooldown) || 1, 1)
+      const perTick = (dmg * share(stats.damage_type ?? stats.type ?? mod.damage_type)) / cd
+      const cur = mod.current_ammo
+      if (typeof cur === 'number') { if (cur > 0) dps += perTick; continue }
+      const s = typeof mod.ammo === 'string' ? mod.ammo.match(/^\s*(\d+)\s*\/\s*(\d+)/) : null
+      if (s) { if (Number(s[1]) > 0) dps += perTick; continue }
+      dps += perTick
+    }
+  }
+  if (weapons === 0 && text) {
+    for (const m of text.matchAll(/dmg:(\d+)(?:\s+type:(\w+))?(?:\s+cd:(\d+))?(?:[^\n]*?ammo:(\d+)\/(\d+))?/g)) {
+      weapons++
+      if (m[4] !== undefined && Number(m[4]) <= 0) continue
+      dps += (Number(m[1]) * share(m[2])) / Math.max(Number(m[3]) || 1, 1)
+    }
+  }
+  return weapons > 0 ? dps : null
+}
+
+/**
+ * Why a scanned target is too tough for us — or null when it is fair game.
+ *
+ * The original rule was hull-only: never engage anything over half our own
+ * hull. Written for a 1,785-hull Devastator it let everything through; in a
+ * 110-hull Shard it capped prey at 55 and Morg'Thar spent 2026-09-11 evening
+ * crossing Frostfeld, HD 20794 and Bharani refusing every 60-hull Belt-Grazer
+ * as "too tough" — with a 90-damage railgun that kills one in a single volley,
+ * on a Grazer Cull contract that pays per head. Four systems, zero shots.
+ *
+ * Hull is a proxy for how hard the target hits back; it says nothing about how
+ * fast it dies, which is the number that actually bounds our exposure. So:
+ *   1. under half our hull — engage (the original rule, kept);
+ *   2. our guns drop it inside FAST_KILL_TICKS — engage, whatever its hull; a
+ *      fight that short cannot take us far, and the hull floor still breaks off;
+ *   3. a GRAZER (get_nearby's own role) dies inside GRAZER_KILL_TICKS — engage:
+ *      docs/wildlife says grazers "never start anything" and "will not fight
+ *      back effectively"; the only risk is the 30-tick stalemate draw;
+ *   4. guns unreadable: a grazer is engaged up to hull parity, anything else
+ *      falls back to rule 1.
+ * Everything else is refused with the arithmetic in the reason.
+ */
+export function targetVerdict(
+  t: { hull: number | null; role?: string | null; kind: string },
+  ourHull: number,
+  dps: number | null,
+): string | null {
+  if (t.hull === null) return null
+  if (!(ourHull > 0) || t.hull <= ourHull * MAX_TARGET_HULL_RATIO) return null
+  const grazer = t.kind === 'creature' && (t.role ?? '') === 'grazer'
+  if (dps !== null && dps > 0) {
+    const ticks = Math.ceil(t.hull / dps)
+    if (ticks <= FAST_KILL_TICKS) return null
+    if (grazer && ticks <= GRAZER_KILL_TICKS) return null
+    return `~${ticks} ticks to kill at ${dps.toFixed(0)} effective damage/tick, and over half your ${ourHull} hull`
+  }
+  if (grazer && t.hull <= ourHull * GRAZER_HULL_RATIO_BLIND) return null
+  return `over half your ${ourHull} hull, and your weapon damage could not be read`
+}
 
 async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
   const conn = ctx.connection
@@ -4250,12 +4346,15 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
   // What this agent is actually PAID to kill. Read once per macro — a free
   // query — because loot alone does not cover ammo (see missionQuarry).
   // DRY-GUN GUARD. Refuse to go hunting at under half armament — see
-  // weaponAmmoState for the death this exists to prevent.
+  // weaponAmmoState for the death this exists to prevent. The same read gives
+  // targetVerdict our effective damage per tick.
+  let dps: number | null = null
   try {
     const sr = await conn.execute('get_ship')
     if (!sr.error) {
       const sd = (sr.structuredContent ?? sr.result) as Record<string, unknown> | undefined
       const mods = (sd?.modules ?? (sd?.ship as Record<string, unknown> | undefined)?.modules) as unknown
+      dps = weaponDps(mods, typeof sr.result === 'string' ? sr.result : undefined)
       const ammo = weaponAmmoState(mods)
       if (tooDryToHunt(ammo)) {
         return (
@@ -4417,14 +4516,39 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
 
     const ship = await readShip()
     const ourHull = ship.hull ?? 0
+    // "belt_grazer" must match "Belt-Grazer": compare with punctuation stripped.
+    const bare = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
+    const unmatched: typeof targets = []
     const beatable = targets.filter((t) => {
       if (t.kind === 'npc') { skipped.push(`${t.name} (empire NPC — never attacked)`); return false }
-      if (wantSpecies && !`${t.species} ${t.name}`.toLowerCase().includes(wantSpecies)) return false
-      if (t.hull !== null && ourHull > 0 && t.hull > ourHull * MAX_TARGET_HULL_RATIO) {
-        skipped.push(`${t.name} (hull ${t.hull} — too tough)`); return false
-      }
+      if (wantSpecies && !`${bare(t.species)} ${bare(t.name)}`.includes(bare(wantSpecies))) { unmatched.push(t); return false }
+      const why = targetVerdict(t, ourHull, dps)
+      if (why) { skipped.push(`${t.name} (hull ${t.hull} — too tough: ${why})`); return false }
       return true
     })
+    if (beatable.length === 0 && unmatched.length > 0) {
+      // The species argument hid everything at this POI. If some of what is here
+      // is PAID quarry, the argument was merely misspelt — hunt the quarry and say
+      // so. Otherwise NAME what is present: the old "nothing beatable here ()"
+      // named nothing, and on 2026-09-11 it sent Morg'Thar away from a stocked
+      // 82 Eridani drift on a five-jump trip to Trappist-1 with the report that
+      // the POI was "worked out".
+      const paid = unmatched.filter((t) => isMissionQuarry(t, quarry) && !targetVerdict(t, ourHull, dps))
+      if (paid.length > 0) {
+        const names = [...new Set(paid.map((t) => t.name))].join(', ')
+        const note = `species="${wantSpecies}" matched nothing here; hunting the paid quarry that is present instead (${names}).`
+        narrate(note, true)
+        prelude.push(note)
+        beatable.push(...paid)
+      } else {
+        const present = [...new Set(unmatched.map((t) => `${t.name}${t.hull !== null ? ` (hull ${t.hull})` : ''}`))].slice(0, 5).join(', ')
+        stopReason = `no "${wantSpecies}" at this POI — present: ${present}. ` +
+          (quarry.size > 0
+            ? `You are paid for: ${[...quarry].join(', ')}; none of it is here.`
+            : 'Pass a different species, or omit it to hunt anything beatable.')
+        break
+      }
+    }
     if (beatable.length === 0) {
       stopReason = targets.length === 0
         ? 'nothing at this POI'
@@ -4606,10 +4730,13 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
       for (const w of mine.slice(0, 4)) {
         const wid = String(w.id ?? w.wreck_id ?? '')
         if (!wid) continue
-        let lt = await macroAction(ctx, 'loot', { id: wid }, 2)
-        // Two signatures are documented for loot; try the other key before giving up.
+        // The live server accepts `wreck_id` ("Valid parameters: wreck_id, item_id,
+        // module_id, quantity" — every `id` attempt on 2026-09-11 bounced with
+        // invalid_payload before the retry landed), so lead with it and keep `id`
+        // as the fallback for the other documented signature.
+        let lt = await macroAction(ctx, 'loot', { wreck_id: wid }, 2)
         if (!lt.ok && /invalid_payload|unknown parameter/i.test(`${lt.errorCode} ${lt.errorMessage ?? ''}`)) {
-          lt = await macroAction(ctx, 'loot', { wreck_id: wid }, 2)
+          lt = await macroAction(ctx, 'loot', { id: wid }, 2)
         }
         if (lt.ok) {
           const cargo = Array.isArray(w.cargo) ? w.cargo as Array<Record<string, unknown>> : []
