@@ -324,6 +324,12 @@ export function codexGet(kind: string, id: string): Record<string, unknown> | nu
   return { ...entry, ...extra }
 }
 
+/** Catalog base value of an item, or null when the catalog has not loaded or lacks it. */
+export function itemBaseValue(itemId: string): number | null {
+  const v = itemsById.get(itemId)?.base_value
+  return typeof v === 'number' && v > 0 ? v : null
+}
+
 /** Price-sanity advisory for sell listings and buys (Phase 2). Returns null when price is unremarkable. */
 export function priceAdvisory(itemId: string, priceEach: number, side: 'sell' | 'buy' = 'sell'): string | null {
   const it = itemsById.get(itemId)

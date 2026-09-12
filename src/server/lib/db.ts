@@ -2718,6 +2718,16 @@ export function getRecentPurchasedQuantity(profileId: string, itemId: string, wi
   return row?.q ?? 0
 }
 
+/** The cheapest ask the fleet has recorded for an item at ANY station within `days` — the
+ *  reference a market buy is sanity-checked against. Null when nothing recent is known. */
+export function cheapestRecentAsk(itemId: string, days = 7): number | null {
+  const row = getDb().query(
+    `SELECT MIN(best_sell) AS ask FROM fleet_intel_market
+     WHERE item_id = ? AND best_sell > 0 AND updated_at >= datetime('now', ?)`,
+  ).get(itemId, `-${Math.max(1, Math.floor(days))} days`) as { ask: number | null } | null
+  return row?.ask ?? null
+}
+
 export function realisableValue(itemId: string, heldQty: number): RealisableValue {
   const held = Math.max(0, Math.floor(heldQty))
   const none: RealisableValue = {

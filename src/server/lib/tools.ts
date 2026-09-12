@@ -4,7 +4,7 @@ import type { GameConnection } from './connections/interface'
 import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
 import { scrubLiveState, scrubNotice, dedupeTodoAgainstMemory, ageCompletedTodoLines, scrubMemoryTaskLines, hygieneNotice, resetNoteHygiene } from './note-hygiene'
 import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor, refuseAbandon, noteAbandon, knownTitle, isRefusedMissionTitle } from './mission-guard'
-import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, isStorageDirty, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS, systemHasStation } from './db'
+import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, isStorageDirty, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS, systemHasStation, cheapestRecentAsk } from './db'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
 import { captureFactionFromCommand } from './faction-ledger'
@@ -12,7 +12,7 @@ import { agentManager } from './agent-manager'
 import { invalidateBriefingCache, collectTargets, hopsFrom } from './briefing'
 import { resolveAgentRole } from './role'
 import { safeTruncate } from './text-safe'
-import { codexLookup, codexChain, priceAdvisory, codexGet } from './catalog'
+import { codexLookup, codexChain, priceAdvisory, codexGet, itemBaseValue } from './catalog'
 
 // Extended query result cache: keyed by "profileId:command:argsJSON"
 const queryCache = new Map<string, { result: string; timestamp: number }>()
@@ -1059,6 +1059,35 @@ function checkCraftInputs(ctx: ToolContext, deep: string, commandArgs: Record<st
 /** Base values from the fuel guide (docs/guides/fuel): a cell is worth this at the station tank. */
 const FUEL_CELL_BASE: Record<string, number> = { fuel_cell: 43, premium_fuel_cell: 120, military_fuel_cell: 390 }
 const FUEL_CELL_PRICE_CAP_X = 5
+/** A market buy is a lowball trap when the ask is far above what the fleet has seen the item
+ *  sell for elsewhere this week (3x), or — with no fleet reference — absurdly above the
+ *  catalog base value (30x; titanium_alloy trades at 25x base everywhere, so base alone is
+ *  a weak yardstick). 2026-09-11: CyberSpock paid 2,632 each for 15 flex_polymer at Iron
+ *  Reach (fleet asks 158-160, base 27) and Juno paid 18,063 each for 6 energy_crystal
+ *  (fleet asks ~1,400); the fuel-cell cap above could not see either. */
+const PRICE_TRAP_X_FLEET = 3
+const PRICE_TRAP_X_BASE = 30
+export function priceTrapVerdict(itemId: string, ask: number, fleetAsk: number | null, baseValue: number | null): string | null {
+  if (!(ask > 0)) return null
+  if (fleetAsk !== null && fleetAsk > 0) {
+    if (ask > PRICE_TRAP_X_FLEET * fleetAsk && (baseValue === null || ask > 5 * baseValue)) {
+      return (
+        `BLOCKED: ${itemId} at ${ask.toLocaleString('en-US')}cr is a lowball trap — the fleet has seen it asked at ` +
+        `${fleetAsk.toLocaleString('en-US')}cr elsewhere this week (cap ${(PRICE_TRAP_X_FLEET * fleetAsk).toLocaleString('en-US')}cr). ` +
+        `Do not buy it here; buy where the ask is normal, create_buy_order, or tell the Admiral the price.`
+      )
+    }
+    return null
+  }
+  if (baseValue !== null && ask > PRICE_TRAP_X_BASE * baseValue) {
+    return (
+      `BLOCKED: ${itemId} at ${ask.toLocaleString('en-US')}cr is ${(ask / baseValue).toFixed(0)}x its catalog base value ` +
+      `(${baseValue}cr) and the fleet has no recent ask to compare — treat it as a lowball trap. Buy where the ask is normal, ` +
+      `create_buy_order, or tell the Admiral the price.`
+    )
+  }
+  return null
+}
 
 function checkBuyAsk(ctx: ToolContext, deep: string, commandArgs: Record<string, unknown> | undefined): string | null {
   if (deep !== 'buy' || getPreference('buy_ask_gate') === 'off') return null
@@ -1102,6 +1131,8 @@ function checkBuyAsk(ctx: ToolContext, deep: string, commandArgs: Record<string,
         `and you asked for ${qty}. Buy at most ${e.askQty} now; past the depth the fill walks up the book or fails.`
       )
     }
+    const trap = priceTrapVerdict(itemId, e.ask, cheapestRecentAsk(itemId), itemBaseValue(itemId))
+    if (trap) return `${trap} (view_market ${ageS}s ago)`
     return null
   }
   try {
@@ -1109,7 +1140,18 @@ function checkBuyAsk(ctx: ToolContext, deep: string, commandArgs: Record<string,
       `SELECT best_sell, best_sell_qty, updated_at FROM fleet_intel_market
        WHERE station_id = ? AND item_id = ? AND updated_at > datetime('now', '-30 minutes')`,
     ).get(station, itemId) as { best_sell: number | null; best_sell_qty: number | null; updated_at: string } | null
-    if (!row) return null
+    if (!row) {
+      // No board read here in the last 30 minutes: a market buy fills at whatever the ask
+      // is, and nothing above can check it. view_market is a free query — read first.
+      return (
+        `BLOCKED: no market read for ${station} in the last 30 minutes. Run view_market here first (free, no tick) ` +
+        `so the ask and its depth can be checked, then buy.`
+      )
+    }
+    if (row.best_sell !== null && row.best_sell > 0) {
+      const trap = priceTrapVerdict(itemId, row.best_sell, cheapestRecentAsk(itemId), itemBaseValue(itemId))
+      if (trap) return trap
+    }
     if (row.best_sell === null || row.best_sell <= 0 || row.best_sell_qty === 0) {
       return (
         `BLOCKED: the fleet's market record for ${station} (under 30 minutes old) shows NO ask for ${itemId} ` +
