@@ -32,12 +32,48 @@ async function runQuery(agentId: string, command: string, args?: Record<string, 
   return await agent.executeCommand(command, args, { silent: true }) as Record<string, unknown>
 }
 
+/**
+ * Any connected agent will do. `view_faction_storage` reads ANY station's vault
+ * when passed `station_id`, and that form works from deep space — only the
+ * no-argument form needs a dock, and this route no longer depends on it.
+ */
 function pickAgent(): string | null {
   const profiles = listProfiles()
   const connected = profiles.filter((p) => agentManager.getAgent(p.id)?.isConnected)
   if (connected.length === 0) return null
   const leader = connected.find((p) => p.name.includes(LEADER_NAME_HINT))
   return (leader ?? connected[0]).id
+}
+
+/**
+ * Stations worth asking about, from durable local records rather than from one
+ * live query. `view_faction_storage` with no argument is refused `not_docked`
+ * whenever the chosen agent is in space, and this route used to derive its
+ * whole station list from that call's hint — so a flying agent collapsed the
+ * page to a single bogus "current_station · locked" card reading "no lockbox",
+ * and it flipped back the moment a poll caught somebody docked. Reported
+ * 2026-09-12 as the Faction screen intermittently losing the War Citadel
+ * lockbox. Seeding from the DB makes the page independent of who is flying.
+ */
+function knownVaultStations(): string[] {
+  const out = new Set<string>()
+  try {
+    for (const r of getDb().query('SELECT DISTINCT station_id FROM faction_storage_inventory').all() as Array<{ station_id: string }>) {
+      if (r.station_id) out.add(r.station_id)
+    }
+  } catch { /* no rows yet */ }
+  try {
+    // `owned = 1` matters: the facilities table also records other factions'
+    // lockboxes, and probing those just produces a wall of "no storage facility
+    // here" cards for stations we never had anything at.
+    for (const r of getDb().query(
+      `SELECT DISTINCT station_id FROM fleet_intel_facilities
+        WHERE owned = 1 AND facility_type IN ('faction_lockbox','faction_warehouse')`
+    ).all() as Array<{ station_id: string }>) {
+      if (r.station_id) out.add(r.station_id)
+    }
+  } catch { /* no rows yet */ }
+  return [...out]
 }
 
 faction.get('/', async (c) => {
@@ -82,25 +118,50 @@ faction.get('/', async (c) => {
       }
     }
 
-    const homeRaw = await runQuery(agentId, 'view_faction_storage').catch((e) => ({ error: { message: String(e) } }))
-    // The hint (on success or error) names every station with faction goods:
-    // "22,086 items in faction storage at a, b, c". Harvest it either way.
-    const homeText = JSON.stringify(homeRaw)
-    const hintMatch = homeText.match(/([\d,]+) items in faction storage at ([a-z0-9_,\s]+)/i)
+    // Try the bare query for its hint only. It is refused `not_docked` whenever
+    // the agent is flying, which is most of the time for a mining fleet — so
+    // its failure must cost nothing.
     let hintedStations: string[] = []
     let hintedTotal: number | null = null
-    if (hintMatch) {
-      hintedTotal = Number(hintMatch[1].replace(/,/g, ''))
-      hintedStations = hintMatch[2].split(',').map((s) => s.trim()).filter(Boolean)
-      aggregateNote = `${hintMatch[1]} items ledgered across ${hintedStations.length} stations`
+    {
+      const homeRaw = await runQuery(agentId, 'view_faction_storage').catch((e) => ({ error: { message: String(e) } }))
+      // The hint (on success or error) names every station with faction goods:
+      // "22,086 items in faction storage at a, b, c". Harvest it either way.
+      const homeText = JSON.stringify(homeRaw)
+      const hintMatch = homeText.match(/([\d,]+) items in faction storage at ([a-z0-9_,\s]+)/i)
+      if (hintMatch) {
+        hintedTotal = Number(hintMatch[1].replace(/,/g, ''))
+        hintedStations = hintMatch[2].split(',').map((s) => s.trim()).filter(Boolean)
+        aggregateNote = `${hintMatch[1]} items ledgered across ${hintedStations.length} stations`
+      }
+      const home = homeRaw as Record<string, unknown>
+      const homeOk = (home.structuredContent ?? home.result) as Record<string, unknown> | undefined
+      // Only a station-shaped success is worth recording; a not_docked error is
+      // about the AGENT, not about any station.
+      if (homeOk && typeof homeOk === 'object' && Array.isArray(homeOk.items)) parseVault(home, 'current_station')
     }
-    parseVault(homeRaw as Record<string, unknown>, 'current_station')
 
-    for (const sid of hintedStations) {
-      if (stations.has(sid)) continue
-      const raw = await runQuery(agentId, 'view_faction_storage', { station_id: sid })
-        .catch((e) => ({ error: { message: String(e) } }))
-      parseVault(raw as Record<string, unknown>, sid)
+    // Ask each station BY ID — that form works from deep space — and do them
+    // together. Six sequential game round-trips were also why this page took
+    // so long to fill in.
+    const targets = [...new Set([...hintedStations, ...knownVaultStations()])].filter((sid) => !stations.has(sid))
+    const reads = await Promise.all(targets.map(async (sid) => ({
+      sid,
+      raw: await runQuery(agentId, 'view_faction_storage', { station_id: sid })
+        .catch((e) => ({ error: { message: String(e) } })) as Record<string, unknown>,
+    })))
+    for (const { sid, raw } of reads) parseVault(raw, sid)
+
+    // A station we could not read live still has a last-known picture in the
+    // DB. Showing that, labelled, beats showing "no lockbox" for a vault that
+    // demonstrably holds thousands of items.
+    for (const st of stations.values()) {
+      if (st.status === 'unlocked' || st.items.length > 0) continue
+      const rows = getFactionStorage(st.station_id)
+      if (rows.length === 0) continue
+      st.items = rows.map((r) => ({ item_id: r.item_id, name: r.item_name, quantity: r.quantity }))
+      st.status = 'unlocked'
+      st.message = `Live read failed; showing the last snapshot (${rows[0].updated_at} UTC, reported by ${rows[0].reported_by ?? 'unknown'}).`
     }
 
     const body = {
