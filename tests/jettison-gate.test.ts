@@ -1,96 +1,40 @@
 import { describe, expect, test } from 'bun:test'
-import { executeTool, type ToolContext } from '../src/server/lib/tools'
-import type { GameConnection } from '../src/server/lib/connections/types'
+import { jettisonItems, jettisonSiteFrom, jettisonVerdict } from '../src/server/lib/tools'
 
 /**
- * Jettison gate (2026-07-30). Four agents jettisoned sellable cargo in one
- * campaign on identical reasoning ("no local bid -> free the space"); written
- * doctrine failed every time, one incident triggered a full agent rebuild.
- * These tests pin the deterministic refusal so it cannot regress.
+ * Jettison was banned fleet-wide. Game patch 0.594.0 (2026-09-06) made ore dumped
+ * at its own deposit settle back into it, and Brian lifted the ban for exactly that
+ * case on 2026-09-11 ("lift the jettison ban for Ledger at the belt"). The rule is
+ * now the game's rule, enforced before the command leaves the harness: in space,
+ * at a POI, ore that POI's deposits contain — nothing else, nowhere else.
  */
+const belt = { poiId: 'silicon_flats_subra', docked: false, inTransit: false, deposits: ['silicon_ore', 'iron_ore', 'copper_ore', 'neodymium_ore'] }
+const iron = [{ item_id: 'iron_ore', quantity: 390 }]
 
-function makeCtx(): { ctx: ToolContext; reachedGame: () => boolean } {
-  let reached = false
-  const connection = {
-    execute: async () => { reached = true; return { ok: true } },
-    isConnected: () => true,
-    supportsNotifications: () => false,
-  } as unknown as GameConnection
-  return {
-    ctx: {
-      connection,
-      profileId: 'test-profile',
-      profileName: 'Test Agent',
-      log: () => {},
-      todo: '',
-      memory: '',
-    },
-    reachedGame: () => reached,
-  }
-}
-
-describe('jettison gate', () => {
-  test('blocks a bare jettison and never reaches the game', async () => {
-    const { ctx, reachedGame } = makeCtx()
-    const out = await executeTool('game', { command: 'jettison', item_id: 'aluminum_ore', quantity: 21 }, ctx)
-    expect(out).toContain('BLOCKED by Admiral doctrine')
-    expect(reachedGame()).toBe(false)
+describe('jettison verdict', () => {
+  test('filler ore dumped at the belt that holds it is allowed', () => {
+    expect(jettisonVerdict(iron, belt)).toBeNull()
+    expect(jettisonVerdict([{ item_id: 'iron_ore', quantity: 390 }, { item_id: 'copper_ore', quantity: 117 }], belt)).toBeNull()
   })
-
-  test('blocks the spacemolt_-prefixed and ship_-grouped variants', async () => {
-    for (const command of ['spacemolt_jettison', 'ship_jettison', 'spacemolt_ship_jettison']) {
-      const { ctx, reachedGame } = makeCtx()
-      const out = await executeTool('game', { command, item_id: 'vanadium_ore', quantity: 5 }, ctx)
-      expect(out).toContain('BLOCKED by Admiral doctrine')
-      expect(reachedGame()).toBe(false)
-    }
+  test('an ore this POI does not mine would be destroyed, so it is refused by name', () => {
+    const v = jettisonVerdict([{ item_id: 'creature_carapace', quantity: 6 }], belt)
+    expect(v).toContain('BLOCKED'); expect(v).toContain('does not mine creature_carapace'); expect(v).toContain('0.594.0')
   })
-
-  test('blocks the multi-item form and names every item in the refusal', async () => {
-    const { ctx } = makeCtx()
-    const out = await executeTool('game', {
-      command: 'jettison',
-      items: [
-        { item_id: 'aluminum_ore', quantity: 21 },
-        { item_id: 'vanadium_ore', quantity: 14 },
-      ],
-    }, ctx)
-    expect(out).toContain('aluminum_orex21')
-    expect(out).toContain('vanadium_orex14')
+  test('docked, in flight, at a POI with no deposits, or with an unknown position: refused', () => {
+    expect(jettisonVerdict(iron, { ...belt, docked: true })).toContain('deposit_items')
+    expect(jettisonVerdict(iron, { ...belt, inTransit: true })).toContain('in flight')
+    expect(jettisonVerdict(iron, { ...belt, deposits: [] })).toContain('no deposits')
+    expect(jettisonVerdict(iron, { ...belt, poiId: null })).toContain('position is unknown')
+    expect(jettisonVerdict(iron, null)).toContain('position is unknown')
   })
-
-  test('refusal names the three legitimate alternatives', async () => {
-    const { ctx } = makeCtx()
-    const out = await executeTool('game', { command: 'jettison', item_id: 'copper_ore', quantity: 7 }, ctx)
-    expect(out).toMatch(/deposit/i)
-    expect(out).toMatch(/gift/i)
-    expect(out).toMatch(/sell/i)
+  test('both documented argument shapes are read', () => {
+    expect(jettisonItems({ item_id: 'iron_ore', quantity: 3 })).toEqual([{ item_id: 'iron_ore', quantity: 3 }])
+    expect(jettisonItems({ items: [{ item_id: 'iron_ore', quantity: 3 }, { id: 'copper_ore' }] })).toEqual([{ item_id: 'iron_ore', quantity: 3 }, { item_id: 'copper_ore', quantity: null }])
+    expect(jettisonItems(undefined)).toEqual([])
   })
-
-  test('does not block unrelated commands', async () => {
-    const { ctx, reachedGame } = makeCtx()
-    const out = await executeTool('game', { command: 'get_cargo' }, ctx)
-    expect(out).not.toContain('BLOCKED by Admiral doctrine')
-    expect(reachedGame()).toBe(true)
-  })
-})
-
-describe('doctrine guards are shared across both command paths', () => {
-  test('checkDoctrineGuards blocks jettison and allows unrelated commands', async () => {
-    const { checkDoctrineGuards } = await import('../src/server/lib/tools')
-    expect(checkDoctrineGuards('jettison', { item_id: 'iron_ore', quantity: 3 }, 'p1'))
-      .toContain('BLOCKED by Admiral doctrine')
-    expect(checkDoctrineGuards('get_cargo', undefined, 'p1')).toBeNull()
-  })
-
-  test('checkDoctrineGuards does NOT block wildlife missions (ban lifted 2026-08-06)', async () => {
-    const { checkDoctrineGuards } = await import('../src/server/lib/tools')
-    // The wildlife/creature-hunt ban was deliberately removed: herds gather in
-    // RICH fields and thin out in mined-over ones, so the original "targets do
-    // not spawn" premise was wrong, and creature drops refine into exactly the
-    // lines the Devastator is short of (adamant_tooth -> mass drivers). The
-    // failure mode was method, not the feature, so the guidance moved to the
-    // HUNTING DOCTRINE directive block. This asserts the block stays gone.
-    expect(checkDoctrineGuards('accept_mission', { mission_id: 'cull_grazer_01' }, 'p1')).toBeNull()
+  test('the site is read from a get_status-shaped state', () => {
+    const site = jettisonSiteFrom({ location: { poi_id: 'x_belt', docked_at: null, in_transit: false, resources: [{ item_id: 'silicon_ore', remaining: 5 }] } })
+    expect(site).toEqual({ poiId: 'x_belt', docked: false, inTransit: false, deposits: ['silicon_ore'] })
+    expect(jettisonSiteFrom(null).poiId).toBeNull()
   })
 })

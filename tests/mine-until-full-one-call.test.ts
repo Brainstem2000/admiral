@@ -29,4 +29,17 @@ describe('mine_until_full: one call per hold', () => {
   test('a hull under half ends the call', async () => {
     const r = await run(); expect(r.hullMines).toBe(2); expect(r.hullText).toContain('hull 40/100'); expect(r.hullText).toContain('mine_until_full DONE')
   }, 60_000)
+  test('keep=silicon_ore dumps the filler back into the belt and fills the hold with silicon', async () => {
+    const r = await run()
+    expect(r.keepJettisoned.every((j: any) => j.item_id === 'iron_ore')).toBe(true)
+    expect(r.keepJettisoned.length).toBeGreaterThan(0)
+    expect(r.keepCargo).toEqual([{ item_id: 'silicon_ore', quantity: 12 }])
+    expect(r.keepText).toContain('mine_until_full DONE'); expect(r.keepText).toContain('full of silicon_ore'); expect(r.keepText).toContain('Jettisoned back into the deposit')
+  }, 60_000)
+  test('keep at a belt that holds no such deposit aborts before mining', async () => {
+    const r = await run(); expect(r.keepAbortMines).toBe(0); expect(r.keepAbortText).toContain('MACRO ABORT'); expect(r.keepAbortText).toContain('no silicon_ore deposit')
+  }, 60_000)
+  test('a dump cycle that adds no kept ore ends the call instead of dumping forever', async () => {
+    const r = await run(); expect(r.keepStallJettisoned).toBe(2); expect(r.keepStallText).toContain('not yielding it')
+  }, 60_000)
 })

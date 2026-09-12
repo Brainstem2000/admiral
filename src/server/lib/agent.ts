@@ -14,7 +14,7 @@ import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing
 import { fetchGameCommands, formatCommandList } from './schema'
 import { isCodeDefect } from './swallow'
 import { captureFactionFromCommand } from './faction-ledger'
-import { allTools, toolsForRole, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest, reputationLockedSystemIds } from './tools'
+import { allTools, toolsForRole, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest, reputationLockedSystemIds, jettisonSiteFrom } from './tools'
 import { directiveForbidsSystem } from './directive-rules'
 import { runAgentTurn, VOLATILE_STATE_HEADER, VOLATILE_STATE_END, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
@@ -966,7 +966,9 @@ export class Agent {
     // tooling could do what the agents were forbidden from doing. Deliberate
     // overrides stay possible via `override: true`, which is logged loudly.
     if (!options?.override) {
-      const refusal = checkDoctrineGuards(command, args, this.profileId)
+      let hereSite: ReturnType<typeof jettisonSiteFrom> | null = null
+      try { hereSite = jettisonSiteFrom(this.connection?.getLocalState?.() ?? null) } catch { hereSite = null }
+      const refusal = checkDoctrineGuards(command, args, this.profileId, undefined, hereSite)
       if (refusal) {
         this.log('tool_call', `manual: ${command}(${args ? JSON.stringify(args) : ''})`)
         this.log('tool_result', refusal)

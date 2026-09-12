@@ -18,7 +18,7 @@ bun run build          # build frontend + compile standalone `admiral` binary
 ```
 
 - Runtime is **Bun** (`bun:sqlite`, `bun build --compile`). Do not introduce Node-only APIs.
-- **Run the tests.** `bun test` — 750 across 88 files, all passing (≈9 min; several files wait on a rate-limited catalog fetch). (This line used
+- **Run the tests.** `bun test` — 751 across 88 files, all passing (≈9 min; several files wait on a rate-limited catalog fetch). (This line used
   to read "there is no automated test suite"; it was stale by every one of them.)
   Then `bun run build` must succeed and build **warning-free**, and boot the binary
   to exercise the relevant API/UI (see Verifying below).
@@ -166,6 +166,12 @@ src/shared/types.ts shared TS interfaces
   HD 147513. `fuelText()` now stores "n/max", `fuelFloorVerdict()` judges a bare number
   against the absolute 10-unit floor, and the repeat-to-proceed valve opens only toward a
   system with a known station. Covered by `tests/fuel-floor-gate.test.ts`.
+- **Jettison is allowed only where the game returns the ore: in space, at the POI whose deposit
+  holds it** (`jettisonVerdict`; Brian lifted the fleet-wide ban for that case on 2026-09-11 after
+  patch 0.594.0). Everywhere else dumped cargo is destroyed and the gate still refuses.
+  `mine_until_full(keep=<ore>)` is the sanctioned use: it dumps the belt's other ores as the hold
+  fills and keeps mining the ore that pays. Covered by `tests/jettison-gate.test.ts` and
+  `tests/mine-until-full-one-call.test.ts`.
 - **Cron schedules** are validated on create (`validateCronExpression`) — reject
   malformed expressions rather than storing ones that silently never fire.
 - **Tables are pruned** periodically (`pruneOldData` in `index.ts`): logs, financial
@@ -206,7 +212,7 @@ future session must not re-derive or get wrong:
 
 ## Verifying a change
 
-1. `bun test` (750 must pass), then `bun scripts/typecheck.ts` (must print OK —
+1. `bun test` (751 must pass), then `bun scripts/typecheck.ts` (must print OK —
    it fails on the crash class and tolerates the Bun-global noise), then
    `bun run build` (must succeed, and warning-free).
 2. `./admiral`, then hit the relevant endpoint(s) under `http://127.0.0.1:3031/api/...`
@@ -221,6 +227,15 @@ The game exposes far more knowledge than the Admiral DB holds. Every source belo
 at least once, answered in minutes a question that agents were burning hours on. Check
 them **before** dispatching a fleet-wide sweep, guessing a recipe, or declaring something
 unobtainable.
+
+**0. The changelog — `https://game.spacemolt.com/api/changelog` (paged JSON; `/changelog.md` is a stub).**
+Read it before touching mining, fuel, mission or combat doctrine — the game moves under us. The
+2026-09-06 patches alone changed four things this fleet's directives assumed: `supported_power` is
+now computed for the pilot's own array and `get_poi` returns `too_sparse` / `lock_minimum_stock`
+(filter on those, do not rank on `remaining`); extraction FILTER modules remove an ore from the
+draw and raise yield; the Mining skill's rare-ore bias now scales past level 20 (a mixed belt pulls
+thinner, rarer veins); and ore JETTISONED at its own deposit settles back into it. Last full read:
+v0.599.5 on 2026-09-11.
 
 **1. The in-game forums — free, and other players have already solved your problem.**
 `forum_list` and `forum_get_thread` cost **no game tick**. 613 threads were searchable in

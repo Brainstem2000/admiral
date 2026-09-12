@@ -116,6 +116,7 @@ export const allTools: Tool[] = [
     parameters: Type.Object({
       max_mines: Type.Optional(Type.Number({ description: 'Optional cap on mine actions; omit to fill the hold in one call' })),
       stop_at_pct: Type.Optional(Type.Number({ description: 'Stop when cargo reaches this % full (default 100)' })),
+      keep: Type.Optional(Type.String({ description: 'Fill the hold with THIS ore only (item id; comma-separated for several). Each time the hold fills, every other ore that this POI\'s deposits contain is jettisoned back into the deposit (it settles back in, nothing is lost) and mining continues, until the hold holds only the kept ore or the deposit stops yielding it.' })),
     }),
   },
   {
@@ -1612,6 +1613,58 @@ export function fuelFloorVerdict(i: {
   }
 }
 
+/** Where a ship is standing, as far as jettison is concerned. */
+export interface JettisonSite { poiId: string | null; docked: boolean; inTransit: boolean; deposits: string[] }
+
+/** Read the jettison site from a get_status-shaped state: `location.poi_id`,
+ *  `docked_at`, `in_transit` and the per-POI `location.resources[]` deposit list. */
+export function jettisonSiteFrom(gs: Record<string, unknown> | null | undefined): JettisonSite {
+  const loc = (gs?.location ?? null) as Record<string, unknown> | null
+  const res = Array.isArray(loc?.resources) ? loc!.resources as Array<Record<string, unknown>> : []
+  return {
+    poiId: typeof loc?.poi_id === 'string' && loc.poi_id ? String(loc.poi_id) : null,
+    docked: Boolean(loc?.docked_at),
+    inTransit: loc?.in_transit === true,
+    deposits: res.map((r) => String(r?.item_id ?? r?.resource_id ?? '')).filter(Boolean),
+  }
+}
+
+/** The items a jettison call names, in either documented shape. */
+export function jettisonItems(args: Record<string, unknown> | undefined): Array<{ item_id: string; quantity: number | null }> {
+  if (Array.isArray(args?.items)) {
+    return (args!.items as Array<Record<string, unknown>>)
+      .map((i) => ({ item_id: String(i?.item_id ?? i?.id ?? ''), quantity: Number.isFinite(Number(i?.quantity)) ? Number(i!.quantity) : null }))
+      .filter((i) => i.item_id)
+  }
+  const one = String(args?.item_id ?? args?.id ?? '')
+  return one ? [{ item_id: one, quantity: Number.isFinite(Number(args?.quantity)) ? Number(args!.quantity) : null }] : []
+}
+
+/**
+ * Jettison used to be banned fleet-wide (four agents, one identical
+ * rationalization, one full rebuild). Game patch 0.594.0 (2026-09-06) changed
+ * what dumping does: ore that matches a deposit at the POI you are standing at
+ * settles back into that deposit; everything else — cargo the POI does not
+ * mine, anything dumped mid-flight — is still destroyed. Brian lifted the ban
+ * on 2026-09-11 for exactly that case, so a miner can dump filler at the belt
+ * and keep filling the hold with the ore that pays.
+ *
+ * So the rule is now the game's own rule, checked here: allowed only in space,
+ * at a POI, for ore that POI's deposits contain. Null means allowed.
+ */
+export function jettisonVerdict(items: Array<{ item_id: string; quantity: number | null }>, site: JettisonSite | null | undefined): string | null {
+  const named = items.length ? items.map((i) => `${i.item_id}${i.quantity ? 'x' + i.quantity : ''}`).join(', ') : 'cargo'
+  const head = `BLOCKED by Admiral doctrine: jettison (attempted: ${named}) — `
+  const tail = ' Ore only settles back into a deposit when you dump it IN SPACE at the POI that holds that deposit (game patch 0.594.0); anywhere else it is destroyed. Deposit it at a station, or sell it where it bids.'
+  if (!site || !site.poiId) return head + 'your position is unknown, so the harness cannot tell whether this cargo would settle back into a deposit.' + tail
+  if (site.docked) return head + 'you are docked; use deposit_items into storage instead (storage is free).' + tail
+  if (site.inTransit) return head + 'you are in flight, and cargo dumped mid-flight is destroyed.' + tail
+  if (site.deposits.length === 0) return head + `${site.poiId} has no deposits, so nothing dumped here settles back.` + tail
+  const lost = items.filter((i) => !site.deposits.includes(i.item_id)).map((i) => i.item_id)
+  if (items.length === 0 || lost.length) return head + `${site.poiId} does not mine ${lost.join(', ') || 'that'} (deposits here: ${site.deposits.join(', ')}), so it would be destroyed.` + tail
+  return null
+}
+
 export function checkDoctrineGuards(
   command: string,
   commandArgs: Record<string, unknown> | undefined,
@@ -1619,6 +1672,8 @@ export function checkDoctrineGuards(
   /** Where the caller believes the agent is (location.system_id). Falls back to
    *  what the tool layer last observed; unknown means location-scoped gates stand down. */
   currentSystemId?: string | null,
+  /** Where the ship stands (poi, docked, in transit, deposits) — the jettison rule needs it. */
+  here?: JettisonSite | null,
 ): string | null {
   // Wind-down: the operator is standing this agent down. Everything already
   // accepted stays workable — only NEW obligations are refused, because the
@@ -1754,17 +1809,8 @@ export function checkDoctrineGuards(
       if (!(abandonTitle && isRefusedMissionTitle(abandonTitle))) noteAbandon(profileId)
     }
     if ((bare === 'jettison' || bare.endsWith('_jettison')) && getPreference('jettison_gate') !== 'off') {
-      const items = Array.isArray(commandArgs?.items)
-        ? (commandArgs.items as Array<Record<string, unknown>>)
-            .map(i => `${i.item_id ?? i.id ?? '?'}x${i.quantity ?? '?'}`).join(', ')
-        : `${commandArgs?.item_id ?? commandArgs?.id ?? 'cargo'}${commandArgs?.quantity ? 'x' + commandArgs.quantity : ''}`
-      return (
-        `BLOCKED by Admiral doctrine: jettison is disabled fleet-wide (attempted: ${items}). ` +
-        `Nothing with a bid is worthless, and the fleet decides what is scrap — not you. ` +
-        `Instead: deposit the cargo at your next station (storage is free), gift it to an agent ` +
-        `who needs it, or sell it at a hub that actually bids. If your hold is full and you are ` +
-        `far from a station, finish the run and deposit on arrival.`
-      )
+      const verdict = jettisonVerdict(jettisonItems(commandArgs), here)
+      if (verdict) return verdict
     }
   }
 
@@ -2611,7 +2657,9 @@ export async function executeTool(
   // Admiral doctrine guards — shared with the manual/API path so a rule cannot
   // be enforced on one entry point and silently skipped on the other.
   {
-    const refusal = checkDoctrineGuards(command, commandArgs, ctx.profileId, currentLocation(ctx).systemId)
+    let hereSite: JettisonSite | null = null
+    try { hereSite = jettisonSiteFrom(ctx.connection.getLocalState?.() ?? null) } catch { hereSite = null }
+    const refusal = checkDoctrineGuards(command, commandArgs, ctx.profileId, currentLocation(ctx).systemId, hereSite)
     if (refusal) {
       ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
       ctx.log('tool_result', refusal)
@@ -3711,6 +3759,7 @@ async function macroReadState(conn: GameConnection): Promise<{
   credits: number | null; cargoUsed: number | null; cargoCapacity: number | null
   systemId: string | null; docked: boolean; cargo: Array<{ item_id: string; quantity: number }>
   hull: number | null; maxHull: number | null
+  poiId: string | null; inTransit: boolean; depositItems: string[]
 }> {
   let gs: Record<string, unknown> | null = conn?.getLocalState?.() ?? null
   if (!gs) {
@@ -3734,11 +3783,13 @@ async function macroReadState(conn: GameConnection): Promise<{
   }
   const systemId = (location.system_id ?? player.current_system ?? null) as string | null
   const docked = Boolean(location.docked_at) || player.docked === true || player.is_docked === true
+  const site = jettisonSiteFrom(gs)
   return {
     credits: typeof player.credits === 'number' ? player.credits : null,
     cargoUsed: used, cargoCapacity: cap, systemId: systemId ? String(systemId) : null, docked, cargo,
     hull: typeof ship.hull === 'number' ? ship.hull : null,
     maxHull: typeof ship.max_hull === 'number' ? ship.max_hull : null,
+    poiId: site.poiId, inTransit: site.inTransit, depositItems: site.deposits,
   }
 }
 
@@ -4798,6 +4849,7 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
 
 /** Runaway guard for a one-call-per-hold mining macro (see macroMineUntilFull). */
 const MINE_MACRO_DEADLINE_MS = 3 * 60 * 60_000
+const KEEP_MAX_DUMPS = 8   // mine_until_full(keep=…): dump cycles per call before it hands the belt back
 
 async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContext, reason?: string): Promise<string> {
   const conn = ctx.connection
@@ -4810,21 +4862,62 @@ async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContex
   // a hull falling under half is treated as an attack and ends the call.
   const explicitCap = Number(args.max_mines) > 0 ? Math.floor(Number(args.max_mines)) : Infinity
   const stopPct = Math.min(Math.max(Number(args.stop_at_pct) || 100, 10), 100)
+  // KEEP (Brian, 2026-09-11): fill the hold with one ore. Game patch 0.594.0 made
+  // ore jettisoned at its own deposit settle back into it, so when the hold fills
+  // the macro dumps the OTHER ores this POI mines and keeps going, instead of
+  // sailing ten jumps to sell a hold that was 40% iron. Bounded by KEEP_MAX_DUMPS
+  // and by progress: a dump cycle that added no kept ore ends the call.
+  const keep = new Set(String(args.keep ?? '').toLowerCase().split(/[\s,]+/).filter(Boolean))
   const deadline = Date.now() + MINE_MACRO_DEADLINE_MS
   const start = await macroReadState(conn)
   if (start.cargoCapacity === null) return 'MACRO ABORT: could not read cargo capacity — run get_status and retry.'
+  if (keep.size > 0 && start.depositItems.length > 0 && ![...keep].some((k) => start.depositItems.includes(k))) {
+    return `MACRO ABORT: ${start.poiId ?? 'this POI'} has no ${[...keep].join('/')} deposit (deposits here: ${start.depositItems.join(', ')}). Move to a belt that holds it.`
+  }
+  const keptQty = (cargo: Array<{ item_id: string; quantity: number }>) => cargo.filter((c) => keep.has(c.item_id)).reduce((a, c) => a + c.quantity, 0)
 
   let mines = 0
   let noYieldStrikes = 0
   let stopReason = explicitCap === Infinity ? 'deadline (3h)' : 'max_mines'
   let lastUsed = start.cargoUsed ?? 0
+  const dumped: string[] = []
+  let dumpCycles = 0
+  let keptAtLastDump = keptQty(start.cargo)
+  let stallStrikes = 0   // fills that added no kept ore since the previous dump; two in a row = the deposit is not yielding it
 
   while (mines < explicitCap) {
     if (!conn.isConnected()) { stopReason = 'disconnected'; break }
     if (Date.now() > deadline) { stopReason = 'deadline (3h)'; break }
     const st = await macroReadState(conn)
     const used = st.cargoUsed ?? lastUsed
-    if (st.cargoCapacity && used >= (st.cargoCapacity * stopPct) / 100) { stopReason = used >= st.cargoCapacity ? 'full' : `reached ${stopPct}%`; break }
+    if (st.cargoCapacity && used >= (st.cargoCapacity * stopPct) / 100) {
+      if (keep.size === 0) { stopReason = used >= st.cargoCapacity ? 'full' : `reached ${stopPct}%`; break }
+      // The hold is full: dump what this deposit will take back, keep what pays.
+      const filler = st.cargo.filter((c) => c.quantity > 0 && !keep.has(c.item_id) && st.depositItems.includes(c.item_id))
+      const nowKept = keptQty(st.cargo)
+      if (filler.length === 0) { stopReason = `full of ${[...keep].join('/')}`; break }
+      // One fill that added no kept ore can be bad luck with a nearly full hold
+      // (the last pull was filler); two in a row means the vein is not yielding it.
+      stallStrikes = dumpCycles > 0 && nowKept <= keptAtLastDump ? stallStrikes + 1 : 0
+      if (stallStrikes >= 2) { stopReason = `full again with no more ${[...keep].join('/')} since the last dumps — the deposit is not yielding it`; break }
+      if (dumpCycles >= KEEP_MAX_DUMPS) { stopReason = `full; ${KEEP_MAX_DUMPS} dump cycles used`; break }
+      if (st.docked || st.inTransit || !st.poiId) { stopReason = 'full; cannot jettison here (docked, in flight, or position unknown)'; break }
+      let refused: string | null = null
+      for (const f of filler) {
+        const j = await macroAction(ctx, 'jettison', { item_id: f.item_id, quantity: f.quantity }, 2)
+        if (!j.ok) { refused = `jettison ${f.item_id} refused [${j.errorCode}] ${j.errorMessage ?? ''}`.trim(); break }
+        dumped.push(`${f.item_id} x${f.quantity}`)
+        await macroSleep(macroStepDelayMs(conn))
+      }
+      if (refused) { stopReason = `full; ${refused}`; break }
+      dumpCycles++
+      keptAtLastDump = nowKept
+      ctx.log('system', `mine_until_full: hold full — jettisoned ${filler.map((f) => `${f.item_id} x${f.quantity}`).join(', ')} back into the deposit (${nowKept} ${[...keep].join('/')} kept), mining on`)
+      narrate(`dumped filler back into the belt, ${nowKept} ${[...keep].join('/')} aboard`, true)
+      noYieldStrikes = 0
+      lastUsed = keptQty(st.cargo)
+      continue
+    }
     if (st.hull !== null && st.maxHull && st.hull < st.maxHull * 0.5) { stopReason = `hull ${st.hull}/${st.maxHull} — under half, leaving the belt to you`; break }
 
     const act = await macroAction(ctx,'mine', undefined)
@@ -4852,7 +4945,8 @@ async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContex
 
   const end = await macroReadState(conn)
   const minedUnits = (end.cargoUsed ?? lastUsed) - (start.cargoUsed ?? 0)
-  return mineStopMessage(mines, minedUnits, end.cargoUsed ?? lastUsed, end.cargoCapacity, stopReason, stopPct)
+  const dumpNote = dumped.length ? ` Jettisoned back into the deposit (${dumpCycles} dump cycle${dumpCycles === 1 ? '' : 's'}): ${dumped.join(', ')}; ${keptQty(end.cargo)} ${[...keep].join('/')} aboard.` : ''
+  return mineStopMessage(mines, minedUnits, end.cargoUsed ?? lastUsed, end.cargoCapacity, stopReason, stopPct) + dumpNote
 }
 
 /**
