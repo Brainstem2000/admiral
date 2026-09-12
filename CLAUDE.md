@@ -18,7 +18,7 @@ bun run build          # build frontend + compile standalone `admiral` binary
 ```
 
 - Runtime is **Bun** (`bun:sqlite`, `bun build --compile`). Do not introduce Node-only APIs.
-- **Run the tests.** `bun test` — 758 across 89 files, all passing (≈9 min; several files wait on a rate-limited catalog fetch). (This line used
+- **Run the tests.** `bun test` — 767 across 92 files, all passing (≈9 min; several files wait on a rate-limited catalog fetch). (This line used
   to read "there is no automated test suite"; it was stale by every one of them.)
   Then `bun run build` must succeed and build **warning-free**, and boot the binary
   to exercise the relevant API/UI (see Verifying below).
@@ -96,6 +96,18 @@ src/shared/types.ts shared TS interfaces
   response, the turn loop sees zero tool calls on round 0, scores the turn `idle`,
   and three of those trip the idle backoff, which parks the agent until a human
   nudges it. Covered by `tests/llm-abort-handling.test.ts`.
+- **A completed reply with real usage and no content is a no-op round, not a transport
+  failure.** `completeWithRetry` used to retry every empty reply five times; an agent told
+  to stand by ("one status_log and nothing else") got six hosted calls per idle turn
+  (CyberSpock, 2026-09-12 04:26 CT). It is handed back with a placeholder text block — a
+  content-less assistant message is rejected by the API on the next call — and the turn
+  loop scores it (idle → the backoff parks the agent, which is the intent). A reply with
+  no usage at all is still a broken call and keeps retrying. `tests/llm-empty-stop.test.ts`.
+- **A goto_system that never left leaves no destination commitment.** The gate records the
+  destination before the macro runs; an abort (typo'd system, no route, fuel rule) now
+  restores whatever commitment stood before, so the corrected order is not refused as churn
+  (Ledger Voss, 2026-09-12 04:35 CT: four refusals after one typo).
+  `tests/destination-gate-aborted-goto.test.ts`.
 - **A turn that attempts no game action and writes no state is `idle`, whichever
   round the prose came in.** The idle score used to fire only when round 0 had no
   tool call, so an agent that said "standing by", took the one "call the tool"
@@ -212,7 +224,7 @@ future session must not re-derive or get wrong:
 
 ## Verifying a change
 
-1. `bun test` (758 must pass), then `bun scripts/typecheck.ts` (must print OK —
+1. `bun test` (767 must pass), then `bun scripts/typecheck.ts` (must print OK —
    it fails on the crash class and tolerates the Bun-global noise), then
    `bun run build` (must succeed, and warning-free).
 2. `./admiral`, then hit the relevant endpoint(s) under `http://127.0.0.1:3031/api/...`
