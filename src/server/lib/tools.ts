@@ -3682,7 +3682,7 @@ async function macroReadState(conn: GameConnection): Promise<{
   systemId: string | null; docked: boolean; cargo: Array<{ item_id: string; quantity: number }>
   hull: number | null; maxHull: number | null
 }> {
-  let gs: Record<string, unknown> | null = conn.getLocalState?.() ?? null
+  let gs: Record<string, unknown> | null = conn?.getLocalState?.() ?? null
   if (!gs) {
     try {
       const resp = await conn.execute('get_status')
@@ -4314,7 +4314,7 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
     // hunt_here() at the arrival POI, got nothing, and jumped away. The macro
     // knows how to read get_system; the model should not have to.
     if (!wantPoi) {
-      const cur = String((conn.getLocalState?.()?.location as Record<string, unknown> | undefined)?.poi_id ?? '')
+      const cur = String((conn?.getLocalState?.()?.location as Record<string, unknown> | undefined)?.poi_id ?? '')
       const probe = await conn.execute('get_nearby')
       const here = probe.error ? [] : collectTargets(probe.structuredContent ?? probe.result)
       const shootable = here.filter((t) => t.kind !== 'npc')

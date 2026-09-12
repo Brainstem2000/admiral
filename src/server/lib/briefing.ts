@@ -252,7 +252,7 @@ export async function refreshBriefingData(profileId: string, conn: GameConnectio
   // Fast path: a connection-maintained local state cache (lib_v2) covers
   // status/cargo/missions with zero round-trips — only nearby/system/market
   // still need the wire.
-  const localState = conn.getLocalState?.() ?? null
+  const localState = conn?.getLocalState?.() ?? null
 
   let statusRaw: unknown, cargoRaw: unknown, nearbyRaw: unknown, systemRaw: unknown, missionsRaw: unknown
 
