@@ -14,7 +14,7 @@ import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing
 import { fetchGameCommands, formatCommandList } from './schema'
 import { isCodeDefect } from './swallow'
 import { captureFactionFromCommand } from './faction-ledger'
-import { allTools, toolsForRole, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest, reputationLockedSystemIds, jettisonSiteFrom } from './tools'
+import { allTools, toolsForRole, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest, reputationLockedSystemIds, jettisonSiteFrom, clearDestinationCommit } from './tools'
 import { directiveForbidsSystem } from './directive-rules'
 import { runAgentTurn, VOLATILE_STATE_HEADER, VOLATILE_STATE_END, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
@@ -497,6 +497,9 @@ export class Agent {
       // never interrupted (docs/plans/directive-queue.md).
       try {
         const changed = await advancePlanQueue({ profileId: this.profileId, connection: this.connection, log: this.log })
+        // A newly applied step is a new plan from the Admiral: the destination
+        // commitment from the old plan must not block its first move.
+        if (changed && (changed as { applied?: unknown }).applied) clearDestinationCommit(this.profileId)
         // The prompt refresh below carries the new directive, but a model mid-plan keeps
         // following its conversation (CyberSpock, 2026-09-10 21:19: step applied, he posted
         // "HALT: awaiting orders" instead). Announce the change in the turn itself, the way

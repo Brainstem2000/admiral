@@ -76,4 +76,15 @@ describe('destination gate — passing through stationless systems', () => {
     const out = await executeTool('game', { command: 'jump', args: { id: 'the_anvil' } }, ctxFor(pid, where))
     expect(out).toContain('BLOCKED by Admiral doctrine')
   })
+
+  test("an Admiral course change clears the commitment, so the redirected move is not refused", async () => {
+    const { executeTool, clearDestinationCommit } = await import('../src/server/lib/tools')
+    const pid = `p-admiral-${Math.random()}`
+    const where = { system: 'adhara' }
+    await executeTool('goto_system', { target_system: 'pipirima' }, ctxFor(pid, where))   // course set from adhara
+    where.system = 'pipirima'
+    clearDestinationCommit(pid)                                                            // nudge / directive PUT / plan step
+    const out = await executeTool('game', { command: 'jump', args: { id: 'adhara' } }, ctxFor(pid, where))
+    expect(out).not.toContain('BLOCKED by Admiral doctrine')                              // the same bounce is refused without the clear (test above)
+  })
 })

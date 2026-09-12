@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { listProfiles, getProfile, createProfile, updateProfile, deleteProfile, reorderProfiles, listSellQuotas, setSellQuota, clearSellQuota, getLatestWallets, getProfileLastStates, saveAgentSnapshot, getAgentSnapshot } from '../lib/db'
 import { buildSystemPrompt, buildVolatileState } from '../lib/agent'
 import { fetchGameCommands, formatCommandList } from '../lib/schema'
+import { clearDestinationCommit } from '../lib/tools'
 import { agentManager } from '../lib/agent-manager'
 import { resolveProfileModelRouting } from '../lib/model-routing'
 import type { Profile } from '../../shared/types'
@@ -162,7 +163,7 @@ profiles.put('/:id', async (c) => {
   if (body.password == null || body.password === '') delete body.password
   const profile = updateProfile(id, body)
   if (!profile) return c.json({ error: 'Not found' }, 404)
-  if (body.directive !== undefined) agentManager.restartTurn(id)
+  if (body.directive !== undefined) { clearDestinationCommit(id); agentManager.restartTurn(id) }
   return c.json(sanitizeProfile(profile))
 })
 
@@ -541,6 +542,7 @@ profiles.post('/:id/nudge', async (c) => {
   if (!message?.trim()) return c.json({ error: 'message is required' }, 400)
   const status = agentManager.getStatus(id)
   if (!status.running) return c.json({ error: 'Agent is not running' }, 400)
+  clearDestinationCommit(id)   // an Admiral-ordered course change is not churn
   agentManager.nudge(id, message.trim())
   return c.json({ ok: true })
 })

@@ -3901,6 +3901,18 @@ const WORK_COMMANDS = new Set([
   'accept_mission', 'complete_mission',
 ])
 
+/**
+ * An Admiral-ordered course change is not churn. Every nudge, directive update
+ * and plan-step application on the night of 2026-09-11 that redirected a ship
+ * ("turn back to Sol", "go to War Citadel") was refused by this gate for up to
+ * four minutes because the ship had "set course" for somewhere else moments
+ * before — on the Admiral's previous order. Callers that change the plan clear
+ * the commitment; the gate then judges the agent's own next move afresh.
+ */
+export function clearDestinationCommit(profileId: string): void {
+  lastDestinations.delete(profileId)
+}
+
 function noteDestinationWork(profileId: string, command: string): void {
   const bare = command.replace(/^spacemolt_/, '')
     .replace(/^(?:market|storage|social|intel|faction|faction_admin|salvage|catalog|ship|battle|transfer|facility|auth)_/, '')
