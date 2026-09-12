@@ -122,6 +122,10 @@ const OUTGOING: ReadonlySet<LedgerKind> = new Set<LedgerKind>([
   'mission_penalty', 'gift_sent', 'freight', 'ship_purchase', 'order_create',
 ])
 
+/** Kinds that are always money ARRIVING. A negative movement during one of
+ *  these is something else leaving (an unbooked fee, rent, a top-up). */
+const INCOMING: ReadonlySet<LedgerKind> = new Set<LedgerKind>(['mission_reward'])
+
 /** Payload markers proving the action actually completed, so an unpriced charge
  *  alongside one is that action's fee rather than a coincidence. */
 function actionConfirmed(ref: Record<string, unknown> | null | undefined): boolean {
@@ -140,6 +144,14 @@ export function classifyResidual(
   if (!a) return 'unattributed'                 // genuinely nothing to go on
   const kind = ACTION_KIND[a]
   if (!kind) return 'coincident'                // a query or unknown verb was running
+
+  // DIRECTION. A kind that is a cost by construction cannot explain money
+  // arriving, and a reward cannot explain money leaving — whatever the size.
+  // On 2026-09-12 01:19Z Morg'Thar's complete_mission carried a -90 residual
+  // (the station top-up from a goto_system dock a minute earlier, unbooked at
+  // the time) and was stamped `mission_reward`: a negative reward.
+  if (OUTGOING.has(kind) && amount > 0) return 'coincident'
+  if (INCOMING.has(kind) && amount < 0) return 'coincident'
 
   const declared = readDeclared(ref)
 

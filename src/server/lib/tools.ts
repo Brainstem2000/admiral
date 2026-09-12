@@ -5035,13 +5035,14 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
       // day (two strandings, one aborted hunt); as a dock side effect it cannot
       // be forgotten. Station fuel is 2-20cr/unit — topping up is always right,
       // and a dry tank gets surfaced to the agent instead of discovered later.
-      if (d.ok) {
-        await macroSleep(macroStepDelayMs(conn))
-        const rf = await macroAction(ctx,'refuel', undefined, 3)
-        if (rf.ok) dockNote += ' Tank auto-topped from the station pump.'
-        else if (rf.errorCode === 'station_fuel_empty') dockNote += ' NOTE: this station\'s fuel tank is EMPTY — plan your departure fuel from cargo cells or another stop.'
-        else if (rf.errorCode) dockNote += ` (auto-refuel skipped [${rf.errorCode}])`
-      }
+      //
+      // Through the SAME path a manual dock uses. This used to call refuel via
+      // macroAction, which books nothing in the ledger: the 90cr top-up at War
+      // Citadel on 2026-09-12 01:18Z left no fuel row, and the next command —
+      // complete_mission, a minute later — was booked as a -90 mission_reward
+      // when the wallet echo did not match the last anchored balance.
+      // autoTopOffAfterDock refuels, books the fuel row, logs it, and reports.
+      if (d.ok) dockNote += await autoTopOffAfterDock(ctx)
     } else {
       dockNote = ` Arrived but travel to ${dockPoi} failed [${t.errorCode}] ${t.errorMessage ?? ''}.`
     }

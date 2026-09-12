@@ -68,4 +68,17 @@ describe('auto top-off after a manual dock', () => {
     expect(off.calls).toEqual(['dock'])
     expect(off.note).not.toContain('AUTO TOP-OFF')
   }, 30_000)
+
+  test('a goto_system dock books its top-off like a manual dock, so the next command is not blamed for it', async () => {
+    const { macro } = await runHelper()
+    expect(macro.calls).toEqual(['dock', 'refuel', 'travel', 'dock', 'refuel'])
+    expect(macro.out).toContain('Docked at hex_wellspring')
+    expect(macro.out).toContain('AUTO TOP-OFF')
+    expect(macro.logs.some((l: string) => l.includes('Auto top-off after dock: +15 fuel for 90cr'))).toBe(true)
+    const kinds = macro.ledger.map((r: any) => [r.kind, r.amount_signed])
+    expect(kinds).toEqual([['fuel', -286], ['fuel', -90]])         // two top-offs, nothing else
+    expect(macro.ledger[1].source_command).toBe('refuel')
+    expect(macro.ledger[1].balance_after).toBe(macro.credits)     // 49,624 — the mission completion then reconciles to zero
+    expect(macro.ledger.some((r: any) => r.kind === 'mission_reward' || r.kind === 'coincident' || r.kind === 'unattributed')).toBe(false)
+  })
 })

@@ -45,6 +45,19 @@ describe('an ordinary charge is attributed to its action', () => {
   })
 })
 
+describe('direction: a cost cannot explain money arriving, a reward cannot explain money leaving', () => {
+  test("Morg'Thar's -90 during complete_mission is not a negative reward", () => {
+    // 2026-09-12 01:19Z: the unbooked station top-up from a goto_system dock a minute earlier.
+    expect(classifyResidual('complete_mission', -90, { player: { credits: 309506 } })).toBe('coincident')
+  })
+  test('a positive movement during complete_mission is still the reward', () => {
+    expect(classifyResidual('complete_mission', 1200, { player: { credits: 310706 } })).toBe('mission_reward')
+  })
+  test('money arriving during a refuel is not fuel, whatever its size', () => {
+    expect(classifyResidual('refuel', 90, { action: 'refuel', cost: 90 })).toBe('coincident')
+  })
+})
+
 describe('a movement that merely overlapped the action is not attributed to it', () => {
   test('the real 2,019,719 refuel row is NOT booked as fuel', () => {
     const kind = classifyResidual('refuel', 2_019_719, { action: 'refuel', cost: 48, market_cost: 32 })
