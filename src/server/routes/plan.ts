@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { agentManager } from '../lib/agent-manager'
 import { deletePlanStep, getPlanStep, getProfile, insertPlanStep, listPlanSteps, updatePlanStep } from '../lib/db'
-import { applyPlanStep, completePlanStep, describePlanQueue, directiveCapFor, rowToStep, type PlanEvalContext } from '../lib/plan-queue'
+import { applyPlanStep, completePlanStep, describePlanQueue, directiveCapFor, rowToStep, sanitizeCondition, type PlanEvalContext } from '../lib/plan-queue'
 import type { PlanCondition } from '../../shared/types'
 
 /**
@@ -28,10 +28,10 @@ function evalCtx(profileId: string): PlanEvalContext {
 }
 
 function cleanCondition(v: unknown): PlanCondition | null {
-  if (v === null || v === undefined) return null
-  if (typeof v !== 'object') return null
-  return v as PlanCondition
+  return sanitizeCondition(v).cond
 }
+/** Names of condition keys the caller sent in a shape the evaluator cannot use. */
+function rejectedConditionKeys(v: unknown): string[] { return sanitizeCondition(v).rejected }
 
 function validateDirective(profileId: string, directive: unknown): string | null {
   if (typeof directive !== 'string' || !directive.trim()) return 'directive is required'
@@ -59,6 +59,8 @@ plan.post('/:id/plan', async (c) => {
   let seq = existing.reduce((m, s) => Math.max(m, s.seq), 0)
   const created = []
   for (const s of stepsIn) {
+    const bad = [...rejectedConditionKeys(s.condition), ...rejectedConditionKeys(s.completion)]
+    if (bad.length) return c.json({ error: `condition field(s) in an unusable shape: ${bad.join(', ')} — result_matches is a substring, after is an ISO time, docked_at/in_system are ids` }, 400)
     const err = validateDirective(id, s.directive)
     if (err) return c.json({ error: err, step: s.title ?? created.length + 1 }, 400)
     seq += 1
@@ -83,6 +85,10 @@ plan.put('/:id/plan/:stepId', async (c) => {
   if ('directive' in body) { const err = validateDirective(id, body.directive); if (err) return c.json({ error: err }, 400); patch.directive = body.directive }
   if ('title' in body) patch.title = String(body.title ?? '')
   if ('todo' in body) patch.todo = typeof body.todo === 'string' && body.todo.trim() ? body.todo : null
+  {
+    const bad = [...('condition' in body ? rejectedConditionKeys(body.condition) : []), ...('completion' in body ? rejectedConditionKeys(body.completion) : [])]
+    if (bad.length) return c.json({ error: `condition field(s) in an unusable shape: ${bad.join(', ')}` }, 400)
+  }
   if ('condition' in body) patch.condition_json = JSON.stringify(cleanCondition(body.condition) ?? {})
   if ('completion' in body) patch.completion_json = cleanCondition(body.completion) ? JSON.stringify(cleanCondition(body.completion)) : null
   if ('restore_on_done' in body) patch.restore_on_done = body.restore_on_done ? 1 : 0

@@ -159,8 +159,9 @@ export async function unmetReason(cond: PlanCondition, step: { since_log_id: num
     if (have < c.qty) return `cargo ${c.item_id}: ${have} < ${c.qty}`
   }
   if (cond.result_matches) {
-    const hit = findToolResultSince(ctx.profileId, step.since_log_id, cond.result_matches)
-    if (!hit) return `no tool result containing "${cond.result_matches}" yet`
+    const needle = String(cond.result_matches)   // an object here 500'd every plan read on 2026-09-11
+    const hit = findToolResultSince(ctx.profileId, step.since_log_id, needle)
+    if (!hit) return `no tool result containing "${needle}" yet`
   }
   return null
 }
@@ -239,6 +240,35 @@ export async function advancePlanQueue(ctx: PlanEvalContext): Promise<{ complete
 }
 
 /** Panel helper: the queue with each pending step's current blocker spelled out. */
+/**
+ * Coerce a condition from the API into the documented shapes, dropping anything
+ * malformed. A `result_matches` written as an object (2026-09-11) reached the
+ * evaluator, which called `.toLowerCase()` on it, and every plan read for that
+ * profile answered HTTP 500 until the row was repaired by hand. Returns the
+ * usable condition (null when nothing remains) and the keys it rejected.
+ */
+export function sanitizeCondition(v: unknown): { cond: PlanCondition | null; rejected: string[] } {
+  if (v === null || v === undefined) return { cond: null, rejected: [] }
+  if (typeof v !== 'object' || Array.isArray(v)) return { cond: null, rejected: ['condition'] }
+  const raw = v as Record<string, unknown>
+  const out: Record<string, unknown> = {}
+  const rejected: string[] = []
+  const str = (k: string) => { if (typeof raw[k] === 'string' && raw[k]) out[k] = raw[k]; else if (raw[k] !== undefined) rejected.push(k) }
+  const num = (k: string) => { const n = Number(raw[k]); if (raw[k] !== undefined && Number.isFinite(n) && n >= 0) out[k] = n; else if (raw[k] !== undefined) rejected.push(k) }
+  if (raw.docked !== undefined) { if (typeof raw.docked === 'boolean') out.docked = raw.docked; else rejected.push('docked') }
+  if (raw.admiral_go !== undefined) { if (typeof raw.admiral_go === 'boolean') out.admiral_go = raw.admiral_go; else rejected.push('admiral_go') }
+  str('docked_at'); str('in_system'); str('result_matches'); num('wallet_at_least')
+  if (raw.after !== undefined) { if (typeof raw.after === 'string' && Number.isFinite(Date.parse(raw.after))) out.after = raw.after; else rejected.push('after') }
+  for (const k of ['storage_at_least', 'cargo_at_least'] as const) {
+    const o = raw[k] as Record<string, unknown> | undefined
+    if (o === undefined) continue
+    const ok = !!o && typeof o === 'object' && typeof o.item_id === 'string' && Number.isFinite(Number(o.qty)) && (k === 'cargo_at_least' || typeof o.station_id === 'string')
+    if (ok) out[k] = k === 'cargo_at_least' ? { item_id: o.item_id, qty: Number(o.qty) } : { station_id: o.station_id, item_id: o.item_id, qty: Number(o.qty) }
+    else rejected.push(k)
+  }
+  return { cond: Object.keys(out).length ? out as PlanCondition : null, rejected }
+}
+
 export async function describePlanQueue(ctx: PlanEvalContext): Promise<Array<PlanStep & { waiting_on: string | null }>> {
   const rows = listPlanSteps(ctx.profileId)
   const out: Array<PlanStep & { waiting_on: string | null }> = []
