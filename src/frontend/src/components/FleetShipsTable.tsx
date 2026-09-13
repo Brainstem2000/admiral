@@ -1,4 +1,5 @@
-import { Rocket } from 'lucide-react'
+import { useState } from 'react'
+import { Rocket, X } from 'lucide-react'
 import { Chip, DISPLAY, ageOf, parseTs } from './character/dossier-shared'
 
 /**
@@ -43,6 +44,19 @@ const TIER_COLOR: Record<number, string> = {
 }
 const tierColor = (tier: number) => TIER_COLOR[tier] ?? 'var(--muted-foreground)'
 
+/**
+ * The legend's buckets, which are also the filter's buckets: T2 and up are their
+ * own step, T0 and T1 share one, and hulls the catalog does not know are their
+ * own bucket so "4 not in catalog" is clickable too. `null` here means "no tier",
+ * which is why the filter state is a bucket key rather than a bare number.
+ */
+type TierKey = 5 | 4 | 3 | 2 | 1 | 'none'
+const TIER_KEYS: TierKey[] = [5, 4, 3, 2, 1, 'none']
+const tierKeyOf = (tier: number | null | undefined): TierKey =>
+  tier == null ? 'none' : tier >= 2 ? (Math.min(tier, 5) as TierKey) : 1
+const tierKeyLabel = (k: TierKey) => (k === 'none' ? '—' : k === 1 ? 'T0–1' : `T${k}`)
+const tierKeyColor = (k: TierKey) => (k === 'none' ? 'var(--muted-foreground)' : tierColor(k as number))
+
 const STALE_MS = 24 * 3600_000
 
 /** Profile names are "Owner - Role"; the listing keys on the owner half. */
@@ -60,13 +74,18 @@ const TH = 'text-left px-3 py-1.5 text-[10px] uppercase tracking-[1.5px] text-mu
 
 /** Fleet-wide hull roster: grouped by owner, the flying hull first and in green, higher tiers next. */
 export function FleetShipsTable({ ships }: { ships: FleetShip[] }) {
-  const rows = ships.slice().sort((a, b) =>
+  // Click a tier chip in the legend to see only that tier; click it again, or the
+  // clear button, to go back to the whole roster.
+  const [tierFilter, setTierFilter] = useState<TierKey | null>(null)
+  const all = ships.slice().sort((a, b) =>
     ownerOf(a).localeCompare(ownerOf(b))
     || Number(isActive(b)) - Number(isActive(a))
     || (b.tier ?? -1) - (a.tier ?? -1)
     || hullName(a).localeCompare(hullName(b)))
+  const rows = tierFilter == null ? all : all.filter(s => tierKeyOf(s.tier) === tierFilter)
   const ownerCount = new Set(rows.map(ownerOf)).size
-  const unknownCount = rows.filter(s => s.tier == null).length
+  const unknownCount = all.filter(s => s.tier == null).length
+  const countFor = (k: TierKey) => all.filter(s => tierKeyOf(s.tier) === k).length
 
   return (
     <div className="space-y-2">
@@ -83,6 +102,11 @@ export function FleetShipsTable({ ships }: { ships: FleetShip[] }) {
             </tr>
           </thead>
           <tbody>
+            {rows.length === 0 && (
+              <tr><td colSpan={6} className="px-3 py-4 text-center text-muted-foreground italic">
+                No hulls at {tierFilter != null ? tierKeyLabel(tierFilter) : 'this tier'}.
+              </td></tr>
+            )}
             {rows.map((s, i) => {
               const active = isActive(s)
               const firstOfOwner = i === 0 || ownerOf(rows[i - 1]) !== ownerOf(s)
@@ -150,12 +174,48 @@ export function FleetShipsTable({ ships }: { ships: FleetShip[] }) {
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1 border-t border-border/40 text-[9.5px] text-muted-foreground">
         <span>
-          {rows.length} hulls · {ownerCount} owners
+          {tierFilter != null && <span className="text-foreground">{rows.length} of {all.length}</span>}
+          {tierFilter == null && <>{all.length}</>} hulls · {ownerCount} owners
           {unknownCount > 0 && <> · {unknownCount} not in catalog (—)</>}
         </span>
         <span className="text-[hsl(var(--smui-green))] font-semibold">green = the hull the agent is flying now</span>
         <span className="inline-flex items-center gap-1">
-          {[5, 4, 3, 2, 1].map(t => <Chip key={t} label={t === 1 ? 'T0–1' : `T${t}`} color={tierColor(t)} filled />)}
+          {TIER_KEYS.map(k => {
+            const n = countFor(k)
+            if (n === 0 && k !== tierFilter) return null
+            const on = tierFilter === k
+            return (
+              <button
+                key={String(k)}
+                type="button"
+                onClick={() => setTierFilter(on ? null : k)}
+                aria-pressed={on}
+                title={`${n} ${tierKeyLabel(k)} hull${n === 1 ? '' : 's'} — click to ${on ? 'clear the filter' : 'show only these'}`}
+                className={`transition-opacity hover:opacity-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-ring ${on ? 'opacity-100' : tierFilter == null ? 'opacity-100' : 'opacity-40'}`}
+              >
+                <span
+                  className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 border whitespace-nowrap ${on ? 'font-semibold' : ''}`}
+                  style={{
+                    color: `hsl(${tierKeyColor(k)})`,
+                    borderColor: `hsl(${tierKeyColor(k)} / ${on ? 1 : 0.4})`,
+                    background: `hsl(${tierKeyColor(k)} / ${on ? 0.22 : 0.08})`,
+                  }}
+                >
+                  {tierKeyLabel(k)} <span className="opacity-70">{n}</span>
+                </span>
+              </button>
+            )
+          })}
+          {tierFilter != null && (
+            <button
+              type="button"
+              onClick={() => setTierFilter(null)}
+              title="Show every tier again"
+              className="inline-flex items-center gap-0.5 px-1 py-0.5 text-muted-foreground hover:text-foreground transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <X size={9} /> clear
+            </button>
+          )}
         </span>
       </div>
     </div>
