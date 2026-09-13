@@ -74,8 +74,9 @@ const TH = 'text-left px-3 py-1.5 text-[10px] uppercase tracking-[1.5px] text-mu
 
 /** Fleet-wide hull roster: grouped by owner, the flying hull first and in green, higher tiers next. */
 export function FleetShipsTable({ ships }: { ships: FleetShip[] }) {
-  // Click a tier chip in the legend to see only that tier; click it again, or the
-  // clear button, to go back to the whole roster.
+  // The summary strip and its tier chips sit ABOVE the table: they are controls,
+  // not a footnote, so they belong where the eye lands before it starts reading
+  // rows. Click a chip to see only that tier; click it again, or clear, to reset.
   const [tierFilter, setTierFilter] = useState<TierKey | null>(null)
   const all = ships.slice().sort((a, b) =>
     ownerOf(a).localeCompare(ownerOf(b))
@@ -89,6 +90,52 @@ export function FleetShipsTable({ ships }: { ships: FleetShip[] }) {
 
   return (
     <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pb-2 border-b border-border/40 text-[9.5px] text-muted-foreground">
+        <span>
+          {tierFilter != null && <span className="text-foreground">{rows.length} of {all.length}</span>}
+          {tierFilter == null && <>{all.length}</>} hulls · {ownerCount} owners
+          {unknownCount > 0 && <> · {unknownCount} not in catalog (—)</>}
+        </span>
+        <span className="text-[hsl(var(--smui-green))] font-semibold">green = the hull the agent is flying now</span>
+        <span className="inline-flex items-center gap-1">
+          {TIER_KEYS.map(k => {
+            const n = countFor(k)
+            if (n === 0 && k !== tierFilter) return null
+            const on = tierFilter === k
+            return (
+              <button
+                key={String(k)}
+                type="button"
+                onClick={() => setTierFilter(on ? null : k)}
+                aria-pressed={on}
+                title={`${n} ${tierKeyLabel(k)} hull${n === 1 ? '' : 's'} — click to ${on ? 'clear the filter' : 'show only these'}`}
+                className={`transition-opacity hover:opacity-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-ring ${on ? 'opacity-100' : tierFilter == null ? 'opacity-100' : 'opacity-40'}`}
+              >
+                <span
+                  className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 border whitespace-nowrap ${on ? 'font-semibold' : ''}`}
+                  style={{
+                    color: `hsl(${tierKeyColor(k)})`,
+                    borderColor: `hsl(${tierKeyColor(k)} / ${on ? 1 : 0.4})`,
+                    background: `hsl(${tierKeyColor(k)} / ${on ? 0.22 : 0.08})`,
+                  }}
+                >
+                  {tierKeyLabel(k)} <span className="opacity-70">{n}</span>
+                </span>
+              </button>
+            )
+          })}
+          {tierFilter != null && (
+            <button
+              type="button"
+              onClick={() => setTierFilter(null)}
+              title="Show every tier again"
+              className="inline-flex items-center gap-0.5 px-1 py-0.5 text-muted-foreground hover:text-foreground transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <X size={9} /> clear
+            </button>
+          )}
+        </span>
+      </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[640px] text-[11.5px] tabular-nums">
           <thead style={DISPLAY}>
@@ -170,53 +217,6 @@ export function FleetShipsTable({ ships }: { ships: FleetShip[] }) {
             })}
           </tbody>
         </table>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1 border-t border-border/40 text-[9.5px] text-muted-foreground">
-        <span>
-          {tierFilter != null && <span className="text-foreground">{rows.length} of {all.length}</span>}
-          {tierFilter == null && <>{all.length}</>} hulls · {ownerCount} owners
-          {unknownCount > 0 && <> · {unknownCount} not in catalog (—)</>}
-        </span>
-        <span className="text-[hsl(var(--smui-green))] font-semibold">green = the hull the agent is flying now</span>
-        <span className="inline-flex items-center gap-1">
-          {TIER_KEYS.map(k => {
-            const n = countFor(k)
-            if (n === 0 && k !== tierFilter) return null
-            const on = tierFilter === k
-            return (
-              <button
-                key={String(k)}
-                type="button"
-                onClick={() => setTierFilter(on ? null : k)}
-                aria-pressed={on}
-                title={`${n} ${tierKeyLabel(k)} hull${n === 1 ? '' : 's'} — click to ${on ? 'clear the filter' : 'show only these'}`}
-                className={`transition-opacity hover:opacity-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-ring ${on ? 'opacity-100' : tierFilter == null ? 'opacity-100' : 'opacity-40'}`}
-              >
-                <span
-                  className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 border whitespace-nowrap ${on ? 'font-semibold' : ''}`}
-                  style={{
-                    color: `hsl(${tierKeyColor(k)})`,
-                    borderColor: `hsl(${tierKeyColor(k)} / ${on ? 1 : 0.4})`,
-                    background: `hsl(${tierKeyColor(k)} / ${on ? 0.22 : 0.08})`,
-                  }}
-                >
-                  {tierKeyLabel(k)} <span className="opacity-70">{n}</span>
-                </span>
-              </button>
-            )
-          })}
-          {tierFilter != null && (
-            <button
-              type="button"
-              onClick={() => setTierFilter(null)}
-              title="Show every tier again"
-              className="inline-flex items-center gap-0.5 px-1 py-0.5 text-muted-foreground hover:text-foreground transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
-              <X size={9} /> clear
-            </button>
-          )}
-        </span>
       </div>
     </div>
   )
