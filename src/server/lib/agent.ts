@@ -740,8 +740,11 @@ export class Agent {
       // "I don't want an LLM turn every minute — check once every hour, or
       // every 30 min"). The sleep is abortable, so a nudge or a directive
       // rewrite still wakes the agent immediately.
+      // Take the LONGER of the two. `idleBackoffMs || paced` let a 5-minute
+      // idle backoff override a 30-minute pace, which is backwards: pacing is
+      // a floor the operator set, not a ceiling.
       const paced = Math.max(this.pacingMs(), TURN_INTERVAL)
-      const sleepMs = idleBackoffMs || paced
+      const sleepMs = Math.max(idleBackoffMs, paced)
       if (sleepMs >= 60_000) {
         this.setActivity(`Paced: next turn in ${Math.round(sleepMs / 60_000)}m (nudge to wake)...`)
       }
