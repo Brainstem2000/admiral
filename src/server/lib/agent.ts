@@ -733,7 +733,19 @@ export class Agent {
       this.setActivity(idleBackoffMs > 0
         ? `Idle backoff: sleeping ${Math.round(idleBackoffMs / 60_000)}m (nudge to wake)...`
         : 'Sleeping between turns...')
-      await abortableSleep(idleBackoffMs || TURN_INTERVAL, this.abortController.signal)
+      // A profile can be PACED: `turn_interval_sec` is the minimum gap between
+      // turns for an agent whose job is mostly waiting — a ship in a 3-hour
+      // yard build does not need an LLM turn every two seconds, and at 2s a
+      // single waiting agent costs hundreds of calls an hour (Brian, 2026-09-12:
+      // "I don't want an LLM turn every minute — check once every hour, or
+      // every 30 min"). The sleep is abortable, so a nudge or a directive
+      // rewrite still wakes the agent immediately.
+      const paced = Math.max(this.pacingMs(), TURN_INTERVAL)
+      const sleepMs = idleBackoffMs || paced
+      if (sleepMs >= 60_000) {
+        this.setActivity(`Paced: next turn in ${Math.round(sleepMs / 60_000)}m (nudge to wake)...`)
+      }
+      await abortableSleep(sleepMs, this.abortController.signal)
       if (!this.running) break
       if (this.restartRequested) continue
 
@@ -1062,6 +1074,13 @@ export class Agent {
   }
 
   /** Abort current turn and restart the loop with the updated directive. */
+  /** Operator-set minimum gap between turns, in ms. 0 when unpaced. */
+  private pacingMs(): number {
+    const v = getProfile(this.profileId)?.turn_interval_sec
+    const n = typeof v === 'number' ? v : Number(v)
+    return Number.isFinite(n) && n > 0 ? Math.min(n, 3600) * 1000 : 0
+  }
+
   restartTurn(): void {
     if (!this.running) return
     this.restartRequested = true

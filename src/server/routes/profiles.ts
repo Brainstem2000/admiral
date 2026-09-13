@@ -94,7 +94,7 @@ profiles.get('/', (c) => {
 // POST /api/profiles
 profiles.post('/', async (c) => {
   const body = await c.req.json()
-  const { name, username, password, empire, provider, model, planner_provider, planner_model, planning_interval, directive, connection_mode, server_url, context_budget } = body
+  const { name, username, password, empire, provider, model, planner_provider, planner_model, planning_interval, directive, connection_mode, server_url, context_budget, turn_interval_sec } = body
   if (!name) return c.json({ error: 'Name is required' }, 400)
   const inputError = validateProfileInput(body)
   if (inputError) return c.json({ error: inputError }, 400)

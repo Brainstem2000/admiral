@@ -33,6 +33,10 @@ export interface Profile {
   todo: string
   memory: string
   context_budget: number | null
+  /** Minimum seconds between turns. Set it for an agent whose job is mostly
+   *  waiting (a yard build, a standing order) so it does not burn an LLM turn
+   *  every two seconds. null or 0 leaves the agent unpaced. Capped at 3600. */
+  turn_interval_sec: number | null
   connection_mode: 'http' | 'http_v2' | 'websocket' | 'mcp' | 'mcp_v2' | 'lib_v2'
   server_url: string
   autoconnect: boolean

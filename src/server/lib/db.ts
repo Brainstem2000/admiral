@@ -201,6 +201,15 @@ VERSIONED_MIGRATIONS.push({
 })
 
 VERSIONED_MIGRATIONS.push({
+  version: 8,
+  name: 'profile-turn-interval (pace a waiting agent instead of burning a turn every 2s)',
+  up: (d) => {
+    const has = (d.query('PRAGMA table_info(profiles)').all() as { name: string }[]).some(x => x.name === 'turn_interval_sec')
+    if (!has) d.exec('ALTER TABLE profiles ADD COLUMN turn_interval_sec INTEGER')
+  },
+})
+
+VERSIONED_MIGRATIONS.push({
   version: 7,
   name: 'storage-inventory-observed-at (storage is a ledger, not a snapshot)',
   up: (d) => {
@@ -1325,7 +1334,7 @@ export function updateProfile(id: string, updates: Partial<Profile>): Profile | 
     'codex_executor_enabled', 'codex_executor_model', 'codex_planner_enabled', 'codex_planner_model',
     'directive', 'connection_mode', 'server_url',
     'autoconnect', 'enabled', 'todo', 'memory', 'context_budget',
-    'sort_order', 'group_name',
+    'sort_order', 'group_name', 'turn_interval_sec',
   ]
   const sets: string[] = []
   const vals: unknown[] = []
