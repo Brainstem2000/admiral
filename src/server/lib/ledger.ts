@@ -491,12 +491,20 @@ export class LedgerCollector {
   private static balanceAnchor(profileId: string): number | null {
     try {
       const row = getDb().query(
-        'SELECT id, balance_after FROM financial_ledger WHERE profile_id = ? AND balance_after IS NOT NULL ORDER BY id DESC LIMIT 1'
-      ).get(profileId) as { id: number; balance_after: number } | undefined
+        'SELECT id, timestamp, balance_after FROM financial_ledger WHERE profile_id = ? AND balance_after IS NOT NULL ORDER BY id DESC LIMIT 1'
+      ).get(profileId) as { id: number; timestamp: string; balance_after: number } | undefined
       if (!row || typeof row.balance_after !== 'number') return null
+      // Rows inserted after the anchor but describing an EARLIER moment are
+      // already inside that anchor's balance — a tax or rent charge the game took
+      // last week and we only booked today, for instance. Counting them again
+      // makes the wallet look richer than the ledger expects and the next command
+      // books a phantom credit to reconcile (+615,839 on Ledger Voss, +222,832 on
+      // CyberSpock, 2026-09-13, both pinned to a refuel). Window on the anchor's
+      // own timestamp as well as its id.
       const since = getDb().query(
-        'SELECT COALESCE(SUM(amount_signed), 0) AS s FROM financial_ledger WHERE profile_id = ? AND id > ?'
-      ).get(profileId, row.id) as { s: number } | undefined
+        `SELECT COALESCE(SUM(amount_signed), 0) AS s FROM financial_ledger
+          WHERE profile_id = ? AND id > ? AND timestamp >= ?`
+      ).get(profileId, row.id, row.timestamp) as { s: number } | undefined
       return row.balance_after + Number(since?.s ?? 0)
     } catch (e) {
       swallow('ledger.balanceAnchor', e)

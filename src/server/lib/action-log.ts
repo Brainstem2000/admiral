@@ -433,11 +433,21 @@ export function applyMoneyEvents(profileId: string, events: ActionEvent[]): numb
     try {
       const row = moneyRow(e)
       if (!row || !row.amount) continue
+      // TIMESTAMP THE ROW WITH THE EVENT, not with now. These describe money the
+      // game took at a known past moment, and `balanceAnchor` reconciles by
+      // walking rows forward from the last balance-bearing one: a backfilled
+      // charge stamped "now" reads as money that has not left the wallet yet, so
+      // the next command's balance check books an equal-and-opposite phantom
+      // credit. The first backfill did exactly that — +615,839 on Ledger Voss and
+      // +222,832 on CyberSpock, both pinned to a refuel, 2026-09-13.
+      const at = /^\d{4}-\d{2}-\d{2}[T ]/.test(e.created_at)
+        ? e.created_at.replace('T', ' ').replace(/(\.\d+)?Z?$/, '')
+        : null
       const res = getDb().query(`
         INSERT OR IGNORE INTO financial_ledger
-          (profile_id, kind, item_id, quantity, unit_price, amount_signed, counterparty, order_id, source_command, raw_ref)
-        VALUES (?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?)
-      `).run(profileId, row.kind, Math.round(row.amount), row.counterparty,
+          (profile_id, timestamp, kind, item_id, quantity, unit_price, amount_signed, counterparty, order_id, source_command, raw_ref)
+        VALUES (?, COALESCE(?, datetime('now')), ?, NULL, NULL, NULL, ?, ?, ?, ?, ?)
+      `).run(profileId, at, row.kind, Math.round(row.amount), row.counterparty,
              `evt:${e.event_id}`, e.event_type, JSON.stringify(e.data).slice(0, 200))
       if (Number(res.changes ?? 0) > 0) booked++
     } catch (err) { swallow('action-log.applyMoneyEvents', err) }
