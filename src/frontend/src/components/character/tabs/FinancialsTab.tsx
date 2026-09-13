@@ -51,6 +51,14 @@ const KIND_LABELS: Record<string, string> = {
   mission_bond: 'mission bond',
   mission_reward: 'mission pay',
   mission_penalty: 'mission penalty',
+  tax_income: 'income tax',
+  tax_property: 'property tax',
+  tax_sales: 'sales tax',
+  tax_prepaid: 'tax prepaid',
+  tax_refund: 'tax refund',
+  rent: 'rent',
+  facility: 'facility',
+  bounty_paid: 'bounty paid',
 }
 
 const KIND_TITLES: Record<string, string> = {
@@ -65,6 +73,16 @@ const KIND_TITLES: Record<string, string> = {
     + 'faction\'s facility rather than your own. Use dry_run:true on a craft for an itemised '
     + 'quote before committing.',
   escrow_correction: 'A bookkeeping entry reversing a phantom escrow row, not a trade.',
+  tax_income: 'Weekly income tax, charged server-side by the empire whose citizenship you hold. '
+    + 'Booked from the game\'s own tax.income_paid event, so the figure is what was actually '
+    + 'collected — an empire short of funds can bill more than it takes.',
+  tax_property: 'Weekly property tax on the assessed value of every hull you own, including ones '
+    + 'sitting in station storage. Each empire you hold citizenship in bills its own rate.',
+  tax_prepaid: 'Credits escrowed against your next assessment. Not spent — the surplus is refunded.',
+  tax_refund: 'Surplus returned from the tax prepayment pool after an assessment.',
+  rent: 'A facility rental cycle billed server-side, between commands.',
+  facility: 'Building or restoring a station facility.',
+  bounty_paid: 'A bounty settled from the wallet.',
 }
 
 const KIND_COLORS: Record<string, string> = {
@@ -78,6 +96,14 @@ const KIND_COLORS: Record<string, string> = {
   fuel: 'var(--smui-orange)',
   repair: 'var(--smui-orange)',
   dock_fee: 'var(--smui-orange)',
+  tax_income: 'var(--smui-red)',
+  tax_property: 'var(--smui-red)',
+  tax_sales: 'var(--smui-red)',
+  tax_prepaid: 'var(--smui-yellow)',
+  tax_refund: 'var(--smui-green)',
+  rent: 'var(--smui-orange)',
+  facility: 'var(--smui-orange)',
+  bounty_paid: 'var(--smui-red)',
   deposit: 'var(--smui-frost-2)',
   withdraw: 'var(--smui-frost-2)',
   transfer: 'var(--smui-frost-2)',

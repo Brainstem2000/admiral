@@ -373,6 +373,78 @@ export function applyStorageEvents(profileId: string, events: ActionEvent[], dep
   return s
 }
 
+/**
+ * MONEY THE GAME TAKES ON ITS OWN CLOCK.
+ *
+ * Taxes, rent, bounty settlements and facility bills are charged server-side
+ * between commands. Nothing in the harness is watching the wallet at that
+ * moment, so the next command that happens to report a balance finds the wallet
+ * lower than the ledger expected and books the whole gap against ITSELF: on
+ * 2026-09-13 Ledger Voss's weekly assessment — 305,759 income tax, 4,246
+ * property tax, rent — surfaced as a single "unexplained -310,449" pinned to a
+ * 66-credit refuel. The money was real and the balance was right; only the
+ * reason was lost, which is the one thing an operator actually needs.
+ *
+ * The game's own action log carries each of these with an exact figure, so book
+ * them from there under their own kind. They are `INSERT OR IGNORE`d on
+ * (profile_id, order_id, kind) with the event id as the order_id, so a replay
+ * or a backfill can never double-charge.
+ */
+export function moneyRow(e: ActionEvent): { kind: string; amount: number; counterparty: string | null } | null {
+  const d = e.data ?? {}
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+  const empire = typeof d.empire === 'string' ? d.empire : null
+  switch (e.event_type) {
+    case 'tax.income_paid': {
+      const paid = n(d.paid); return paid ? { kind: 'tax_income', amount: -paid, counterparty: empire } : null
+    }
+    case 'tax.property_paid': {
+      const paid = n(d.paid); return paid ? { kind: 'tax_property', amount: -paid, counterparty: empire } : null
+    }
+    case 'tax.sales_paid': {
+      const paid = n(d.paid) ?? n(d.amount); return paid ? { kind: 'tax_sales', amount: -paid, counterparty: empire } : null
+    }
+    case 'tax.prepaid': {
+      const a = n(d.amount); return a ? { kind: 'tax_prepaid', amount: -a, counterparty: empire } : null
+    }
+    case 'tax.prepay_refunded': {
+      const a = n(d.amount); return a ? { kind: 'tax_refund', amount: a, counterparty: empire } : null
+    }
+    case 'other.rent_paid': {
+      const c = n(d.cost); return c ? { kind: 'rent', amount: -c, counterparty: typeof d.facility === 'string' ? d.facility : null } : null
+    }
+    case 'other.facility_built':
+    case 'other.facility_restored': {
+      const c = n(d.cost); return c ? { kind: 'facility', amount: -c, counterparty: typeof d.facility === 'string' ? d.facility : null } : null
+    }
+    case 'bounty.paid': {
+      // Only a settlement from the WALLET moves credits; a released bond does not.
+      const a = n(d.amount)
+      return a && d.paid_from === 'wallet' ? { kind: 'bounty_paid', amount: -a, counterparty: empire } : null
+    }
+    default: return null
+  }
+}
+
+/** Book every money event in `events` that is not already on the ledger. */
+export function applyMoneyEvents(profileId: string, events: ActionEvent[]): number {
+  let booked = 0
+  for (const e of events) {
+    try {
+      const row = moneyRow(e)
+      if (!row || !row.amount) continue
+      const res = getDb().query(`
+        INSERT OR IGNORE INTO financial_ledger
+          (profile_id, kind, item_id, quantity, unit_price, amount_signed, counterparty, order_id, source_command, raw_ref)
+        VALUES (?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?)
+      `).run(profileId, row.kind, Math.round(row.amount), row.counterparty,
+             `evt:${e.event_id}`, e.event_type, JSON.stringify(e.data).slice(0, 200))
+      if (Number(res.changes ?? 0) > 0) booked++
+    } catch (err) { swallow('action-log.applyMoneyEvents', err) }
+  }
+  return booked
+}
+
 interface LogPage { entries?: Array<Record<string, unknown>>; has_more?: boolean; total?: number }
 
 /**
@@ -385,9 +457,10 @@ export async function ingestActionLog(
   profileId: string,
   connection: GameConnection,
   opts: { backfillPages?: number; pageSize?: number } = {},
-): Promise<{ added: number; cargoApplied: number; dirty: boolean; storage: StorageApplySummary }> {
+): Promise<{ added: number; cargoApplied: number; dirty: boolean; storage: StorageApplySummary; money: number }> {
   const pageSize = opts.pageSize ?? 100
   let added = 0
+  let money = 0
   let dirty = false
   const fresh: ActionEvent[] = []
   const storage: StorageApplySummary = { applied: 0, attached: 0, unplaced: 0, reflected: 0, dirtyReasons: [] }
@@ -445,6 +518,9 @@ export async function ingestActionLog(
       // in July is still money gone, and the register exists precisely so that
       // history nobody watched still adds up. Dedupe is the INSERT OR IGNORE above.
       if (inserted.length) recordObligations(profileId, inserted)
+      // Same reasoning as obligations: money the game took is money gone whether
+      // or not anyone was watching, so book it on backfills too.
+      if (inserted.length) money += applyMoneyEvents(profileId, inserted)
       if (!sc?.has_more) break
       // Deep back-fills hammered the API with 429s once before; pace them.
       if (backfilling) await new Promise(r => setTimeout(r, 250))
@@ -453,7 +529,7 @@ export async function ingestActionLog(
   if (storage.unplaced > 0 || storage.dirtyReasons.length > 0) dirty = true
 
   // Back-fill run: events are banked, but nothing is replayed onto the ledger.
-  if (backfilling) return { added, cargoApplied: 0, dirty, storage }
+  if (backfilling) return { added, cargoApplied: 0, dirty, storage, money }
 
   // --- fold the new events into cargo ---
   fresh.sort((a, b) => a.event_id - b.event_id)
@@ -502,5 +578,5 @@ export async function ingestActionLog(
     } catch { /* ledger never blocks the turn */ }
   }
 
-  return { added, cargoApplied, dirty, storage }
+  return { added, cargoApplied, dirty, storage, money }
 }

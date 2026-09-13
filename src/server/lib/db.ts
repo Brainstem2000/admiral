@@ -2953,7 +2953,18 @@ export function bookOrderFillsFromView(profileId: string, resultData: unknown): 
         try { returned = Number((JSON.parse(cancel.data) as { quantity?: number }).quantity ?? NaN) } catch { /* keep null */ }
         closeTrackedOrder(db, profileId, t, Number.isFinite(returned as number) ? returned : null, 'view_orders~cancel')
       } else {
-        closeTrackedOrder(db, profileId, t, 0, 'view_orders~closed')
+        // ABSENCE IS NOT EVIDENCE OF A SALE. This used to close the row as a FULL
+        // fill at the asking price, which invented income that never arrived:
+        // Ledger Voss on 2026-09-13 was credited 180,000 for 900 iron_ore at 200
+        // and 312,000 for 1,040 copper_ore at 300 — prices those ores never trade
+        // at — and his wallet never moved. The next command to report a balance
+        // then had to book an equal-and-opposite "unexplained" debit to reconcile,
+        // so the cashflow series carried half a million of phantom income matched
+        // by half a million of phantom loss. An order can leave a listing for
+        // reasons that pay nothing: expiry, a station dropping it, or our station
+        // record being wrong. Close the row, book NOTHING; a real sale always
+        // arrives as its own trading.exchange_fill event.
+        closeTrackedOrder(db, profileId, t, null, 'view_orders~closed')
       }
     }
   } catch { /* booking must never break command execution */ }

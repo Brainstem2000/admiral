@@ -788,6 +788,7 @@ export class Agent {
               const st = r.storage
               this.log('system', `ledger: +${r.added} action events` +
                 (r.cargoApplied ? `, ${r.cargoApplied} cargo moves` : '') +
+                (r.money ? `, ${r.money} tax/rent charges booked` : '') +
                 (st.applied ? `, ${st.applied} storage moves applied` : '') +
                 (st.attached ? `, ${st.attached} matched to command rows` : '') +
                 (st.reflected ? `, ${st.reflected} already in a snapshot` : '') +
