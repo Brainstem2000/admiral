@@ -107,6 +107,13 @@ async function executeSchedule(schedule: Schedule): Promise<void> {
   const nextRun = nextCronTime(schedule.cron)
   updateScheduleRun(schedule.id, now, nextRun?.toISOString() ?? null)
 
+  // A disabled profile is being driven from somewhere else — a schedule must not
+  // log it back in underneath that client (Brian, 2026-09-13).
+  if (!profile.enabled) {
+    addLogEntry(profile.id, 'system', `[Scheduler] Skipped: profile is disabled (enabled=0)`)
+    return
+  }
+
   if (schedule.action === 'connect_llm') {
     addLogEntry(profile.id, 'system', `[Scheduler] Starting agent (schedule: ${schedule.cron})`)
     try {

@@ -48,6 +48,13 @@ async function executeTriggerAction(trigger: EventTrigger, notification: Record<
 
   const notifSummary = safeTruncate((notification.message || notification.content || JSON.stringify(notification)).toString(), 100)
 
+  // A disabled profile is hands-off: an event must not wake an account somebody
+  // is running from another harness (Brian, 2026-09-13).
+  if (!profile.enabled) {
+    addLogEntry(profile.id, 'system', `[Event Trigger] Skipped: profile is disabled (enabled=0)`)
+    return
+  }
+
   if (trigger.action === 'wake' || trigger.action === 'connect_llm') {
     addLogEntry(profile.id, 'system', `[Event Trigger] Waking agent: ${trigger.event_type} matched — ${notifSummary}`)
     try {

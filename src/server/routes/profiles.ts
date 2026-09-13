@@ -499,6 +499,10 @@ profiles.post('/batch', async (c) => {
       if (action === 'disconnect') {
         await agentManager.disconnect(profile.id)
         results.push({ id: profile.id, name: profile.name, ok: true })
+      } else if (!profile.enabled) {
+        // A bulk "connect everyone" must not sweep up an account that is
+        // deliberately parked for another harness to drive.
+        results.push({ id: profile.id, name: profile.name, ok: false, error: 'profile disabled (enabled=0)' })
       } else {
         await agentManager.connect(profile.id)
         if (profile.provider && profile.provider !== 'manual' && profile.model) {

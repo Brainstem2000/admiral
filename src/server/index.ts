@@ -156,7 +156,8 @@ setInterval(runPrune, 6 * 60 * 60 * 1000)
 // minutes (observed: a card showing 278c while the game said 17c). Every 20 minutes,
 // briefly game-connect each credentialed, disconnected profile — NO LLM loop — read
 // the live balance into the snapshot stream, and disconnect. Serial with gaps so a
-// 12-profile fleet never hammers the login endpoint.
+// 12-profile fleet never hammers the login endpoint. Profiles with enabled=0 are
+// skipped outright: that flag means the account is being driven elsewhere.
 async function refreshOfflineWallets() {
   const { listProfiles: lp, addFinancialSnapshot, getDb } = await import('./lib/db')
   // Imported here rather than top-level: index.ts otherwise never references the
@@ -167,6 +168,14 @@ async function refreshOfflineWallets() {
   for (const p of lp()) {
     try {
       if (!p.username || !p.password) continue
+      // `enabled = 0` means HANDS OFF this account entirely — it is the switch an
+      // operator flips to run a character from another harness, and a sweep that
+      // logs in every 20 minutes would fight that other client for the session
+      // (Brian, 2026-09-13: "I want her totally offline so I can run her from
+      // another harness"). agent-manager already refuses to start a loop for a
+      // disabled profile; this closes the one path that still touched the game
+      // on its own.
+      if (!p.enabled) continue
       if (agentManager.getAgent(p.id)?.isConnected || agentManager.getAgent(p.id)?.isLoopActive) continue
       await agentManager.connect(p.id)
       const gs = agentManager.getStatus(p.id).gameState as Record<string, unknown> | null
