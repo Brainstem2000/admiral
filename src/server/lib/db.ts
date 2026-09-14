@@ -230,6 +230,58 @@ VERSIONED_MIGRATIONS.push({
   },
 })
 
+VERSIONED_MIGRATIONS.push({
+  version: 9,
+  name: 'ship-modules-one-row-per-slot (identical modules no longer collapse)',
+  up: (d) => {
+    // Guard on the PRIMARY KEY, not merely on the column. A hotfix that added
+    // slot_index with a bare ALTER leaves the old name-based key in place, and a
+    // column-only guard would then skip the rebuild forever — the exact drift
+    // class this migration ledger exists to kill.
+    const sql = String((d.query(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ship_modules'"
+    ).get() as { sql?: string } | undefined)?.sql ?? '')
+    if (!sql) return                                              // table not created yet
+    if (/PRIMARY\s+KEY\s*\(\s*profile_id\s*,\s*ship_id\s*,\s*slot\s*,\s*slot_index\s*\)/i.test(sql)) return
+    const hasColumn = (d.query('PRAGMA table_info(ship_modules)').all() as { name: string }[])
+      .some(x => x.name === 'slot_index')
+    // The old PRIMARY KEY (profile_id, ship_id, module_name, slot) made a ship's
+    // SECOND copy of a module overwrite its first, so the manifest under-reported
+    // both the module count and the CPU/power draw by a whole module. Rebuild
+    // keyed on the physical slot instead.
+    //
+    // Historical rows cannot be un-collapsed — the duplicates were destroyed at
+    // write time, not merged — so they carry over numbered 0..n-1 within their
+    // slot, one short wherever a ship carried a module twice. The next get_ship
+    // capture (this fleet's most-called command) replaces the whole profile and
+    // restores the truth; no row here is trusted for a refit decision until then.
+    d.exec(`CREATE TABLE ship_modules_v2 (
+      profile_id TEXT NOT NULL,
+      ship_id TEXT NOT NULL,
+      module_name TEXT NOT NULL,
+      slot TEXT NOT NULL DEFAULT '',
+      slot_index INTEGER NOT NULL DEFAULT 0,
+      cpu INTEGER NOT NULL DEFAULT 0,
+      power INTEGER NOT NULL DEFAULT 0,
+      captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (profile_id, ship_id, slot, slot_index)
+    )`)
+    // ALWAYS renumber. An existing slot_index is a hint about intended order, not
+    // a usable key — a bare-ALTER hotfix leaves every row at the column default,
+    // and copying those straight over collides on the new primary key and throws
+    // mid-migration. ROW_NUMBER cannot collide, whatever the source data says.
+    const order = hasColumn ? 'slot_index, module_name' : 'module_name'
+    d.exec(`INSERT INTO ship_modules_v2
+      (profile_id, ship_id, module_name, slot, slot_index, cpu, power, captured_at)
+      SELECT profile_id, ship_id, module_name, slot,
+        ROW_NUMBER() OVER (PARTITION BY profile_id, ship_id, slot ORDER BY ${order}) - 1,
+        cpu, power, captured_at
+      FROM ship_modules`)
+    d.exec('DROP TABLE ship_modules')
+    d.exec('ALTER TABLE ship_modules_v2 RENAME TO ship_modules')
+  },
+})
+
 function runVersionedMigrations(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -930,15 +982,21 @@ function migrate(db: Database): void {
     );
 
     -- Fitted modules of a profile's ACTIVE ship, replaced on every get_ship capture.
+    -- ONE ROW PER FITTED SLOT, keyed by (slot, slot_index) — never by module_name.
+    -- Keying on the name collapsed a ship carrying the same module twice into a
+    -- single row: CyberSpock's Gas Tanker (2026-09-14) recorded 3 utility rows
+    -- for 4 fitted utility modules and reported 15 CPU / 29 power against a real
+    -- 18 / 36, and every free-slot count derived from it was one too generous.
     CREATE TABLE IF NOT EXISTS ship_modules (
       profile_id TEXT NOT NULL,
       ship_id TEXT NOT NULL,
       module_name TEXT NOT NULL,
       slot TEXT NOT NULL DEFAULT '',
+      slot_index INTEGER NOT NULL DEFAULT 0,
       cpu INTEGER NOT NULL DEFAULT 0,
       power INTEGER NOT NULL DEFAULT 0,
       captured_at TEXT NOT NULL DEFAULT (datetime('now')),
-      PRIMARY KEY (profile_id, ship_id, module_name, slot)
+      PRIMARY KEY (profile_id, ship_id, slot, slot_index)
     );
 
     CREATE TABLE IF NOT EXISTS freight_contracts (
@@ -2443,18 +2501,30 @@ export function recordActiveShip(profileId: string, shipId: string, classId: str
   tx()
 }
 
-/** Replace the fitted-module manifest for a profile's active ship from a get_ship result. */
+/**
+ * Replace the fitted-module manifest for a profile's active ship from a get_ship result.
+ *
+ * Each module gets its OWN row, numbered within its slot family in capture
+ * order. Keying on the module name instead (the pre-v9 schema) silently merged
+ * a ship's duplicate fittings — two Mining Laser IIs became one — which
+ * under-reported the CPU/power draw by a whole module and told every free-slot
+ * count that a taken slot was open.
+ */
 export function recordShipModules(profileId: string, shipId: string, modules: Array<{
   name?: string; slot?: string; cpu_usage?: number; power_usage?: number
 }>): void {
   const tx = db.transaction(() => {
     db.query('DELETE FROM ship_modules WHERE profile_id = ?').run(profileId)
-    const ins = db.query(`INSERT OR REPLACE INTO ship_modules
-      (profile_id, ship_id, module_name, slot, cpu, power, captured_at)
-      VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`)
+    const ins = db.query(`INSERT INTO ship_modules
+      (profile_id, ship_id, module_name, slot, slot_index, cpu, power, captured_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`)
+    const nextIndex: Record<string, number> = {}
     for (const m of modules) {
       if (!m.name) continue
-      ins.run(profileId, shipId, m.name, m.slot ?? '', Number(m.cpu_usage ?? 0) || 0, Number(m.power_usage ?? 0) || 0)
+      const slot = m.slot ?? ''
+      const idx = nextIndex[slot] ?? 0
+      nextIndex[slot] = idx + 1
+      ins.run(profileId, shipId, m.name, slot, idx, Number(m.cpu_usage ?? 0) || 0, Number(m.power_usage ?? 0) || 0)
     }
   })
   tx()

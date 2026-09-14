@@ -83,8 +83,12 @@ for (const s of db.query(`SELECT profile_id, station_id, class, COUNT(*) n FROM 
   GROUP BY profile_id, station_id, class ORDER BY profile_id`).all() as any[])
   console.log(`  ${N(s.profile_id).padEnd(12)} ${String(s.class).padEnd(20)} x${s.n}  @${s.station_id === '__active__' ? 'ACTIVE' : s.station_id}`)
 console.log('  -- active-ship modules --')
-for (const m of db.query('SELECT profile_id, module_name, slot, cpu, power FROM ship_modules ORDER BY profile_id').all() as any[])
-  console.log(`  ${N(m.profile_id).padEnd(12)} ${m.module_name.padEnd(22)} ${m.slot.padEnd(8)} cpu ${m.cpu} pwr ${m.power}`)
+for (const m of db.query(`SELECT profile_id, module_name, slot, slot_index, cpu, power FROM ship_modules
+  ORDER BY profile_id, slot, slot_index`).all() as any[])
+  console.log(`  ${N(m.profile_id).padEnd(12)} ${m.module_name.padEnd(22)} ${String(m.slot).padEnd(8)}#${m.slot_index} cpu ${m.cpu} pwr ${m.power}`)
+for (const t of db.query(`SELECT profile_id, COUNT(*) n, SUM(cpu) cpu, SUM(power) power FROM ship_modules
+  GROUP BY profile_id ORDER BY profile_id`).all() as any[])
+  console.log(`  ${N(t.profile_id).padEnd(12)} ${String(`= ${t.n} fitted`).padEnd(22)} ${''.padEnd(8)}  cpu ${t.cpu} pwr ${t.power}`)
 
 console.log('\n=== FREIGHT P&L ===')
 const f = db.query(`SELECT status, COUNT(*) n, SUM(base_reward) reward FROM freight_contracts GROUP BY status`).all() as any[]
