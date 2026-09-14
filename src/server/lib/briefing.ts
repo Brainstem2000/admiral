@@ -815,7 +815,10 @@ export function buildSituationalBriefing(profileId: string): string {
           // reads rendered every gun as "weapon" with a blank id, so the agent
           // still could not reload (Morg'Thar 2026-09-01: 74 help(reload) reads).
           const specific = typeof w.type === 'string' && w.type !== 'weapon' ? w.type : undefined
-          const kind = String(w.type_id ?? specific ?? w.name ?? 'weapon')
+          // `item_id` is the name on payload shapes that carry no type_id — without
+          // it a gun renders as the literal "weapon", which is the same unusable
+          // line the type_id fix above was added to stop.
+          const kind = String(w.type_id ?? specific ?? w.item_id ?? w.name ?? 'weapon')
           const ammo = String(w.loaded_ammo_id ?? w.loaded_ammo_name ?? w.ammo_type ?? 'none')
           const cur = Number(w.current_ammo ?? w.ammo ?? 0) || 0
           const cap = Number(w.magazine_size ?? w.max_ammo ?? NaN)
