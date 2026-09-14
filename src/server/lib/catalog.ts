@@ -16,6 +16,9 @@ const CATALOG_URL = 'https://game.spacemolt.com/api/catalog.json'
 const CACHE_FILE = path.join(process.cwd(), 'data', 'catalog-cache.json')
 const ETAG_FILE = path.join(process.cwd(), 'data', 'catalog-etag.txt')
 const REFRESH_MS = 60 * 60 * 1000 // matches the endpoint's max-age=3600
+// The endpoint normally answers in about a second; anything past this is a stall,
+// and the disk cache already covers us. See the note in fetchCatalog().
+const CATALOG_FETCH_TIMEOUT_MS = 20_000
 
 interface QtyRef { item_id: string; quantity: number }
 export interface CatalogItem {
@@ -79,7 +82,13 @@ async function fetchCatalog(): Promise<void> {
   if (existsSync(ETAG_FILE)) {
     try { headers['If-None-Match'] = readFileSync(ETAG_FILE, 'utf-8').trim() } catch { /* ignore */ }
   }
-  const res = await fetch(CATALOG_URL, { headers })
+  // A deadline is mandatory, not defensive. This fetch is kicked off unawaited by
+  // startCatalogService(), so a request that never answers keeps the event loop
+  // alive forever: `bun test` then finishes every assertion and simply never
+  // exits (0% CPU, one ESTABLISHED socket, no further output). That happened
+  // three runs in a row on 2026-09-14 while game.spacemolt.com was rate-limiting.
+  // schema.ts already bounds its spec fetch the same way.
+  const res = await fetch(CATALOG_URL, { headers, signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS) })
   if (res.status === 304) return // disk/in-memory copy is current
   if (!res.ok) throw new Error(`catalog fetch failed: HTTP ${res.status}`)
   const body = await res.text()
