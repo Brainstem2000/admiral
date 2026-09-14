@@ -243,8 +243,18 @@ setInterval(refreshOfflineWallets, 20 * 60 * 1000)
 // durable sheet, so the fleet map, offline fallbacks, and post-disconnect
 // cards inherit a current wallet instead of a fossil.
 async function snapshotConnectedState() {
-  const { listProfiles: lp, upsertProfileLastState, fuelText } = await import('./lib/db')
+  const { listProfiles: lp, upsertProfileLastState, fuelText, setPreference } = await import('./lib/db')
   const { agentManager } = await import('./lib/agent-manager')
+  const { RUNNING_ROSTER_KEY } = await import('./lib/autoconnect')
+  // Which agents were ACTUALLY WORKING, so a restart restores those and only
+  // those. enabled+autoconnect is far too wide: eleven of this fleet's profiles
+  // carry both while only four are meant to run, the rest being parked by a
+  // disconnect that a restart forgets. Recording the live loops is the only
+  // honest answer to "what was running before?".
+  try {
+    const running = lp().filter(p => agentManager.getAgent(p.id)?.isLoopActive).map(p => p.id)
+    setPreference(RUNNING_ROSTER_KEY, JSON.stringify(running))
+  } catch { /* the roster is an optimisation; never fail the snapshot for it */ }
   for (const p of lp()) {
     try {
       const agent = agentManager.getAgent(p.id)
@@ -273,6 +283,43 @@ async function snapshotConnectedState() {
   }
 }
 setInterval(snapshotConnectedState, 2 * 60 * 1000)
+
+/**
+ * Bring the fleet back up after a restart.
+ *
+ * Until 2026-09-14 `autoconnect` was stored, defaulted true and shown in the UI
+ * while NOTHING on the server read it, so a restart (or a crash) silently parked
+ * every agent until a human noticed and reconnected each one by hand.
+ *
+ * Deliberately AFTER listen(): connecting agents is slow and staggered, and the
+ * API must answer while it runs. Imports are dynamic to match the other deferred
+ * startup work in this file and to keep agent-manager off the boot path.
+ */
+async function autoconnectFleet() {
+  try {
+    const { runAutoconnect, AUTOCONNECT_START_DELAY_MS } = await import('./lib/autoconnect')
+    const { agentManager } = await import('./lib/agent-manager')
+    const { listProfiles: lp, addLogEntry, getPreference } = await import('./lib/db')
+    const { RUNNING_ROSTER_KEY, parseRunningRoster } = await import('./lib/autoconnect')
+    await new Promise(r => setTimeout(r, AUTOCONNECT_START_DELAY_MS))
+    const roster = parseRunningRoster(getPreference(RUNNING_ROSTER_KEY))
+    const res = await runAutoconnect({
+      listProfiles: lp,
+      runningBefore: () => roster,
+      connect: (id) => agentManager.connect(id),
+      startLLM: (id) => agentManager.startLLM(id),
+      isStopRequested: (id) => agentManager.isStopRequested(id),
+      log: (id, level, message) => addLogEntry(id, level as never, message),
+    })
+    if (res.connected.length || res.failed.length || res.skipped.length) {
+      console.log(`[Autoconnect] ${res.connected.length} connected, ${res.failed.length} failed, ${res.skipped.length} skipped`)
+    }
+  } catch (err) {
+    // A broken boot pass must never take the server down with it.
+    console.warn('[Autoconnect] pass failed:', err instanceof Error ? err.message : String(err))
+  }
+}
+autoconnectFleet()
 
 const port = parseInt(process.env.PORT || '3031')
 // Bind to loopback by default so the API (which serves plaintext secrets) is not

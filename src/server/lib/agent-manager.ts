@@ -83,6 +83,18 @@ class AgentManager {
     return this.agents.get(profileId)
   }
 
+  /**
+   * Has this agent been deliberately stopped?
+   *
+   * In-memory and therefore EMPTY on a fresh boot — a restart cannot remember
+   * that you parked someone. The boot autoconnect pass reads it anyway, because
+   * the pass is staggered over minutes and an operator can stop an agent while
+   * it is still running.
+   */
+  isStopRequested(profileId: string): boolean {
+    return this.stopRequested.has(profileId)
+  }
+
   async connect(profileId: string): Promise<Agent> {
     // If already connected, return existing
     let agent = this.agents.get(profileId)
