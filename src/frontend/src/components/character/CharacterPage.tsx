@@ -29,6 +29,7 @@ import { CommsTab } from './tabs/CommsTab'
 import { CostTab } from './tabs/CostTab'
 import { PlanTab } from './tabs/PlanTab'
 import { LogPane } from '@/components/LogPane'
+import { PlayerStatusBanner } from '@/components/PlayerStatus'
 
 interface Props {
   profile: Profile
@@ -218,6 +219,12 @@ export function CharacterPage({ profile, status, playerData, onOpenEditor }: Pro
       {/* Pinned header + tab bar */}
       <div className="shrink-0 w-full max-w-[1600px] mx-auto px-4 md:px-6 pt-4 md:pt-6 space-y-3">
         <CharacterHeader profile={profile} status={status} onOpenEditor={onOpenEditor} />
+        {/* Same status row the editor shows. It lives in the PINNED block, above the
+            tab bar, so ship / location / hull / fuel stay on screen on every sub-page
+            instead of only on the one tab that happens to repeat them. */}
+        <div className="border-x border-t border-border">
+          <PlayerStatusBanner profile={profile as unknown as Record<string, unknown>} playerData={playerData} />
+        </div>
         <div className="flex items-center w-fit border border-border divide-x divide-border bg-card">
           {TABS.map(t => (
             <button
