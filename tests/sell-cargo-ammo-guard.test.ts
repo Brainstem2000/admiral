@@ -1,4 +1,13 @@
 import { describe, expect, test } from 'bun:test'
+import { getDb } from '../src/server/lib/db'
+
+// executeTool reads the database directly — the commission lock that decides
+// which cargo is reserved for an unbuilt ship lives there. db.ts binds its
+// handle lazily, so a test process that never opens it hands sell_cargo a null
+// connection, the lock throws, and the macro aborts having sold nothing. Open it
+// first, exactly as tests/craft-input-gate.test.ts does. tests/preload.ts points
+// this at a throwaway directory, never data/admiral.db.
+getDb()
 
 /**
  * Ammo must survive a bulk sell.

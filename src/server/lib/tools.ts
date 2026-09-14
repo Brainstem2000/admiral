@@ -5473,12 +5473,40 @@ const SELL_CARGO_ALWAYS_EXCLUDE = new Set<string>([])
  * craft lock already read getCommissionRequirement(); the exits now do too, with
  * the same "would this break the total" rule so genuine surplus stays sellable.
  */
-function commissionLock(profileId: string, itemId: string, qty: number): { required: number; total: number; breaks: boolean } {
-  const required = getCommissionRequirement(itemId, profileId)
-  if (required <= 0) return { required: 0, total: 0, breaks: false }
+function commissionLock(profileId: string, itemId: string, qty: number): { required: number; total: number; breaks: boolean; readable: boolean } {
+  // The storage half was already guarded and the requirement half was not, so a
+  // database error here escaped commissionLock, escaped macroSellCargo, and came
+  // back to the agent as "MACRO ERROR ... State may have partially changed" with
+  // NOTHING sold and nothing changed. A read that only tells us what is locked
+  // must never be able to kill the sell it is advising.
+  let required = 0
+  try {
+    required = getCommissionRequirement(itemId, profileId)
+  } catch {
+    // Unreadable is NOT the same as unlocked. Reporting "nothing reserved" here
+    // is the 2026-09-10 failure exactly: the lock read empty and CyberSpock sold
+    // 50 uranium_ore the Juggernaut needed for 7,500cr. Say we do not know.
+    return { required: 0, total: 0, breaks: false, readable: false }
+  }
+  if (required <= 0) return { required: 0, total: 0, breaks: false, readable: true }
   let total = 0
   try { total = getStorageTotalForProfile(profileId, itemId) + getCargoQuantity(profileId, itemId) } catch { total = 0 }
-  return { required, total, breaks: total - qty < required }
+  return { required, total, breaks: total - qty < required, readable: true }
+}
+
+/** Is the commission ledger readable at all for this profile?
+ *
+ *  Probed ONCE before the sell loop so an unreadable database refuses the macro
+ *  up front, with nothing attempted, instead of throwing on the first cargo line
+ *  behind a message that claims state may have changed. The id is a sentinel no
+ *  real commission uses; only whether the query survives matters. */
+function commissionLedgerReadable(profileId: string): boolean {
+  try {
+    getCommissionRequirement('__ledger_probe__', profileId)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** Ammunition the ship's own fitted weapons consume, read off get_ship.
@@ -5528,6 +5556,15 @@ async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, r
   const start = await macroReadState(conn)
   if (!start.docked) return 'MACRO ABORT: not docked — dock at a station first.'
   if (start.cargo.length === 0) return 'sell_cargo DONE: cargo is empty, nothing to sell.'
+  // The commission ledger is what separates surplus from stock an unbuilt ship
+  // still needs. Unreadable means we cannot tell the two apart, and both answers
+  // are expensive: selling anyway repeats the uranium_ore loss, while failing on
+  // the first cargo line reports a half-done sell that never started. Refuse the
+  // bulk path plainly, name the single-item escape, and change nothing.
+  if (!commissionLedgerReadable(ctx.profileId)) {
+    return 'MACRO ABORT: cannot read the commission ledger, so I cannot tell surplus from stock a build still needs. '
+      + 'Nothing was sold and nothing changed. Sell a specific line with `sell` if you need to move it now.'
+  }
 
   // Depth map from a live market read: macro sells bypass checkDoctrineGuards,
   // and a market `sell` walks the book past the honest depth into 1cr lowballs
@@ -5551,6 +5588,13 @@ async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, r
   for (const item of start.cargo.slice(0, 20)) {
     if (Date.now() > deadline) { failed.push('(deadline hit — remaining items not attempted)'); break }
     const lineLock = commissionLock(ctx.profileId, item.item_id.toLowerCase(), item.quantity)
+    // Defence in depth behind the pre-loop probe: if the ledger goes unreadable
+    // part-way through, skip the line rather than sell it blind or abort a run
+    // that has already moved cargo.
+    if (!lineLock.readable) {
+      skipped.push(`${item.item_id} x${item.quantity} (commission ledger unreadable — not risking a locked sale)`)
+      continue
+    }
     if (lineLock.breaks) {
       skipped.push(`${item.item_id} x${item.quantity} (commission line — the build needs ${lineLock.required}, you hold ${lineLock.total}; never sold by this macro)`)
       continue
