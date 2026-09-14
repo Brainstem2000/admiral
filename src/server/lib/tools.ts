@@ -4394,23 +4394,48 @@ export const MAX_MACRO_HOPS = 25
  * stopped him engaging without loading it, and being TOLD about it twice (by me,
  * hours earlier) did not stop him either.
  *
- * Modules report ammo as "loaded/capacity"; a module with no `ammo` field is not
- * a gun and is ignored.
+ * TWO PAYLOAD SHAPES, and reading only one is how this gate spent its whole life
+ * switched off. http reports the magazine as a single "loaded/capacity" STRING in
+ * `ammo`; lib_v2 reports two NUMBERS, `current_ammo` and `magazine_size`, and no
+ * `ammo` field at all. The original matched only the string, so every lib_v2
+ * weapon fell through the `continue`, `total` stayed 0, and tooDryToHunt answered
+ * "not our call" for the entire fleet — the same silent stand-down the fuel-floor
+ * gate had for exactly the same reason (CLAUDE.md, 2026-09-11).
+ *
+ * Measured cost: Morg'Thar fought at Nekkar Star on 2026-09-14 from 5:09pm with
+ * all five railguns at current_ammo 0, took 49 hits without firing once, and the
+ * game printed "magazine empty" eleven times while the macro kept engaging.
+ *
+ * A module with NEITHER field is not an ammo-using weapon (energy weapons always
+ * fire) and is ignored — that part was right and is preserved.
  */
-export function weaponAmmoState(modules: unknown): { total: number; loaded: number; dry: string[] } {
-  const out = { total: 0, loaded: 0, dry: [] as string[] }
+export function weaponAmmoState(modules: unknown): {
+  total: number; loaded: number; dry: string[]
+  /** The empty guns with what `reload` needs: its instance id and its ammo item. */
+  dryGuns: Array<{ id: string; name: string; ammoId: string }>
+} {
+  const out = { total: 0, loaded: 0, dry: [] as string[], dryGuns: [] as Array<{ id: string; name: string; ammoId: string }> }
   if (!Array.isArray(modules)) return out
   for (const m of modules) {
     if (!m || typeof m !== 'object') continue
     const mod = m as Record<string, unknown>
-    const ammo = mod.ammo
-    if (ammo === undefined || ammo === null) continue          // not a weapon
-    const s = String(ammo)
-    const match = s.match(/^\s*(\d+)\s*\/\s*(\d+)\s*$/)
-    if (!match) continue
+    let loaded: number | null = null
+    const text = mod.ammo === undefined || mod.ammo === null
+      ? null
+      : String(mod.ammo).match(/^\s*(\d+)\s*\/\s*(\d+)\s*$/)
+    if (text) loaded = Number(text[1])
+    else if (mod.current_ammo !== undefined && mod.current_ammo !== null) loaded = Number(mod.current_ammo)
+    if (loaded === null || !Number.isFinite(loaded)) continue   // not an ammo-using weapon
     out.total++
-    if (Number(match[1]) > 0) out.loaded++
-    else out.dry.push(String(mod.name ?? mod.id ?? 'weapon'))
+    if (loaded > 0) { out.loaded++; continue }
+    const name = String(mod.name ?? mod.type_id ?? mod.id ?? 'weapon')
+    out.dry.push(name)
+    // `reload` needs the INSTANCE id, not the class: lib_v2 calls it module_id
+    // and puts the class in type_id. loaded_ammo_id survives an empty magazine,
+    // so a dry gun still names the case it fires.
+    const id = String(mod.module_id ?? mod.id ?? mod.instance_id ?? '')
+    const ammoId = String(mod.loaded_ammo_id ?? mod.ammo_item_id ?? mod.ammo_id ?? '')
+    if (id && ammoId) out.dryGuns.push({ id, name, ammoId })
   }
   return out
 }
@@ -4861,6 +4886,57 @@ async function macroHuntHere(args: Record<string, unknown>, ctx: ToolContext, re
       if (!s.inBattle) break
       if (settle === 0) narrate('waiting for the current battle to finish', true)
       await macroSleep(HUNT_TICK_MS)
+    }
+
+    // AMMO IS RE-CHECKED EVERY KILL, not just at entry. The pre-hunt gate proves
+    // the guns were loaded when the macro STARTED; it says nothing about kill six.
+    // Morg'Thar emptied all five railguns over eight kills at Nekkar Star on
+    // 2026-09-14, then kept engaging: 49 hits taken, not one shot fired, and the
+    // game printing "magazine empty" while the loop happily queued the next target.
+    // A dry gun is not a weapon, and a hunt that cannot shoot is free damage.
+    if (k > 0) {
+      try {
+        const sr = await conn.execute('get_ship')
+        if (!sr.error) {
+          const sd = (sr.structuredContent ?? sr.result) as Record<string, unknown> | undefined
+          const mods = (sd?.modules ?? (sd?.ship as Record<string, unknown> | undefined)?.modules) as unknown
+          let ammo = weaponAmmoState(mods)
+          if (tooDryToHunt(ammo)) {
+            // RELOAD HERE. The ammo was in the hold the whole time on both
+            // occasions this cost us a ship or a hunt — the macro simply never
+            // had a step that loads it, so the guns could only be refilled if the
+            // model happened to get a turn, and the macro holds the turn for the
+            // entire hunt. Telling the agent to reload was tried and did not work
+            // (Brian, 2026-09-14: "He has some in his own cargo hold! Why didn't
+            // he reload from there?"). So the macro does it.
+            if (ammo.dryGuns.length) {
+              narrate(`reloading ${ammo.dryGuns.length} dry gun(s) from cargo`, true)
+              for (const g of ammo.dryGuns) {
+                await macroAction(ctx, 'reload', { id: g.id, target: g.ammoId }, 2)
+                await macroSleep(macroStepDelayMs(conn))
+              }
+              // Trust the re-read, not the reload's return: a "success" with no
+              // cargo behind it leaves the gun exactly as dry as before.
+              try {
+                const after = await conn.execute('get_ship')
+                const ad = (after.structuredContent ?? after.result) as Record<string, unknown> | undefined
+                ammo = weaponAmmoState((ad?.modules ?? (ad?.ship as Record<string, unknown> | undefined)?.modules) as unknown)
+              } catch { /* keep the pre-reload reading */ }
+            }
+            if (tooDryToHunt(ammo)) {
+              stopReason = `out of ammo after ${k} kill(s) — ${ammo.loaded} of ${ammo.total} weapons loaded`
+                         + `${ammo.dry.length ? ` (dry: ${ammo.dry.slice(0, 6).join(', ')})` : ''}`
+                         + '. The macro tried to reload from cargo and could not, so the cases are gone —'
+                         + ' restock at a station before hunting again.'
+              narrate('out of ammo and none in cargo — breaking off', true)
+              // Disengage rather than sit in a fight we cannot win.
+              await macroAction(ctx, 'stance', { id: 'flee' }, 2)
+              break
+            }
+            narrate(`reloaded — ${ammo.loaded} of ${ammo.total} guns ready`)
+          }
+        }
+      } catch { /* a failed read must not strand the hunt; the entry gate already passed */ }
     }
 
     const scan = await conn.execute('get_nearby')
