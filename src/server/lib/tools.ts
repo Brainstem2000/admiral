@@ -4374,11 +4374,31 @@ async function executeMacroTool(name: string, args: Record<string, unknown>, ctx
  * the floor.
  */
 /**
- * Longest route goto_system will fly in one macro. This is a STRANDING GUARD,
- * not a distance preference — every stranding this fleet has suffered began
- * with a launch that was only barely affordable — so it stays where it is.
+ * Longest route goto_system will fly in one macro.
+ *
+ * This was 25 and framed as a stranding guard. It was never the thing doing the
+ * guarding: the 25% fuel reserve check below refuses any route the tank cannot
+ * afford with margin, and the learned-map sanity check refuses routes wildly
+ * longer than a path the fleet has actually flown. Those two are the real
+ * protection and they work on distance-independent grounds.
+ *
+ * The hop number, meanwhile, was pure friction. It could not even be reached —
+ * the travel budget truncated at ~13 hops — so its only effect was to send
+ * agents into a two-leg split whose first leg also could not complete. Raised so
+ * that reachable-and-affordable routes simply fly, and kept finite only to catch
+ * a pathological route the other guards somehow pass.
  */
-export const MAX_MACRO_HOPS = 25
+export const MAX_MACRO_HOPS = 60
+
+/** Baseline travel budget before the route length is known. */
+export const GOTO_BASE_BUDGET_MS = 12 * 60_000
+
+/**
+ * Real time allowed per hop. Measured median across Ledger Voss's 2026-09-14
+ * routes was 40s; 75s leaves room for a retry or a slow tick without the budget
+ * becoming the thing that ends the journey.
+ */
+export const GOTO_PER_HOP_MS = 75_000
 
 /**
  * Weapon ammo state, read from a get_ship module list.
@@ -4468,12 +4488,20 @@ const recentlyEmptyPois = new Map<string, string[]>()
  * replaced a refusal with the concrete next step — READY TO CLAIM, JUMP LINKS,
  * the freight next_step — the agent simply did the right thing.
  *
- * The waypoint aims well short of the cap so the SECOND leg still launches with
- * fuel margin, and so a route only slightly over the cap doesn't produce a
- * pointless one-hop first leg.
+ * THE WAYPOINT MUST BE REACHABLE IN ONE LEG. It used to be pinned at hop 19,
+ * chosen against the old 25-hop cap — but a leg could only fly ~13 hops before
+ * the travel budget ran out, so the advised first leg was itself guaranteed to
+ * time out. Ledger Voss was told "goto segin first — that is hop 19 of 30" on
+ * 2026-09-14, died at 13/19, re-ran, died again, and burned about five hours
+ * that way. Advice that cannot be followed is worse than a plain refusal,
+ * because the agent keeps trying it.
+ *
+ * Halfway is the rule now: it is always inside one budget, it leaves the second
+ * leg roughly equal, and it cannot produce a pointless one-hop first leg on a
+ * route only slightly over the cap.
  */
 export function overlongRouteAdvice(hopIds: string[], target: string): string {
-  const wpIdx = Math.max(0, Math.min(18, hopIds.length - 2))
+  const wpIdx = Math.max(0, Math.min(Math.floor(hopIds.length / 2) - 1, hopIds.length - 2))
   const waypoint = hopIds[wpIdx]
   return (
     `MACRO ABORT: route to ${target} is ${hopIds.length} hops (cap ${MAX_MACRO_HOPS}) — too far for one macro. ` +
@@ -5391,9 +5419,23 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
   const target = String(args.target_system || '').toLowerCase().replace(/\s+/g, '_')
   if (!target) return 'MACRO ABORT: target_system is required.'
   let dockPoi = args.dock_at_poi ? String(args.dock_at_poi).toLowerCase().replace(/\s+/g, '_') : null
-  // Hops take ~65s of game time each; 12 min covers the fleet's standard 8-10 hop
-  // commutes in one call (observed live: 8 min split a 9-hop route into PARTIAL+resume).
-  const deadline = Date.now() + 12 * 60_000
+  // The travel budget SCALES WITH THE ROUTE, and is extended once find_route says
+  // how long it is. A flat 12 minutes was sized for the fleet's 8-10 hop commutes
+  // and silently truncated everything longer: measured 40s per hop, so a long
+  // route always stopped around hop 13 and came back PARTIAL.
+  //
+  // A PARTIAL is expensive in a way the hop count hides. It hands control back,
+  // which costs a whole LLM turn to notice and re-issue (50-110s on the local
+  // model), plus a fresh find_route, plus the re-planning the model does around
+  // it. Ledger Voss spent about five hours and 85 jumps on 2026-09-14 bouncing
+  // between two 30-hop targets, never finishing a leg, because every attempt
+  // died at 13 hops and every resume cost more than the hops it bought.
+  //
+  // So: budget real time per hop and finish the journey in ONE call whatever its
+  // length (Brian, 2026-09-14: "smooth and fast transitions ... no matter the
+  // distance or number of hops"). Per-hop interrupt and fuel checks still apply,
+  // so a long route stays abortable and cannot outrun its tank.
+  let deadline = Date.now() + GOTO_BASE_BUDGET_MS
 
   const start = await macroReadState(conn)
   if (start.systemId === target) {
@@ -5432,6 +5474,9 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
       .filter((id) => id && id !== start.systemId)
     if (hopIds.length === 0) return `MACRO ABORT: route to ${target} had no parseable hops — jump manually.`
     if (hopIds.length > MAX_MACRO_HOPS) return overlongRouteAdvice(hopIds, target)
+    // Now the length is known, give the journey the time it actually needs.
+    // Only ever EXTENDS: a short commute keeps the baseline budget.
+    deadline = Math.max(deadline, Date.now() + hopIds.length * GOTO_PER_HOP_MS + 120_000)
     // Hard fleet bans are absolute: the game's own router happily plotted a ship
     // THROUGH Goldcrest on 2026-08-30, and the macro flew it. Screen every hop.
     {
@@ -5485,7 +5530,13 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
     let hops = 0
     for (const hop of hopIds) {
       if (!conn.isConnected()) return `goto_system PARTIAL: disconnected after ${hops}/${hopIds.length} hops. Verify position with get_status.`
-      if (Date.now() > deadline) return `goto_system PARTIAL: deadline (8min) after ${hops}/${hopIds.length} hops — re-run goto_system(target_system="${target}") to continue.`
+      if (Date.now() > deadline) {
+        // Report the budget that actually applied, not a number frozen in a
+        // string: this said "8min" while the constant was 12, so every report of
+        // it — to the agent and to the Admiral — was wrong.
+        const mins = Math.round((hopIds.length * GOTO_PER_HOP_MS + 120_000) / 60_000)
+        return `goto_system PARTIAL: travel budget (~${mins}min for ${hopIds.length} hops) spent after ${hops}/${hopIds.length} hops — re-run goto_system(target_system="${target}") to continue.`
+      }
       const interrupt = ctx.interruptPending?.()
       if (interrupt) {
         return `goto_system INTERRUPTED after ${hops}/${hopIds.length} hops (${interrupt}). ` +
