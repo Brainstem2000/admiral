@@ -18,8 +18,16 @@ bun run build          # build frontend + compile standalone `admiral` binary
 ```
 
 - Runtime is **Bun** (`bun:sqlite`, `bun build --compile`). Do not introduce Node-only APIs.
-- **Run the tests.** `bun test` — 779 across 93 files, all passing (≈11 min; several files wait on a rate-limited catalog fetch). (This line used
+- **Run the tests.** `bun test` — 800 across 97 files, all passing, in about 1.5 minutes. (This line used
   to read "there is no automated test suite"; it was stale by every one of them.)
+  It also read "≈11 min; several files wait on a rate-limited catalog fetch", which sent
+  people off to wait out a run that had in fact stopped dead. Two causes, both fixed
+  2026-09-14: `fetchCatalog()` had no timeout, so a rate-limited request kept Bun's event
+  loop alive and the process never exited; and `macroSleep` waited the game's real ~10s
+  combat tick during tests, so `hunt-here-macro` alone took **572 seconds** while printing
+  nothing at 0% CPU. If a run ever looks stalled again, check for an un-timed `fetch` and
+  for a macro sleeping real intervals before assuming an infinite loop — both present as a
+  silent, idle process, not a spinning one.
   Then `bun run build` must succeed and build **warning-free**, and boot the binary
   to exercise the relevant API/UI (see Verifying below).
 - **Typecheck with `bun scripts/typecheck.ts`, not bare `tsc`.** Raw `tsc --noEmit`
@@ -250,7 +258,7 @@ future session must not re-derive or get wrong:
 
 ## Verifying a change
 
-1. `bun test` (779 must pass), then `bun scripts/typecheck.ts` (must print OK —
+1. `bun test` (800 must pass, ~1.5 min), then `bun scripts/typecheck.ts` (must print OK —
    it fails on the crash class and tolerates the Bun-global noise), then
    `bun run build` (must succeed, and warning-free).
 2. `./admiral`, then hit the relevant endpoint(s) under `http://127.0.0.1:3031/api/...`

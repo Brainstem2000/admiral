@@ -3917,7 +3917,25 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
 
 // ─── Macro tools: bounded deterministic loops over game commands ───────────
 
-const macroSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+/** Macro pacing is REAL wall-clock time, and load-bearing: the game's combat
+ *  tick is ~10s and actions are rate-limited, so these waits are what keep a
+ *  macro in step with the server rather than spamming it.
+ *
+ *  They were also almost the whole cost of the test suite. tests/hunt-here-macro
+ *  ran 572 SECONDS on its own — 27 tests, each paying several real 10s combat
+ *  ticks — during which bun prints nothing and the process sits at 0% CPU
+ *  because it is asleep in setTimeout. That is indistinguishable from a hang,
+ *  and it is why `bun test` was believed never to finish.
+ *
+ *  The cap is set ONLY by tests/preload.ts. Nothing in the server sets it, so
+ *  production waits the full interval exactly as before. It caps rather than
+ *  skips, so every await still happens, in the same order, with the same
+ *  interleaving — only the duration collapses. gotoMacroTuning below does this
+ *  for one macro's transit wait; this covers every macro sleep. */
+const macroSleep = (ms: number) => {
+  const cap = (globalThis as { __ADMIRAL_MAX_MACRO_SLEEP_MS?: number }).__ADMIRAL_MAX_MACRO_SLEEP_MS
+  return new Promise<void>((r) => setTimeout(r, typeof cap === 'number' ? Math.min(ms, cap) : ms))
+}
 /** How long goto_system waits for a mid-jump ship to arrive before re-asking
  *  find_route, and how many times. Mutable so tests do not sleep for real. */
 export const gotoMacroTuning = { transitWaitMs: 8_000 }
