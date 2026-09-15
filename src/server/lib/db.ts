@@ -2651,7 +2651,30 @@ export function getAgentSnapshot(profileId: string, kind: string):
 }
 
 /** Fleet hard bans — systems no route may cross, whatever the evidence says today. */
-export const FORBIDDEN_SYSTEMS = new Set(['goldcrest', 'bluerift'])
+/**
+ * Systems no fleet ship enters, ever. Derived from our OWN loss record, not from
+ * the game's danger grading — these are places that have actually killed us.
+ *
+ *   ross_248     124 losses (the June massacre; agents respawned into it repeatedly)
+ *   goldcrest     12 losses in one morning, 2026-08-06, all to wildlife
+ *   xamidimura     9 losses
+ *   alhena         6 losses, INCLUDING Morg'Thar's Warmaul on 2026-09-14 (516,324 insured)
+ *   algol          Morg'Thar's Crimson Devastator, 2026-09-03 — 2,640,487 insured, our worst
+ *   glenhaven      Morg'Thar's Gauntlet, 2026-09-14, no payout
+ *   nekkar         3 losses
+ *   sadalmelik     3 losses
+ *   bluerift       standing ban (leviathan corridor)
+ *
+ * Brian, 2026-09-15: "You should have kept him out of Alhena and where he lost the
+ * previous [capital ship]." That is exactly what this list is for. Clearing a hunter
+ * for "more risk" is a call about CONTRACTS, never a licence to enter a system that
+ * has already eaten a capital hull. The risk floor is code, not directive prose,
+ * because a directive gets rewritten and this must not be.
+ */
+export const FORBIDDEN_SYSTEMS = new Set([
+  'goldcrest', 'bluerift',
+  'ross_248', 'xamidimura', 'alhena', 'algol', 'glenhaven', 'nekkar', 'sadalmelik',
+])
 
 const GRADE_RANK: Record<string, number> = { SAFE: 0, RISKY: 1, DANGEROUS: 2, FORBIDDEN: 3 }
 
