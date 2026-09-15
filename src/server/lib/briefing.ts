@@ -7,6 +7,7 @@
  * Kill switch: preference "situational_briefing" = "off" disables injection.
  */
 import type { GameConnection, CommandResult } from './connections/interface'
+import { hoursSince } from './time'
 import type { Profile } from '../../shared/types'
 import { listObligations, getProfile, listPlaybook, getStorageSummaryForProfile, getNavIntel, getHuntIntel, getDb, getKnownLinks, getGalaxyMap } from './db'
 import type { ObligationRow, PlaybookEntry } from './db'
@@ -575,7 +576,10 @@ const RENT_LAPSE_HOURS = 72
  *  next real one. */
 function isObligationLapsed(o: ObligationRow, now: number): boolean {
   if (o.status !== 'active') return true
-  const staleH = (now - Date.parse(o.last_seen)) / 3_600_000
+  // Date.parse() on a bare `datetime('now')` string reads it as LOCAL time,
+  // which put every obligation five hours in the future and suppressed this
+  // check entirely. hoursSince() knows the column is UTC.
+  const staleH = hoursSince(o.last_seen, now)
   return Number.isFinite(staleH) && staleH > RENT_LAPSE_HOURS
 }
 
@@ -772,7 +776,7 @@ export function buildSituationalBriefing(profileId: string): string {
     const obs = listObligations(profileId).filter(o => o.obligation_type === 'rent' && !isObligationLapsed(o, now))
     if (obs.length > 0) {
       const parts = obs.map(o => {
-        const staleH = (now - new Date(o.last_seen).getTime()) / 3_600_000
+        const staleH = hoursSince(o.last_seen, now)   // UTC-aware; see time.ts
         // total rounded to 10k: the nag keeps its weight while the briefing text —
         // which sits inside the CACHED prompt prefix — stays stable between payments
         // instead of invalidating the cache every rent cycle.
