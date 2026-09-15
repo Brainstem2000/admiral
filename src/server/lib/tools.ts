@@ -312,6 +312,26 @@ export function isEquipmentItem(itemId: string): boolean {
     || /_(?:i|ii|iii|iv|v)$/i.test(itemId) && /(?:laser|harvester|booster|expander|core|emitter|computer|capacitor)/i.test(itemId)
 }
 
+/** Is this cargo line a TOOL the agent consumes to do a job, rather than
+ *  merchandise? These look like ordinary tradeable goods — cargo_container is
+ *  category "component", stackable, tradeable, 160cr base — so neither the
+ *  equipment guard nor the commission lock covers them, and the bulk macro
+ *  happily sells them at a loss.
+ *
+ *  2026-09-15: Ledger Voss bought 2 cargo_container at 213cr at 02:55 for the
+ *  Haven crew-bunk dismantle, flew 30-odd jumps, and ran sell_cargo at 09:57 —
+ *  which dumped both at 119cr. He arrived at the bunk with nothing to put it in
+ *  and burned turns re-deriving why the dismantle kept failing. The round trip
+ *  to replace them is 30 jumps; the items cost 426cr.
+ *
+ *  Third instance of one bug class: ammo (Morg, 2026-09-01), commission stock
+ *  (CyberSpock, 2026-09-10), job tools (here). The macro's contract is "dump the
+ *  ore I just mined" — anything the agent is CARRYING IN ORDER TO ACT is out of
+ *  scope, and a deliberate `sell` by name is still available. */
+export function isOperationalConsumable(itemId: string): boolean {
+  return /(?:^|_)(?:cargo_container|container|survey_probe|probe|repair_kit|patch_kit|fuel_cell|emergency_beacon|distress_beacon|salvage_kit|mining_charge|breaching_charge)(?:_|$)/i.test(itemId)
+}
+
 export function isMacroTool(name: string): boolean {
   return MACRO_TOOLS.has(name)
 }
@@ -5761,6 +5781,16 @@ async function macroSellCargo(args: Record<string, unknown>, ctx: ToolContext, r
     if (isEquipmentItem(item.item_id)) {
       skipped.push(`${item.item_id} x${item.quantity} (EQUIPMENT — this macro never sells modules or ships; `
         + `sell it by name if you really mean to)`)
+      continue
+    }
+
+    // A TOOL IS NOT MERCHANDISE EITHER. Same reasoning one step out: these are
+    // tradeable, cheap and indistinguishable from stock by category, but the
+    // agent is carrying them in order to DO something. Selling them strands the
+    // job that needed them, usually many jumps from anywhere that restocks.
+    if (isOperationalConsumable(item.item_id)) {
+      skipped.push(`${item.item_id} x${item.quantity} (JOB TOOL — carried to do a job, not to trade; `
+        + `this macro never sells it. Use \`sell\` by name if you really mean to)`)
       continue
     }
 
