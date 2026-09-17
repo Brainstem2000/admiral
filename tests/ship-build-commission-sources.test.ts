@@ -117,3 +117,50 @@ describe('cargo strings from the live agent state', () => {
     expect(c.get('copper_ore')).toBe(8)
   })
 })
+
+/**
+ * The faction holds stock at SEVEN stations, all withdrawable, but only
+ * crimson_war_citadel accepts deposits. Treating "the vault" as one place hid
+ * 3,346 steel_plate across four vaults while facility #4 sat 102 short — and
+ * CLAUDE.md had recorded that same 3,346 as a "wrong" number when it was the
+ * right number for the wrong location.
+ */
+describe('stock in OTHER faction vaults is ours, not something to buy', () => {
+  test('a line covered only by another vault reads other_vault, not short', () => {
+    const r = computeShipBuild({
+      bill: [{ item_id: 'steel_plate', quantity: 2750 }],
+      cargo: m({}), locker: m({}), vault: m({}),
+      elsewhereFor: none, otherVaultsFor: () => 3346,
+    })
+    expect(r.lines[0].other_vaults).toBe(3346)
+    expect(r.lines[0].status).toBe('other_vault')
+  })
+
+  test('the local vault still wins — a retrieval run is not suggested when it is already here', () => {
+    const r = computeShipBuild({
+      bill: [{ item_id: 'steel_plate', quantity: 100 }],
+      cargo: m({}), locker: m({}), vault: m({ steel_plate: 500 }),
+      elsewhereFor: none, otherVaultsFor: () => 3346,
+    })
+    expect(r.lines[0].status).toBe('withdraw')
+  })
+
+  test('other vaults outrank personal lockers — ours needs no owner to cooperate', () => {
+    const r = computeShipBuild({
+      bill: [{ item_id: 'steel_plate', quantity: 500 }],
+      cargo: m({}), locker: m({}), vault: m({}),
+      elsewhereFor: () => 900, otherVaultsFor: () => 900,
+    })
+    expect(r.lines[0].status).toBe('other_vault')
+  })
+
+  test('a covered line never consults other vaults at all', () => {
+    let hits = 0
+    computeShipBuild({
+      bill: [{ item_id: 'steel_plate', quantity: 50 }],
+      cargo: m({ steel_plate: 50 }), locker: m({}), vault: m({}),
+      elsewhereFor: none, otherVaultsFor: () => { hits++; return 999 },
+    })
+    expect(hits).toBe(0)
+  })
+})

@@ -693,7 +693,8 @@ interface ShipLine {
   item_id: string; name: string; needed: number
   cargo: number; locker: number; commission_ready: number
   vault: number; elsewhere: number; short: number
-  pct: number; status: 'ready' | 'withdraw' | 'withdraw_partial' | 'fetch' | 'short'
+  other_vaults: number
+  pct: number; status: 'ready' | 'withdraw' | 'withdraw_partial' | 'other_vault' | 'fetch' | 'short'
 }
 interface ShipPayload {
   ship: string; ship_name: string; station: string; pilot: string
@@ -738,11 +739,11 @@ function ShipBuild() {
 
   const TONE: Record<ShipLine['status'], string> = {
     ready: 'var(--smui-green)', withdraw: 'var(--smui-yellow)', withdraw_partial: 'var(--smui-yellow)',
-    fetch: 'var(--smui-orange)', short: 'var(--smui-red)',
+    other_vault: 'var(--smui-yellow)', fetch: 'var(--smui-orange)', short: 'var(--smui-red)',
   }
   const VERB: Record<ShipLine['status'], string> = {
     ready: 'ready', withdraw: 'in vault — withdraw', withdraw_partial: 'withdraw vault, then top up',
-    fetch: 'elsewhere — haul it in', short: 'buy, craft or mine',
+    other_vault: 'OUR stock, another vault — retrieve', fetch: 'elsewhere — haul it in', short: 'buy, craft or mine',
   }
   const rows = [...d.lines].sort((a, b) => a.pct - b.pct)
 
@@ -768,6 +769,11 @@ function ShipBuild() {
         </span>
       </div>
 
+      <p className="text-[10.5px] text-muted-foreground/70 px-1">
+        The faction holds stock at <strong>seven stations</strong> and every one is withdrawable, but only
+        crimson_war_citadel accepts deposits — so anything shown under "other faction vaults" is ours already
+        and one retrieval run away, not something to buy.
+      </p>
       <p className="text-[10.5px] text-muted-foreground/70 px-1">
         A commission takes materials from the pilot's <strong>cargo first, then their personal station
         storage</strong> — it never reads faction storage (that applies only at a station the faction owns,
@@ -800,6 +806,9 @@ function ShipBuild() {
                 {l.locker > 0 && <span>locker {l.locker.toLocaleString()} · </span>}
                 {l.vault > 0 && (
                   <span style={{ color: 'hsl(var(--smui-yellow))' }}>vault {l.vault.toLocaleString()} (not visible) · </span>
+                )}
+                {l.other_vaults > 0 && (
+                  <span style={{ color: 'hsl(var(--smui-yellow))' }}>other faction vaults {l.other_vaults.toLocaleString()} · </span>
                 )}
                 {l.elsewhere > 0 && <span>elsewhere {l.elsewhere.toLocaleString()} · </span>}
                 {l.short > 0 ? <span style={{ color: `hsl(${TONE[l.status]})` }}>short {l.short.toLocaleString()}</span> : <span>complete</span>}

@@ -501,6 +501,13 @@ faction.get('/ship-build', (c) => {
   const result = computeShipBuild({
     bill, cargo, locker, vault,
     elsewhereFor: (itemId) => getStorageElsewhere(station, itemId).reduce((sum, r) => sum + Number(r.quantity), 0),
+    // The faction holds stock at SEVEN stations and every one is withdrawable,
+    // but only crimson_war_citadel accepts deposits. Material in another vault is
+    // OURS and one retrieval run away — counting it as merely "elsewhere" hid
+    // 3,346 steel_plate spread across four vaults while facility #4 sat 102 short.
+    otherVaultsFor: (itemId) => getFactionStorage()
+      .filter(r => r.station_id !== station && r.item_id === itemId)
+      .reduce((sum, r) => sum + Number(r.quantity), 0),
   })
 
   return c.json({

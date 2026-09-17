@@ -15,7 +15,7 @@
  * `commission_ready` counts cargo + locker ONLY; vault surfaces as an action.
  */
 
-export type ShipLineStatus = 'ready' | 'withdraw' | 'withdraw_partial' | 'fetch' | 'short'
+export type ShipLineStatus = 'ready' | 'withdraw' | 'withdraw_partial' | 'other_vault' | 'fetch' | 'short'
 
 export interface ShipLine {
   item_id: string
@@ -26,6 +26,7 @@ export interface ShipLine {
   commission_ready: number
   vault: number
   elsewhere: number
+  other_vaults: number
   short: number
   pct: number
   status: ShipLineStatus
@@ -36,10 +37,17 @@ export interface ShipBuildInput {
   cargo: Map<string, number>
   locker: Map<string, number>
   vault: Map<string, number>
-  /** Fleet stock outside this station. Consulted ONLY when the local picture
-   *  cannot cover the line — a fleet-wide sum is the trap this module exists to
-   *  avoid (see `scope-before-quoting`). */
+  /** Fleet stock outside this station — personal lockers AND other faction
+   *  vaults. Consulted ONLY when the local picture cannot cover the line: a
+   *  fleet-wide sum is the trap this module exists to avoid (see
+   *  `scope-before-quoting`). */
   elsewhereFor: (itemId: string) => number
+  /** Stock in OTHER faction vaults specifically. The faction holds stock at
+   *  seven stations and every one is withdrawable, but only crimson_war_citadel
+   *  accepts deposits — so this is a retrieval run, not a lookup. Reported apart
+   *  from `elsewhere` because the action differs: a faction vault needs
+   *  withdraw-at-source then deposit here, a personal locker needs its owner. */
+  otherVaultsFor?: (itemId: string) => number
 }
 
 export interface ShipBuildResult {
@@ -61,6 +69,7 @@ export function computeShipBuild(input: ShipBuildInput): ShipBuildResult {
     const ready = cargo + locker
     const short = Math.max(0, m.quantity - ready)
     const elsewhere = short > 0 ? input.elsewhereFor(m.item_id) : 0
+    const otherVaults = short > 0 && input.otherVaultsFor ? input.otherVaultsFor(m.item_id) : 0
 
     // Vault stock ALWAYS implies a withdrawal, even when it does not cover the
     // whole line. Reporting fury_alloy (116 vaulted, 120 needed) as merely
@@ -70,6 +79,7 @@ export function computeShipBuild(input: ShipBuildInput): ShipBuildResult {
         short === 0      ? 'ready'
       : vault >= short   ? 'withdraw'
       : vault > 0        ? 'withdraw_partial'
+      : otherVaults > 0  ? 'other_vault'      // OURS, wrong station — a retrieval run
       : elsewhere > 0    ? 'fetch'
       :                    'short'
 
@@ -77,7 +87,7 @@ export function computeShipBuild(input: ShipBuildInput): ShipBuildResult {
       item_id: m.item_id,
       name: String(m.item_id).replace(/_/g, ' '),
       needed: m.quantity,
-      cargo, locker, commission_ready: ready, vault, elsewhere, short,
+      cargo, locker, commission_ready: ready, vault, elsewhere, other_vaults: otherVaults, short,
       pct: m.quantity > 0 ? Math.min(1, ready / m.quantity) : 1,
       status,
     }
