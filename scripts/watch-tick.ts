@@ -49,12 +49,26 @@ for (const r of db.query(`SELECT p.name, MAX(l.timestamp) t FROM profiles p
 //    alive while their LLM loop is stopped — four sat like that unnoticed on 2026-09-17,
 //    including the only agent crafting control nodes. Connection churn writes log lines,
 //    so check 1 above cannot see this.
-for (const r of db.query(`SELECT p.name FROM profiles p WHERE NOT EXISTS (
-    SELECT 1 FROM log_entries l WHERE l.profile_id = p.id AND l.type = 'llm_call'
-      AND l.timestamp > datetime('now','-30 minutes'))`).all() as Array<{ name: string }>) {
+//
+//    An LLM gap ALONE is not the signal. `mine_until_full` is a single tool call that
+//    runs until the hold fills, routinely past 30 minutes, so a working miner looks
+//    identical to a stopped one by LLM timing. This flagged both of the fleet's top
+//    earners while they were actively pulling ore. The discriminator is WORK: a running
+//    macro emits mining yields and tool results; a stopped loop emits neither, though it
+//    still receives pushed chat. So require a quiet LLM *and* no evidence of work.
+for (const r of db.query(`SELECT p.name FROM profiles p
+    WHERE NOT EXISTS (
+      SELECT 1 FROM log_entries l WHERE l.profile_id = p.id AND l.type = 'llm_call'
+        AND l.timestamp > datetime('now','-30 minutes'))
+    AND NOT EXISTS (
+      SELECT 1 FROM log_entries w WHERE w.profile_id = p.id
+        AND w.timestamp > datetime('now','-15 minutes')
+        AND (w.type IN ('tool_call','tool_result')
+             OR w.summary LIKE '%MINING_YIELD%' OR w.summary LIKE '%mine_until_full%'
+             OR w.summary LIKE '%CRAFTING%'))`).all() as Array<{ name: string }>) {
   if (PARKED.has(r.name)) continue
   emit(`dead:${r.name}:${Math.floor(Date.now() / 1800000)}`,
-       `NOT TURNING: ${r.name} no LLM call in 30min — connected but the loop may be stopped`)
+       `NOT TURNING: ${r.name} no LLM call in 30min and no work in 15min — loop may be stopped`)
 }
 
 // 3. Genuine agent-side refusals.
