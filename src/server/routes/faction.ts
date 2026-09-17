@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { agentManager } from '../lib/agent-manager'
-import { listProfiles, getDb, getFactionStorage, getFactionLedger, getFactionTreasurySummary, getFactionTreasuryStatement, getStorageForProfile, getStorageElsewhere } from '../lib/db'
+import { listProfiles, getDb, getFactionStorage, getFactionLedger, getFactionTreasurySummary, getFactionTreasuryStatement, getStorageForProfile, getStorageElsewhere, getPreference} from '../lib/db'
 import { getFacility, getShip } from '../lib/catalog'
 import { computeShipBuild, parseCargoItems } from '../lib/ship-build'
 
@@ -303,7 +303,7 @@ faction.get('/treasury/statement', (c) => {
  * scarcest input, not its average. A facility 100% on steel and 10% on nodes is 10%
  * done, not 55%.
  */
-const FACILITY_QUEUE = [
+const DEFAULT_FACILITY_QUEUE = [
   'plasma_injector_assembly',
   'plasma_residue_condenser',
   'tritium_cryo_extractor',
@@ -332,6 +332,28 @@ const FACILITY_QUEUE = [
   'fuel_rod_press',
 ] as const
 
+/**
+ * The build page renders this list and nothing else, so a facility missing from it is
+ * invisible while the fleet works on it — that is exactly what happened to the Tungsten
+ * Drawing Frame on 2026-09-17, with three agents buying, forging and hauling its
+ * materials and Brian finding no trace of it on any page.
+ *
+ * A hardcoded array makes "remember to edit the source" the only safeguard, which is a
+ * process, not a fix. The order is now stored under the `facility_build_queue`
+ * preference as a JSON array of facility ids and can be changed at runtime; the constant
+ * above is the fallback when nothing is stored or the stored value is unusable.
+ */
+function facilityQueue(): string[] {
+  const raw = getPreference('facility_build_queue')
+  if (!raw) return [...DEFAULT_FACILITY_QUEUE]
+  try {
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed) && parsed.length && parsed.every(x => typeof x === 'string' && x))
+      return parsed as string[]
+  } catch { /* stored value is junk — fall through to the default rather than 500 */ }
+  return [...DEFAULT_FACILITY_QUEUE]
+}
+
 faction.get('/build-queue', async (c) => {
   const station = c.req.query('station') || 'crimson_war_citadel'
   const vault = new Map<string, number>()
@@ -350,7 +372,7 @@ faction.get('/build-queue', async (c) => {
   await refreshBuilt()
   const owned = new Set((builtCache?.rows ?? []).map(r => String((r as { type?: string }).type ?? '')))
 
-  const queue = FACILITY_QUEUE.map((id, i) => {
+  const queue = facilityQueue().map((id, i) => {
     const f = getFacility(id)
     if (!f) return { id, name: id, order: i + 1, missing_from_catalog: true }
     const bill = (f.build_materials ?? []) as Array<{ item_id: string; quantity: number }>
