@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { describePlace, routeWithSafety } from '../lib/places'
 import { getGalaxyMap, setGalaxyMap } from '../lib/db'
 import { agentManager } from '../lib/agent-manager'
 import type { GalaxyMapData, GalaxySystem } from '../../shared/galaxy-types'
@@ -47,6 +48,24 @@ galaxy.post('/refresh', async (c) => {
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
   }
+})
+
+/**
+ * GET /api/galaxy/place/:id — everything known about one place, system or station.
+ * GET /api/galaxy/route?from=&to= — a path WITH the risk of every hop.
+ *
+ * The game's own find_route returns a path and says nothing about its safety, and
+ * grading a corridor by its DESTINATION is how 228 weapon_core were sent down a
+ * 13-hop zero-police run. A corridor is exactly as safe as its worst jump, so the
+ * worst intermediate hop is reported rather than averaged away, and a route that
+ * crosses a hard-banned killzone also returns a killzone-free detour when one exists.
+ */
+galaxy.get('/place/:id', (c) => c.json(describePlace(c.req.param('id'))))
+
+galaxy.get('/route', (c) => {
+  const from = c.req.query('from'), to = c.req.query('to')
+  if (!from || !to) return c.json({ error: 'from and to are required' }, 400)
+  return c.json(routeWithSafety(from, to))
 })
 
 export default galaxy

@@ -3242,6 +3242,25 @@ export interface ItemLocation {
   updated_at: string
 }
 
+/**
+ * Sealed packages wherever they sit. They are ordinary inventory rows whose
+ * item_id is `package:<hash>`, which is why nothing ever listed them AS packages
+ * and the only record lived in a memory note. One row is one package; a package
+ * occupies 100 cargo regardless of contents, so unpack on site.
+ */
+export function getPackageHoldings(): ItemLocation[] {
+  return db.query(`
+    SELECT 'locker' AS holder_kind, profile_id, station_id, item_id, item_name, quantity, updated_at
+      FROM storage_inventory WHERE item_id LIKE 'package:%' AND quantity > 0
+    UNION ALL
+    SELECT 'cargo', profile_id, '(cargo)', item_id, item_name, quantity, updated_at
+      FROM cargo_inventory WHERE item_id LIKE 'package:%' AND quantity > 0
+    UNION ALL
+    SELECT 'vault', NULL, station_id, item_id, item_name, quantity, updated_at
+      FROM faction_storage_inventory WHERE item_id LIKE 'package:%' AND quantity > 0
+    ORDER BY station_id`).all() as ItemLocation[]
+}
+
 export function findItemEverywhere(itemId: string): ItemLocation[] {
   return db.query(`
     SELECT 'locker' AS holder_kind, profile_id, station_id, item_id, item_name, quantity, updated_at

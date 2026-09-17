@@ -12,8 +12,10 @@ import {
   getStorageLedger,
   findItemEverywhere,
   getEverythingTotals,
+  getPackageHoldings,
 } from '../lib/db'
 import { getShip } from '../lib/catalog'
+import { describePlace } from '../lib/places'
 
 /**
  * Fleet inventory ledger — the machine-kept answer to "what do we own, where,
@@ -280,6 +282,49 @@ inventory.get('/everything', (c) => {
     count: rows.length,
     items: rows,
     note: 'Totals span ship holds, personal lockers and all faction vaults. A total is NOT what any one consumer can reach — open an item to see the split.',
+  })
+})
+
+/**
+ * GET /api/inventory/packages — the sealed packages, where they are, and whether
+ * it is safe to go and get them.
+ *
+ * Packages have been tracked all along as `package:<hash>` rows in
+ * storage_inventory, but nothing ever surfaced them AS packages, so the only
+ * record of what we hold lived in a memory note that went stale. Each one is a
+ * sealed container occupying 100 cargo regardless of contents — which is why they
+ * are unpacked on site rather than hauled — so the count per station matters more
+ * than the total.
+ */
+inventory.get('/packages', (c) => {
+  const names = new Map(listProfiles().map(p => [p.id, p.name]))
+  const rows = getPackageHoldings()
+  const byStation = new Map<string, { station_id: string; count: number; holders: Set<string> }>()
+  for (const r of rows) {
+    const e = byStation.get(r.station_id) ?? { station_id: r.station_id, count: 0, holders: new Set<string>() }
+    e.count += r.quantity
+    e.holders.add(r.holder_kind === 'vault' ? 'FACTION' : (names.get(r.profile_id ?? '') ?? r.profile_id ?? '?'))
+    byStation.set(r.station_id, e)
+  }
+  const stations = [...byStation.values()].map(e => {
+    // Risk is per-CORRIDOR, but the station's own system is the first thing to know:
+    // a package at a police-0 station is a different errand from one at a capital.
+    let risk: unknown = null
+    try { risk = describePlace(e.station_id).risk } catch { risk = null }
+    return { station_id: e.station_id, packages: e.count, holders: [...e.holders], risk }
+  }).sort((a, b) => b.packages - a.packages)
+
+  return c.json({
+    total_packages: rows.reduce((n, r) => n + r.quantity, 0),
+    stations,
+    packages: rows.map(r => ({
+      package_id: r.item_id,
+      holder_kind: r.holder_kind,
+      holder: r.holder_kind === 'vault' ? 'FACTION' : (names.get(r.profile_id ?? '') ?? r.profile_id),
+      station_id: r.station_id,
+      updated_at: r.updated_at,
+    })),
+    note: 'A sealed package occupies 100 cargo whatever is inside, so unpack on site rather than hauling sealed. Contents are not recorded until something opens one.',
   })
 })
 
