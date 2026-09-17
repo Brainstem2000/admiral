@@ -48,30 +48,31 @@ for (const r of db.query(`SELECT p.name, MAX(l.timestamp) t FROM profiles p
 // 2. Connected but not turning. A server restart leaves agents in the roster looking
 //    alive while their LLM loop is stopped — four sat like that unnoticed on 2026-09-17,
 //    including the only agent crafting control nodes. Connection churn writes log lines,
-//    so check 1 above cannot see this.
+//    so a silence check cannot see it.
 //
-//    An LLM gap ALONE is not the signal. `mine_until_full` is a single tool call that
-//    runs until the hold fills, routinely past 30 minutes, so a working miner looks
-//    identical to a stopped one by LLM timing. This flagged both of the fleet's top
-//    earners while they were actively pulling ore. The discriminator is WORK: a running
-//    macro emits mining yields and tool results; a stopped loop emits neither, though it
-//    still receives pushed chat. So require a quiet LLM *and* no evidence of work.
-for (const r of db.query(`SELECT p.name FROM profiles p
-    WHERE NOT EXISTS (
-      SELECT 1 FROM log_entries l WHERE l.profile_id = p.id AND l.type = 'llm_call'
-        AND l.timestamp > datetime('now','-30 minutes'))
-    AND NOT EXISTS (
-      SELECT 1 FROM log_entries w WHERE w.profile_id = p.id
-        AND w.timestamp > datetime('now','-15 minutes')
-        AND (w.type IN ('tool_call','tool_result')
-             OR w.summary LIKE '%MINING_YIELD%' OR w.summary LIKE '%mine_until_full%'
-             OR w.summary LIKE '%CRAFTING%'
-             -- travel is work too: goto_system runs hop-by-hop for a long transit
-             -- (a hauler was mid hop 26 of 31 when this flagged him as stopped)
-             OR w.summary LIKE '%goto_system%' OR w.summary LIKE '%"action":"jump"%'))`).all() as Array<{ name: string }>) {
-  if (PARKED.has(r.name)) continue
-  emit(`dead:${r.name}:${Math.floor(Date.now() / 1800000)}`,
-       `NOT TURNING: ${r.name} no LLM call in 30min and no work in 15min — loop may be stopped`)
+//    Judged from the SERVER's own view, not by guessing from the log. Every long-running
+//    macro — mining, crafting, travelling — occupies a single tool call for many minutes,
+//    so an LLM gap says nothing about health. Enumerating the macros by hand produced two
+//    false positives in one hour (mine_until_full, then a hauler at hop 26 of 31) and would
+//    keep producing them as new macros appear. `running` plus a live `activity` string is
+//    macro-agnostic and cannot drift out of date.
+try {
+  const res = await fetch('http://127.0.0.1:3031/api/profiles', { signal: AbortSignal.timeout(5000) })
+  const body = await res.json() as unknown
+  const rows = (Array.isArray(body) ? body : (body as { profiles?: unknown[] }).profiles ?? []) as Array<{
+    name?: string; running?: boolean; connected?: boolean; activity?: string
+  }>
+  for (const p of rows) {
+    const name = String(p.name ?? '')
+    if (!name || PARKED.has(name)) continue
+    const busy = /Executing|Planning|Waiting for LLM/i.test(String(p.activity ?? ''))
+    if (p.running && busy) { clear(`dead:${name}`); continue }
+    if (p.running) { clear(`dead:${name}`); continue }   // paced between turns is healthy
+    emit(`dead:${name}`, `NOT RUNNING: ${name} connected=${p.connected} activity="${String(p.activity ?? '').slice(0, 40)}"`)
+  }
+} catch {
+  // The Admiral being unreachable is itself worth one line, but only once.
+  emit(`api:${Math.floor(Date.now() / 1800000)}`, 'ADMIRAL API UNREACHABLE — cannot read agent run state')
 }
 
 // 3. Genuine agent-side refusals.
