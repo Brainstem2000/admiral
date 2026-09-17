@@ -445,8 +445,20 @@ interface QueueEntry {
  * build. Averaging would report a facility 100% stocked on steel and 0% on nodes as
  * half done, which is the opposite of useful.
  */
+interface PendingBuild {
+  definition_id: string; name: string; status: string; build_cost?: number
+  materials?: Array<{ item_id: string; name?: string; quantity_required: number; quantity_in_storage?: number; quantity_missing?: number }>
+}
+interface RentableVenue {
+  type: string; name: string; recipe_id: string
+  fee_per_run: number; items_per_hour: number; backlog_ticks: number; owner: string; copies: number
+}
+
 function BuildQueue() {
-  const [data, setData] = useState<{ station: string; treasury: number; queue: QueueEntry[]; built?: BuiltFacility[] } | null>(null)
+  const [data, setData] = useState<{
+    station: string; treasury: number; queue: QueueEntry[]; built?: BuiltFacility[]
+    under_construction?: PendingBuild[]; rentable?: RentableVenue[]
+  } | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
   useEffect(() => {
@@ -486,6 +498,61 @@ function BuildQueue() {
         see personal lockers. Entries are sequential: each is measured against what the ones above it leave behind.
         Percent is the scarcest input, not an average.
       </p>
+
+      {/* What the GAME says is under construction, ahead of anything we merely PLAN.
+          The curated list below missed a Tungsten Drawing Frame and then a Railgun Capacitor
+          Assembly Line that was already standing at waiting_for_materials — both invisible
+          while agents worked on them. This section cannot go stale: it is the live answer. */}
+      {!!data.under_construction?.length && (
+        <div className="flex flex-col gap-2">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground px-1">
+            Under construction — live from the station
+          </div>
+          {data.under_construction.map(b => {
+            const gaps = (b.materials ?? []).filter(m => (m.quantity_missing ?? 0) > 0)
+            return (
+              <div key={b.definition_id} className="border border-border/60 px-3 py-2 text-[11.5px]">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="font-medium">{b.name}</span>
+                  <span className="font-mono text-[10.5px]" style={{ color: gaps.length ? 'var(--smui-orange)' : 'var(--smui-green)' }}>
+                    {gaps.length ? `${gaps.length} line${gaps.length > 1 ? 's' : ''} short` : 'materials met'}
+                  </span>
+                </div>
+                <div className="text-[10.5px] text-muted-foreground">
+                  {b.status}{b.build_cost ? ` · ${b.build_cost.toLocaleString()} cr` : ''}
+                </div>
+                {gaps.map(m => (
+                  <div key={m.item_id} className="font-mono text-[10.5px] tabular-nums">
+                    {m.name ?? m.item_id}: {(m.quantity_in_storage ?? 0).toLocaleString()} / {m.quantity_required.toLocaleString()}
+                    <span style={{ color: 'var(--smui-orange)' }}> — short {(m.quantity_missing ?? 0).toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Rent before you build. On 2026-09-17 an afternoon went into assembling 102,000 cr and
+          ~4,100 units of material for a facility the station already ran 14 idle public copies of
+          at 32 cr a run. */}
+      {!!data.rentable?.length && (
+        <details className="border border-border/60 px-3 py-2">
+          <summary className="text-[11px] uppercase tracking-wide text-muted-foreground cursor-pointer">
+            Rentable here — {data.rentable.length} recipes, no build required
+          </summary>
+          <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-x-4 text-[10.5px] font-mono tabular-nums">
+            {[...data.rentable].sort((a, b) => a.fee_per_run - b.fee_per_run).map(r => (
+              <div key={r.recipe_id} className="flex justify-between gap-2">
+                <span className="truncate">{r.recipe_id}{r.copies > 1 ? ` x${r.copies}` : ''}</span>
+                <span style={{ color: r.backlog_ticks ? 'var(--smui-orange)' : 'var(--smui-green)' }}>
+                  {r.fee_per_run}/run
+                </span>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
 
       <div className="flex flex-col gap-2">
         {data.queue.map(q => {

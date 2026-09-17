@@ -370,6 +370,7 @@ faction.get('/build-queue', async (c) => {
   // that had just been spent ON it, while also holding 2,850 steel hostage from
   // the facility actually next in line.
   await refreshBuilt()
+  await refreshStation()
   const owned = new Set((builtCache?.rows ?? []).map(r => String((r as { type?: string }).type ?? '')))
 
   const queue = facilityQueue().map((id, i) => {
@@ -422,7 +423,14 @@ faction.get('/build-queue', async (c) => {
     }
   })
 
-  return c.json({ station, treasury, queue, built: builtCache?.rows ?? [] })
+  return c.json({
+    station, treasury, queue,
+    built: builtCache?.rows ?? [],
+    // What the GAME says is actually being built here, with real per-material gaps.
+    under_construction: stationCache?.pending ?? [],
+    // Cheapest public venue per recipe — rent before you build.
+    rentable: stationCache?.rentable ?? [],
+  })
 })
 
 /**
@@ -438,6 +446,63 @@ faction.get('/build-queue', async (c) => {
  * `facility action=faction_owned` works UNDOCKED, so this does not depend on who
  * is flying. Cached 60s because the UI polls every 30s and the list changes rarely.
  */
+/**
+ * The build page used to render ONLY the curated FACILITY_QUEUE, so anything the fleet was
+ * actually building was invisible unless somebody had remembered to add it. That failed twice
+ * on 2026-09-17: first the Tungsten Drawing Frame, then a Railgun Capacitor Assembly Line
+ * already standing at `waiting_for_materials` that nobody could find on any page.
+ *
+ * `facility` `{action:"list"}` is a FREE query and the game answers it with the truth:
+ * `construction.pending` (what is really being built, with per-material shortfalls) and the
+ * public facilities at the station with their rental fees. Both now reach the UI, so the page
+ * shows reality first and our wishlist second.
+ */
+let stationCache: { at: number; pending: unknown[]; rentable: unknown[] } | null = null
+
+async function refreshStation(): Promise<void> {
+  if (stationCache && Date.now() - stationCache.at < 60_000) return
+  const agentId = pickAgent()
+  if (!agentId) return
+  try {
+    const raw = await runQuery(agentId, 'facility', { action: 'list' })
+    const res = (raw.structuredContent ?? raw.result) as Record<string, unknown> | undefined
+    if (!res) return
+    const construction = (res.construction ?? {}) as Record<string, unknown>
+    const pending = (Array.isArray(construction.pending) ? construction.pending : []) as Array<Record<string, unknown>>
+
+    // Public production venues, cheapest fee first. This is the half that stops us building
+    // what is already standing idle fifty metres away — 14 public Tungsten Drawing Frames at
+    // 32/run against a 102,000cr build.
+    const rentable: Array<Record<string, unknown>> = []
+    for (const key of ['station_facilities', 'public_facilities']) {
+      for (const f of (Array.isArray(res[key]) ? res[key] : []) as Array<Record<string, unknown>>) {
+        const prod = (f.production ?? {}) as Record<string, unknown>
+        if (!prod.public || !f.recipe_id) continue
+        rentable.push({
+          type: String(f.type ?? ''), name: String(f.name ?? f.type ?? ''),
+          recipe_id: String(f.recipe_id ?? ''),
+          fee_per_run: Number(prod.rental_fee_per_run ?? 0),
+          items_per_hour: Number(prod.items_per_hour ?? 0),
+          backlog_ticks: Number(prod.backlog_ticks ?? 0),
+          owner: key === 'public_facilities' ? 'player' : 'station',
+        })
+      }
+    }
+    // One row per recipe: the cheapest venue that can run it.
+    const byRecipe = new Map<string, Record<string, unknown>>()
+    for (const r of rentable) {
+      const k = String(r.recipe_id)
+      const cur = byRecipe.get(k)
+      if (!cur || Number(r.fee_per_run) < Number(cur.fee_per_run)) byRecipe.set(k, { ...r, copies: 0 })
+    }
+    for (const r of rentable) {
+      const row = byRecipe.get(String(r.recipe_id))
+      if (row) row.copies = Number(row.copies ?? 0) + 1
+    }
+    stationCache = { at: Date.now(), pending, rentable: [...byRecipe.values()] }
+  } catch { /* a live read failing must never take the page down */ }
+}
+
 let builtCache: { at: number; rows: unknown[] } | null = null
 
 async function refreshBuilt(): Promise<void> {
