@@ -176,7 +176,7 @@ export const allTools: Tool[] = [
   },
   {
     name: 'fleet_route',
-    description: "Route estimate between ANY two systems from the fleet's learned jump graph (every route any agent has ever flown) — no game tick, works without being at either end, and AVOIDS forbidden systems (goldcrest, bluerift) automatically, which the game's find_route will not do. Distances are upper bounds that improve as the fleet flies; before committing to a trip, confirm with a live find_route from your position.",
+    description: "Route estimate between ANY two systems from the fleet's learned jump graph (every route any agent has ever flown) — no game tick, works without being at either end, and AVOIDS every fleet-banned system automatically (the nine in FORBIDDEN_SYSTEMS — goldcrest, bluerift, ross_248, xamidimura, alhena, algol, glenhaven, nekkar, sadalmelik), which the game's find_route will not do, so prefer this when the game's route crosses one. Distances are upper bounds that improve as the fleet flies; before committing to a trip, confirm with a live find_route from your position.",
     parameters: Type.Object({
       from: Type.String({ description: 'Origin system_id (e.g. krynn)' }),
       to: Type.String({ description: 'Destination system_id (e.g. haven)' }),
@@ -3719,7 +3719,15 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
       // seeded from the galaxy map), with fleet-banned systems excluded outright. The
       // graph is partial by nature — answers are upper bounds, and "no route" only means
       // the fleet has not learned one yet.
-      const FORBIDDEN = new Set(['goldcrest', 'bluerift'])
+      // The canonical ban list, not a hand-copied subset. This read
+      // `new Set(['goldcrest', 'bluerift'])` until 2026-09-17 — TWO of the nine systems
+      // in FORBIDDEN_SYSTEMS — so the tool agents are told to use as the SAFE routing
+      // fallback happily routed through ross_248 (124 losses), algol (ate a 2,640,487
+      // Devastator), alhena, glenhaven, nekkar, sadalmelik and xamidimura. Grit Vane hit
+      // it coming home from cargo_lanes: every route offered crossed a system that has
+      // killed us. db.ts says the risk floor must be code rather than directive prose;
+      // that only holds if the code reads the same list everywhere.
+      const FORBIDDEN = FORBIDDEN_SYSTEMS
       const from = String(args.from ?? '').toLowerCase().trim()
       const to = String(args.to ?? '').toLowerCase().trim()
       let result: string
