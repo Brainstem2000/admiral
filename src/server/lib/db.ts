@@ -282,6 +282,47 @@ VERSIONED_MIGRATIONS.push({
   },
 })
 
+VERSIONED_MIGRATIONS.push({
+  version: 10,
+  name: 'faction-credits-are-money-not-stock',
+  up: (d) => {
+    // Treasury credits move through the transfer API as an ITEM literally named
+    // "credits" — the game refuses a bare `credits` argument and tells you to use
+    // item_id="credits". The capture booked those as lockbox STOCK, so three real
+    // treasury draws on 2026-09-15 (400,000 + 900,000 + 600,000) landed with
+    // credits_signed NULL. The treasury statement could not attribute them and
+    // reported 1,900,000 as "unattributed outflow", and the vault would have
+    // listed "credits" as an item someone could try to withdraw.
+    //
+    // Rewrite the historical rows onto the treasury side. The sign is carried by
+    // the stored quantity (negative for a withdraw, positive for a deposit), so
+    // the direction survives the move without re-reading the original command.
+    d.exec(`UPDATE faction_ledger
+               SET kind = CASE WHEN quantity < 0 THEN 'treasury_withdraw' ELSE 'treasury_deposit' END,
+                   credits_signed = CAST(quantity AS INTEGER),
+                   item_id = NULL,
+                   quantity = NULL
+             WHERE LOWER(item_id) = 'credits' AND credits_signed IS NULL`)
+  },
+})
+
+VERSIONED_MIGRATIONS.push({
+  version: 11,
+  name: 'facility-rent-per-cycle (rent is the treasury\'s biggest standing outflow)',
+  up: (d) => {
+    // Rent is auto-deducted every ~17-minute cycle from the OWNER's wallet — the faction
+    // treasury for faction facilities — wherever the owner is. It never appears as a command
+    // result, so the only way to attribute it is to record the per-facility rate the game
+    // states in `facility action=list` (faction_facilities[].rent_per_cycle) and multiply.
+    // The game's own est_rent_per_day / rent_per_cycle gives 86 cycles per day.
+    const cols = (d.query('PRAGMA table_info(fleet_intel_facilities)').all() as { name: string }[]).map(c => c.name)
+    if (!cols.includes('rent_per_cycle')) d.exec('ALTER TABLE fleet_intel_facilities ADD COLUMN rent_per_cycle INTEGER')
+    if (!cols.includes('facility_uid')) d.exec('ALTER TABLE fleet_intel_facilities ADD COLUMN facility_uid TEXT')
+    if (!cols.includes('faction_owned')) d.exec('ALTER TABLE fleet_intel_facilities ADD COLUMN faction_owned INTEGER DEFAULT 0')
+    if (!cols.includes('level')) d.exec('ALTER TABLE fleet_intel_facilities ADD COLUMN level INTEGER')
+  },
+})
+
 function runVersionedMigrations(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -1393,6 +1434,14 @@ export function updateProfile(id: string, updates: Partial<Profile>): Profile | 
     'directive', 'connection_mode', 'server_url',
     'autoconnect', 'enabled', 'todo', 'memory', 'context_budget',
     'sort_order', 'group_name', 'turn_interval_sec',
+    // volatile_split moves memory/TODO/briefings/fleet orders out of the cached
+    // system prefix into a per-turn message. It shipped enabled on two profiles
+    // and was then unreachable: the column existed, buildVolatileState was wired
+    // on both call sites, and the API returned the flag — but it was missing from
+    // this whitelist, so nothing could ever turn it on. Measured 2026-09-16:
+    // 159.6M cache-WRITE tokens a day at write/read ratios of 50-266%, which is
+    // exactly the cost this flag exists to remove.
+    'volatile_split',
   ]
   const sets: string[] = []
   const vals: unknown[] = []
@@ -1401,7 +1450,7 @@ export function updateProfile(id: string, updates: Partial<Profile>): Profile | 
     if (key in updates) {
       sets.push(`${key} = ?`)
       let val = (updates as Record<string, unknown>)[key]
-      if (key === 'autoconnect' || key === 'enabled' || key === 'codex_executor_enabled' || key === 'codex_planner_enabled') val = val ? 1 : 0
+      if (key === 'autoconnect' || key === 'enabled' || key === 'codex_executor_enabled' || key === 'codex_planner_enabled' || key === 'volatile_split') val = val ? 1 : 0
       vals.push(val)
     }
   }
@@ -1911,6 +1960,73 @@ export function recordFactionStorageSnapshot(
   tx()
 }
 
+/**
+ * The faction id this Admiral has seen, from data already on disk.
+ *
+ * Needed because the per-profile resolver depends on an in-memory map that a server restart
+ * empties, and a plain `deposit{target:"faction"}` result does not repeat faction_id. Without
+ * this, every lockbox movement in the window after a restart was journaled with a NULL
+ * faction_id — which broke treasury attribution and, once the vault delta below was keyed on
+ * it, silently stopped updating the vault too. One faction per Admiral, so the newest id on
+ * record is the right answer.
+ */
+let knownFactionIdCache: string | null = null
+export function getKnownFactionId(): string | null {
+  if (knownFactionIdCache) return knownFactionIdCache
+  const d = getDb()
+  const row = (d.query(`SELECT faction_id FROM faction_storage_inventory WHERE faction_id IS NOT NULL AND faction_id <> ''
+      ORDER BY updated_at DESC LIMIT 1`).get()
+    ?? d.query(`SELECT faction_id FROM faction_ledger WHERE faction_id IS NOT NULL AND faction_id <> ''
+      ORDER BY timestamp DESC LIMIT 1`).get()) as { faction_id: string } | null
+  knownFactionIdCache = row?.faction_id || null
+  return knownFactionIdCache
+}
+
+/**
+ * Apply a signed delta to the faction lockbox at ONE station, and return the new quantity.
+ *
+ * The vault table used to be written ONLY by `recordFactionStorageSnapshot` — a wholesale
+ * replace that runs on `view_faction_storage`. Every deposit and withdrawal in between left
+ * it stale, always in the direction of under-reporting stock, because deposits are the common
+ * case. On 2026-09-16 that cost the campaign most of an evening: the vault really held 1,200
+ * copper_piping, 1,080 copper_wiring and 218 control_node while this table said 250, 154 and
+ * 150. The craft pre-flight guard reads this table, so it refused crafts that would have
+ * succeeded, agents reported themselves blocked on material they were standing on, and the
+ * build-queue UI showed a facility at 26% that was not short of that material at all.
+ *
+ * Callers must gate this on the faction_ledger insert actually happening — that row's UNIQUE
+ * dedupe_key is what makes a replayed command result idempotent here. Applying a delta for a
+ * duplicate ledger row would double-count it.
+ *
+ * Quantities are clamped at zero: a negative delta against a row we never saw means the cache
+ * had already drifted, and guessing a negative is worse than waiting for the next snapshot.
+ */
+export function applyFactionStorageDelta(
+  factionId: string, stationId: string, itemId: string, delta: number, reportedBy?: string | null,
+): number {
+  if (!factionId || !stationId || !itemId || !Number.isFinite(delta) || delta === 0) return 0
+  const d = getDb()
+  const tx = d.transaction(() => {
+    // Two statements, not one upsert: in an ON CONFLICT clause `excluded.quantity` is the
+    // value the INSERT would have written, so clamping it there (MAX(0, ?)) turns every
+    // negative delta into a no-op and withdrawals silently never subtract.
+    d.query(`INSERT OR IGNORE INTO faction_storage_inventory (faction_id, station_id, item_id, item_name, quantity, updated_at, reported_by)
+      VALUES (?, ?, ?, '', 0, datetime('now'), ?)`)
+      .run(factionId, stationId, itemId, reportedBy ?? null)
+    d.query(`UPDATE faction_storage_inventory
+        SET quantity = MAX(0, quantity + ?), updated_at = datetime('now'), reported_by = COALESCE(?, reported_by)
+      WHERE faction_id = ? AND station_id = ? AND item_id = ?`)
+      .run(delta, reportedBy ?? null, factionId, stationId, itemId)
+    const row = d.query('SELECT quantity q FROM faction_storage_inventory WHERE faction_id = ? AND station_id = ? AND item_id = ?')
+      .get(factionId, stationId, itemId) as { q: number } | null
+    const q = Number(row?.q ?? 0)
+    // Match snapshot semantics, which never store an empty line.
+    if (q <= 0) d.query('DELETE FROM faction_storage_inventory WHERE faction_id = ? AND station_id = ? AND item_id = ?').run(factionId, stationId, itemId)
+    return q
+  })
+  return tx()
+}
+
 export function recordFactionTreasurySnapshot(factionId: string | null, credits: number, reportedBy: string | null, sourceCommand: string, at?: string): void {
   getDb().query(`INSERT INTO faction_treasury_snapshots (faction_id, credits, at, reported_by, source_command)
     VALUES (?, ?, COALESCE(?, datetime('now')), ?, ?)`).run(factionId, Math.round(credits), at ?? null, reportedBy, sourceCommand)
@@ -1973,6 +2089,246 @@ export function getFactionTreasurySummary(): {
     booked_since_latest: bookedSince,
     implied_now: latest ? latest.credits + bookedSince : null,
     unexplained_between_snapshots: between,
+  }
+}
+
+/** One line of the treasury statement. `inferred` rows were never reported by any
+ *  command — they are the gap between two balances the game stated. */
+export interface TreasuryStatementEntry {
+  at: string
+  kind: string
+  reason: string
+  credits: number
+  balance_after: number | null
+  profile_id: string | null
+  profile_name: string | null
+  station_id: string | null
+  source_command: string | null
+  inferred: boolean
+}
+
+/**
+ * A full treasury statement: every credit movement in and out, with a reason.
+ *
+ * The game never reports facility rent as a command result — it is auto-deducted
+ * "every facility cycle (~17 min), wherever you are". So a ledger built only from
+ * command results shows deposits and withdrawals and silently loses the largest
+ * recurring outflow: on 2026-09-16 the faction treasury had drained ~193,000 credits
+ * that no booked row explained, and nobody could say why.
+ *
+ * This reconstructs the missing side by differencing consecutive treasury BALANCES
+ * the game did state, subtracting the movements we booked in that window, and
+ * emitting the remainder as an `inferred` line. Inferred lines are labelled as
+ * unattributed rather than asserted to be rent — a member depositing from another
+ * client looks identical from here, and guessing would put a wrong reason in a
+ * financial record.
+ */
+export function getFactionTreasuryStatement(opts: {
+  since?: string; limit?: number
+  /** Resolves a facility type to its catalog build_cost. Injected so this layer keeps no
+   *  catalog dependency; without it the facility-build pass below simply does not run. */
+  facilityCost?: (facilityType: string) => number | null
+} = {}):
+  { opening: { credits: number; at: string } | null
+    closing: { credits: number; at: string; reported_by: string | null } | null
+    entries: TreasuryStatementEntry[]
+    totals: { in: number; out: number; booked: number; inferred: number; net: number; rent: number; rent_cycles: number } } {
+  const d = getDb()
+  const limit = Math.min(Math.max(opts.limit ?? 500, 1), 5000)
+
+  // Snapshots, oldest first, with exact consecutive duplicates collapsed. A single
+  // `view target=faction` can write the same balance several times in one second
+  // (seven identical rows observed on 2026-09-16); each would otherwise open a
+  // zero-length window and clutter the statement.
+  const rawSnaps = d.query(
+    `SELECT credits, at, reported_by FROM faction_treasury_snapshots
+      ${opts.since ? 'WHERE at >= ?' : ''} ORDER BY at ASC, id ASC`,
+  ).all(...(opts.since ? [opts.since] : [])) as Array<{ credits: number; at: string; reported_by: string | null }>
+  const snaps: typeof rawSnaps = []
+  for (const s of rawSnaps) {
+    const prev = snaps[snaps.length - 1]
+    if (prev && prev.credits === s.credits) continue
+    snaps.push(s)
+  }
+
+  const booked = d.query(
+    `SELECT timestamp, kind, profile_id, station_id, credits_signed, source_command
+       FROM faction_ledger
+      WHERE credits_signed IS NOT NULL AND credits_signed != 0
+        ${opts.since ? 'AND timestamp >= ?' : ''}
+      ORDER BY timestamp ASC, id ASC`,
+  ).all(...(opts.since ? [opts.since] : [])) as Array<{
+    timestamp: string; kind: string; profile_id: string | null
+    station_id: string | null; credits_signed: number; source_command: string
+  }>
+
+  const nameOf = (id: string | null): string | null => (id ? (getProfile(id)?.name ?? null) : null)
+  const reasonFor = (kind: string, who: string | null): string => {
+    const by = who ? ` by ${who}` : ''
+    if (kind === 'treasury_deposit') return `Deposit to treasury${by}`
+    if (kind === 'treasury_withdraw') return `Withdrawal from treasury${by}`
+    if (kind === 'treasury_gift') return `Credits gifted to the faction${by}`
+    return `${kind}${by}`
+  }
+
+  const entries: TreasuryStatementEntry[] = []
+  let balance: number | null = snaps.length ? snaps[0].credits : null
+  const opening = snaps.length ? { credits: snaps[0].credits, at: snaps[0].at } : null
+
+  const pushBooked = (b: (typeof booked)[number]) => {
+    const who = nameOf(b.profile_id)
+    if (balance !== null) balance += b.credits_signed
+    entries.push({
+      at: b.timestamp, kind: b.kind, reason: reasonFor(b.kind, who), credits: b.credits_signed,
+      balance_after: balance, profile_id: b.profile_id, profile_name: who,
+      station_id: b.station_id, source_command: b.source_command, inferred: false,
+    })
+  }
+
+  let bi = 0
+  // Walk each snapshot window: book what we saw, then attribute the remainder.
+  for (let i = 1; i < snaps.length; i++) {
+    const from = snaps[i - 1], to = snaps[i]
+    let sumBooked = 0
+    while (bi < booked.length && booked[bi].timestamp < to.at) {
+      if (booked[bi].timestamp >= from.at) { sumBooked += booked[bi].credits_signed; pushBooked(booked[bi]) }
+      bi++
+    }
+    const gap = (to.credits - from.credits) - sumBooked
+    if (Math.abs(gap) >= 1) {
+      balance = to.credits
+      entries.push({
+        at: to.at, kind: gap < 0 ? 'unattributed_outflow' : 'unattributed_inflow',
+        reason: gap < 0
+          ? 'Unattributed outflow — facility rent, tax, or a spend made outside Admiral. Rent is auto-deducted every ~17min cycle and is never reported as a command result.'
+          : 'Unattributed inflow — a deposit made outside Admiral, or a payout.',
+        credits: gap, balance_after: to.credits, profile_id: null, profile_name: null,
+        station_id: null, source_command: null, inferred: true,
+      })
+    } else {
+      balance = to.credits   // re-anchor to what the game actually said
+    }
+  }
+  // Movements booked after the newest snapshot are real but not yet confirmed by a balance.
+  while (bi < booked.length) { pushBooked(booked[bi]); bi++ }
+
+  // Facility rent bills on a fixed ~17-minute cycle at a fixed rate, so it shows up
+  // as the same small negative over and over. That repetition is evidence, not a
+  // guess: an outflow whose exact magnitude recurs at least three times and is small
+  // relative to the balance is rent, and saying so turns an unreadable wall of
+  // "unattributed" into a bill. Anything that does not repeat stays unattributed.
+  const freq = new Map<number, number>()
+  for (const e of entries) if (e.inferred && e.credits < 0) freq.set(e.credits, (freq.get(e.credits) ?? 0) + 1)
+  const rentAmounts = new Set([...freq].filter(([amt, n]) => n >= 3 && Math.abs(amt) <= 50_000).map(([amt]) => amt))
+  // The per-cycle rate is the most frequent repeating outflow. Rent bills every
+  // ~17 minutes whether or not anyone is watching, so a window between two
+  // snapshots that spans N cycles shows ONE outflow of N x rate — 33,864 turned
+  // out to be exactly 51 cycles of 664 accumulated overnight while no agent
+  // reported the balance. Matching exact multiples turns those back into rent
+  // instead of leaving the largest genuine bill filed as "unattributed".
+  // THE RATE CHANGES. Rent is per-facility, so every new facility raises the
+  // per-cycle bill: this faction went 112 -> 338 -> 664 -> 675 as it built. Matching
+  // multiples against only the single most FREQUENT rate therefore misses every
+  // accumulation billed under a previous rate — 33,864 sat unattributed for a week
+  // and is exactly 51 cycles of 664, a rate that had since been superseded. Try
+  // every rate this faction has actually been charged, largest first so a long gap
+  // is read as a few cycles of the real bill rather than many cycles of a divisor.
+  const units = [...new Set([...rentAmounts].map(a => Math.abs(a)))].sort((a, b) => b - a)
+  let rentTotal = 0, rentCycles = 0
+  for (const e of entries) {
+    if (!e.inferred || e.credits >= 0) continue
+    const mag = Math.abs(e.credits)
+    const exact = rentAmounts.has(e.credits)
+    // A multiple only counts when it is exact and plausible — a 2-cycle gap is
+    // common, a 5,000-cycle one means we matched a coincidence, not a bill.
+    let unit = 0, cycles = 0
+    if (!exact) for (const u of units) {
+      if (u <= 0 || mag % u !== 0) continue
+      const c = mag / u
+      if (c >= 2 && c <= 500) { unit = u; cycles = c; break }
+    }
+    if (!exact && !(cycles >= 2 && cycles <= 500)) continue
+    const n = exact ? 1 : cycles
+    e.kind = 'facility_rent'
+    e.reason = n > 1
+      ? `Facility rent — ${n} cycles at ${unit.toLocaleString()} each, accrued while nobody queried the balance`
+      : `Facility rent — ${mag.toLocaleString()} per cycle, auto-deducted every ~17 min wherever the owner is`
+    rentTotal += e.credits; rentCycles += n
+  }
+
+  // FACILITY BUILDS — the largest one-off outflows, and the game never reports the
+  // charge as a command result. Only the build COMMAND is recorded, in the agent's
+  // own log, so the treasury side arrives as a nameless gap between two snapshots.
+  // Joining the two turns the biggest "unattributed" lines in this statement into
+  // named builds, verified 2026-09-16 against the catalog to the credit:
+  //   -151,000 = breeder_reactor_core        -150,000 = market_runner
+  //   -136,000 = plasma_residue_condenser    -105,000 = plasma_injector_assembly
+  // That was 543,700 of 735,657 gross unattributed — 74% — sitting in the log the
+  // whole time. A build is retried many times before it succeeds (Morg ran
+  // plasma_injector_assembly twenty times), so each outflow claims at most ONE
+  // command and each command is claimed at most once.
+  if (opts.facilityCost) {
+    // Bound on the first SNAPSHOT, not the first entry: an entry is stamped at the
+    // CLOSING snapshot of its window, so a build that happened inside that window
+    // sorts BEFORE it and a lower bound taken from the entry would exclude the very
+    // command being looked for. Reach back the full match window beyond it.
+    const lower = snaps.length ? snaps[0].at : null
+    const builds = d.query(
+      `SELECT l.timestamp, l.summary, p.name
+         FROM log_entries l JOIN profiles p ON p.id = l.profile_id
+        WHERE l.type = 'tool_call' AND l.summary LIKE '%faction_build%'
+          ${lower ? "AND l.timestamp >= datetime(?, '-3 hours')" : ''}
+        ORDER BY l.timestamp ASC`,
+    ).all(...(lower ? [lower] : [])) as Array<{ timestamp: string; summary: string; name: string }>
+
+    const claimed = new Set<number>()
+    const ms = (t: string) => Date.parse(t.replace(' ', 'T') + (t.endsWith('Z') ? '' : 'Z'))
+    // Largest first: a big build should not be explained away by a small one's slack.
+    const outflows = entries
+      .map((e, i) => ({ e, i }))
+      .filter(({ e }) => e.inferred && e.credits < 0 && e.kind === 'unattributed_outflow')
+      .sort((a, b) => a.e.credits - b.e.credits)
+
+    for (const { e } of outflows) {
+      const mag = Math.abs(e.credits)
+      const at = ms(e.at)
+      for (let bi = 0; bi < builds.length; bi++) {
+        if (claimed.has(bi)) continue
+        const b = builds[bi]
+        const t = ms(b.timestamp)
+        if (!(t <= at && at - t <= 3 * 3600_000)) continue          // built inside this window
+        const type = /facility_type=([a-z0-9_]+)/.exec(b.summary)?.[1]
+        if (!type) continue
+        const cost = opts.facilityCost(type)
+        if (!cost || cost <= 0) continue
+        // The window can also carry rent, so the gap may exceed the build by a little.
+        // It may never be SMALLER than the build, and the slack must stay small.
+        const slack = mag - cost
+        if (slack < 0 || slack > Math.max(5_000, cost * 0.05)) continue
+        claimed.add(bi)
+        e.kind = 'facility_build'
+        e.reason = `Built ${type.replace(/_/g, ' ')} — ${cost.toLocaleString()} by ${b.name}`
+          + (slack >= 1 ? `, plus ${Math.round(slack).toLocaleString()} of rent in the same window` : '')
+        e.profile_name = b.name
+        e.source_command = 'facility_faction_build'
+        break
+      }
+    }
+  }
+
+  const trimmed = entries.slice(-limit)
+  const totals = { in: 0, out: 0, booked: 0, inferred: 0, net: 0 }
+  for (const e of entries) {
+    if (e.credits > 0) totals.in += e.credits; else totals.out += e.credits
+    if (e.inferred) totals.inferred += e.credits; else totals.booked += e.credits
+    totals.net += e.credits
+  }
+  const last = snaps[snaps.length - 1] ?? null
+  return {
+    opening,
+    closing: last ? { credits: last.credits, at: last.at, reported_by: last.reported_by } : null,
+    entries: trimmed,
+    totals: { ...totals, rent: rentTotal, rent_cycles: rentCycles },
   }
 }
 

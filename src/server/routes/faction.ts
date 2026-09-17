@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { agentManager } from '../lib/agent-manager'
-import { listProfiles, getDb, getFactionStorage, getFactionLedger, getFactionTreasurySummary } from '../lib/db'
+import { listProfiles, getDb, getFactionStorage, getFactionLedger, getFactionTreasurySummary, getFactionTreasuryStatement } from '../lib/db'
+import { getFacility } from '../lib/catalog'
 
 /**
  * Faction-level view: overview (treasury, members/roles, personnel, fuel) plus
@@ -238,5 +239,214 @@ faction.get('/ledger', (c) => {
 
 /** Treasury reconciliation: last reported balance vs booked movements. */
 faction.get('/treasury', (c) => c.json(getFactionTreasurySummary()))
+
+/** Facility rent: every facility the fleet pays for, its per-cycle rate and day cost.
+ *
+ *  Rent is the treasury's largest standing outflow and the game never reports it as a
+ *  command result — it is auto-deducted every facility cycle from the owner's wallet
+ *  (the faction treasury for faction facilities) wherever the owner is. The per-facility
+ *  rate is stated in `facility action=list` and captured into fleet_intel_facilities;
+ *  CYCLES_PER_DAY comes from the game's own est_rent_per_day / rent_per_cycle = 86. */
+faction.get('/rent', (c) => {
+  const CYCLES_PER_DAY = 86
+  const rows = getDb().query(`
+    SELECT station_id, facility_type, facility_name, level, rent_per_cycle, faction_owned,
+           build_cost, last_seen
+      FROM fleet_intel_facilities
+     WHERE rent_per_cycle IS NOT NULL AND rent_per_cycle > 0
+     ORDER BY rent_per_cycle DESC`).all() as Array<Record<string, unknown>>
+  const facilities = rows.map(r => ({
+    ...r,
+    per_day: Math.round(Number(r.rent_per_cycle) * CYCLES_PER_DAY),
+  }))
+  const perCycle = facilities.reduce((s, f) => s + Number(f.rent_per_cycle), 0)
+  return c.json({
+    cycles_per_day: CYCLES_PER_DAY,
+    cycle_minutes: Math.round((24 * 60 / CYCLES_PER_DAY) * 10) / 10,
+    facilities,
+    totals: { per_cycle: perCycle, per_day: Math.round(perCycle * CYCLES_PER_DAY) },
+    note: 'Rates are what the game stated the last time an agent docked at that station. '
+        + 'A facility we own at a station nobody has visited recently will be missing here.',
+  })
+})
+
+/** Full treasury statement: every credit in and out with a reason, including the
+ *  unattributed deltas that facility rent hides in (rent is never reported as a
+ *  command result, so a command-only ledger loses the biggest recurring outflow).
+ *  ?since=ISO&limit=  */
+faction.get('/treasury/statement', (c) => {
+  const q = c.req.query()
+  return c.json(getFactionTreasuryStatement({
+    since: q.since, limit: q.limit ? Number(q.limit) : undefined,
+    facilityCost: (type) => getFacility(type)?.build_cost ?? null,
+  }))
+})
+
+/**
+ * GET /api/faction/build-queue — the facility programme as an ordered queue.
+ *
+ * Two things make this different from the vault page's flat "build need" column,
+ * which sums `commission_requirements` and reports one number per item:
+ *
+ *  1. **It gates on the FACTION VAULT, not fleet-wide stock.** `facility action=
+ *     faction_build` draws from faction storage at the station, then the builder's
+ *     cargo — it never sees a personal locker. On 2026-09-16 a fleet-wide count read
+ *     436 control_node when only 202 were buildable, which would have announced an
+ *     open gate 48 short.
+ *  2. **The queue is SEQUENTIAL.** Building the first facility consumes its 250
+ *     control_node, so the second cannot also count them. Each entry is measured
+ *     against what is left after the entries above it take their share — which is
+ *     what makes this a queue rather than four independent checklists.
+ *
+ * `pct` is the BINDING ratio (the worst material), because a build is gated by its
+ * scarcest input, not its average. A facility 100% on steel and 10% on nodes is 10%
+ * done, not 55%.
+ */
+const FACILITY_QUEUE = [
+  'plasma_injector_assembly',
+  'plasma_residue_condenser',
+  'tritium_cryo_extractor',
+  // The polonium cell was missing from this list for the whole campaign, and its
+  // absence hid the fact that the programme could not reach its own goal. The
+  // chain is: breeder (owned) -> reactor_grade_plutonium -> polonium_doping_cell
+  // -> weapons_grade_plutonium -> compression chamber -> neutronium_ingot. Build
+  // the chamber without this and it stands idle: weapons_grade_plutonium has NO
+  // ask in any empire, so it cannot be bought, only made here.
+  // It also needs polonium_ore, which is rad-extracted — a mining laser pulls
+  // none, so someone needs a rad_harvester FITTED, not merely owned.
+  'polonium_doping_cell',
+  'neutronium_compression_chamber',
+  'fuel_rod_press',
+] as const
+
+faction.get('/build-queue', async (c) => {
+  const station = c.req.query('station') || 'crimson_war_citadel'
+  const vault = new Map<string, number>()
+  for (const r of getFactionStorage(station)) vault.set(r.item_id, (vault.get(r.item_id) ?? 0) + Number(r.quantity))
+
+  const treasury = getFactionTreasurySummary().latest?.credits ?? 0
+  let creditsLeft = treasury
+  const remaining = new Map(vault)   // walked down as each facility takes its share
+
+  // A facility we ALREADY OWN must not appear as pending, and must not reserve
+  // materials from the entries behind it — it already consumed its bill when it
+  // was built. Before this, the moment plasma_injector_assembly was built the
+  // queue still showed it "next up, 4.9%, blocked on steel_plate" against steel
+  // that had just been spent ON it, while also holding 2,850 steel hostage from
+  // the facility actually next in line.
+  await refreshBuilt()
+  const owned = new Set((builtCache?.rows ?? []).map(r => String((r as { type?: string }).type ?? '')))
+
+  const queue = FACILITY_QUEUE.map((id, i) => {
+    const f = getFacility(id)
+    if (!f) return { id, name: id, order: i + 1, missing_from_catalog: true }
+    const bill = (f.build_materials ?? []) as Array<{ item_id: string; quantity: number }>
+
+    // Already standing: report it as done and take nothing from the vault.
+    if (owned.has(id)) {
+      return {
+        id, name: f.name ?? id, order: i + 1,
+        build_cost: f.build_cost ?? 0, build_time: f.build_time ?? null,
+        credits_ok: true, materials: [], pct: 1,
+        buildable: false, built: true, binding: null, short_count: 0,
+      }
+    }
+
+    const materials = bill.map(m => {
+      const have = remaining.get(m.item_id) ?? 0
+      const applied = Math.min(have, m.quantity)
+      return {
+        item_id: m.item_id,
+        needed: m.quantity,
+        available: have,
+        short: Math.max(0, m.quantity - have),
+        pct: m.quantity > 0 ? Math.min(1, have / m.quantity) : 1,
+      }
+    })
+
+    // Reserve this facility's share so later entries see only the remainder.
+    for (const m of bill) remaining.set(m.item_id, Math.max(0, (remaining.get(m.item_id) ?? 0) - m.quantity))
+
+    const cost = f.build_cost ?? 0
+    const creditsOk = creditsLeft >= cost
+    if (creditsOk) creditsLeft -= cost
+
+    const pct = materials.length ? Math.min(...materials.map(m => m.pct)) : 1
+    const shortLines = materials.filter(m => m.short > 0)
+    return {
+      id, name: f.name ?? id, order: i + 1,
+      build_cost: cost, build_time: f.build_time ?? null,
+      credits_ok: creditsOk,
+      materials,
+      pct,
+      buildable: shortLines.length === 0 && creditsOk,
+      built: false,
+      // The single line to fix next — what a reader should act on.
+      binding: shortLines.sort((a, b) => a.pct - b.pct)[0]?.item_id ?? null,
+      short_count: shortLines.length,
+    }
+  })
+
+  return c.json({ station, treasury, queue, built: builtCache?.rows ?? [] })
+})
+
+/**
+ * What the faction already owns — the "done" end of the build queue.
+ *
+ * Read LIVE through a connected agent rather than from `fleet_intel_facilities`.
+ * That table is passively scraped from whatever agents happened to report, and on
+ * 2026-09-16 it held two faction facilities at 338/cycle when the game returned
+ * FOUR at 708/cycle — including a lockbox at Iron Reach nobody knew we had. A
+ * completed-builds list sourced from it would have been wrong about the one thing
+ * it exists to show.
+ *
+ * `facility action=faction_owned` works UNDOCKED, so this does not depend on who
+ * is flying. Cached 60s because the UI polls every 30s and the list changes rarely.
+ */
+let builtCache: { at: number; rows: unknown[] } | null = null
+
+async function refreshBuilt(): Promise<void> {
+  if (builtCache && Date.now() - builtCache.at < 60_000) return
+  const agentId = pickAgent()
+  if (!agentId) return
+  try {
+    const raw = await runQuery(agentId, 'facility', { action: 'faction_owned' })
+    const res = (raw.structuredContent ?? raw.result) as Record<string, unknown> | undefined
+    const list = Array.isArray(res?.facilities) ? res!.facilities as Array<Record<string, unknown>> : []
+    // first_seen is OUR earliest record of the facility, not the game's build date —
+    // the game does not report one. Label it honestly in the UI.
+    const seen = new Map<string, string>()
+    try {
+      for (const r of getDb().query(
+        'SELECT station_id, facility_type, MIN(first_seen) AS first_seen FROM fleet_intel_facilities GROUP BY station_id, facility_type'
+      ).all() as Array<{ station_id: string; facility_type: string; first_seen: string }>) {
+        seen.set(`${r.station_id}|${r.facility_type}`, r.first_seen)
+      }
+    } catch { /* intel table may be empty */ }
+
+    const rows = list.map(f => ({
+      facility_id: String(f.facility_id ?? ''),
+      type: String(f.type ?? ''),
+      name: String(f.name ?? f.type ?? ''),
+      station_id: String(f.base_id ?? ''),
+      station_name: String(f.base_name ?? f.base_id ?? ''),
+      system_id: String(f.system_id ?? ''),
+      rent_per_cycle: Number(f.rent_per_cycle ?? 0),
+      labor_per_run: Number(f.labor_per_run ?? 0),
+      under_construction: !!f.under_construction,
+      first_seen: seen.get(`${String(f.base_id ?? '')}|${String(f.type ?? '')}`) ?? null,
+    }))
+    // Anything still building first (it is the live edge), then newest known first.
+    rows.sort((a, b) => Number(b.under_construction) - Number(a.under_construction)
+      || String(b.first_seen ?? '').localeCompare(String(a.first_seen ?? '')))
+    builtCache = { at: Date.now(), rows }
+  } catch { /* keep the last good list */ }
+}
+
+/** Kick the live refresh alongside the queue read so the UI gets both from one poll. */
+faction.get('/build-queue/built', async (c) => {
+  await refreshBuilt()
+  return c.json({ built: builtCache?.rows ?? [], cached_at: builtCache?.at ?? null })
+})
 
 export default faction

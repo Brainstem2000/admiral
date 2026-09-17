@@ -1,6 +1,6 @@
 import {
-  insertFactionLedger, recordFactionStorageSnapshot, recordFactionTreasurySnapshot,
-  getProfileLastState, getMostRecentStation, getProfile,
+  insertFactionLedger, recordFactionStorageSnapshot, recordFactionTreasurySnapshot, applyFactionStorageDelta,
+  getProfileLastState, getMostRecentStation, getProfile, getKnownFactionId,
 } from './db'
 import type { FactionLedgerRow } from './db'
 
@@ -20,10 +20,13 @@ function rememberFaction(profileId: string, r: R): void {
 function factionFor(profileId: string, r: R): { id: string | null; tag: string | null } {
   rememberFaction(profileId, r)
   const known = factionByProfile.get(profileId)
-  if (known) return known
-  const st = getProfileLastState(profileId) as R | null
-  const id = st ? str(st.faction_id) || null : null
-  const tag = st ? str(st.faction_tag) || null : null
+  const st = known?.id ? null : (getProfileLastState(profileId) as R | null)
+  // Fall through every source rather than returning the first MAP HIT: a remembered entry can
+  // carry a tag with a null id, and a null id here means the ledger row is written unattributed
+  // and the vault delta keyed on it is skipped entirely. The disk-wide id is the last resort —
+  // it is what makes movements survive a restart, which empties factionByProfile.
+  const id = known?.id ?? (st ? str(st.faction_id) || null : null) ?? getKnownFactionId()
+  const tag = known?.tag ?? (st ? str(st.faction_tag) || null : null)
   return { id, tag }
 }
 
@@ -105,6 +108,24 @@ export function captureFactionFromCommand(command: string, args: R | undefined, 
       else if (Array.isArray(args?.items)) {
         for (const it of args!.items as R[]) if (str(it.item_id) && num(it.quantity) !== null && Number(it.quantity) > 0) lines.push({ item_id: str(it.item_id), quantity: Number(it.quantity) })
       }
+      // CREDITS MOVE AS AN ITEM. The transfer API refuses a bare `credits` argument
+      // ("item_id is required for transfer. Use item_id=\"credits\"") so a treasury
+      // draw is spelled withdraw{source:faction, item_id:"credits", quantity:N}.
+      // Booking that as a lockbox ITEM lost 1,900,000 credits of real withdrawals
+      // across three draws on 2026-09-15: they carried credits_signed NULL, so the
+      // treasury statement could not attribute them and reported the money as
+      // "unattributed outflow", and the vault would list "credits" as stock.
+      // Route it to the treasury side instead, on both directions.
+      const creditLine = lines.find((l) => l.item_id.toLowerCase() === 'credits')
+      if (creditLine) {
+        const kind: FactionLedgerRow['kind'] = toFaction ? 'treasury_deposit' : 'treasury_withdraw'
+        const signed = toFaction ? Math.round(creditLine.quantity) : -Math.round(creditLine.quantity)
+        rows += insertFactionLedger({ faction_id: fac.id, faction_tag: fac.tag, kind, profile_id: profileId, station_id: station,
+          item_id: null, quantity: null, credits_signed: signed, source_command: source, raw_ref: raw, tick,
+          dedupe_key: `${profileId}:${kind}:${creditLine.quantity}:${tick ?? stamp}`, timestamp: opts.at }) ? 1 : 0
+      }
+      const itemLines = lines.filter((l) => l.item_id.toLowerCase() !== 'credits')
+
       // Credits moved with deposit{credits,target:faction} are treasury, not lockbox.
       const creditsArg = num(args?.credits)
       if (creditsArg !== null && creditsArg > 0 && toFaction) {
@@ -112,11 +133,17 @@ export function captureFactionFromCommand(command: string, args: R | undefined, 
           item_id: null, quantity: null, credits_signed: Math.round(creditsArg), source_command: source, raw_ref: raw, tick,
           dedupe_key: `${profileId}:treasury_deposit:${creditsArg}:${tick ?? stamp}`, timestamp: opts.at }) ? 1 : 0
       }
-      for (const l of lines) {
+      for (const l of itemLines) {
         const kind: FactionLedgerRow['kind'] = toFaction ? 'lockbox_deposit' : 'lockbox_withdraw'
-        rows += insertFactionLedger({ faction_id: fac.id, faction_tag: fac.tag, kind, profile_id: profileId, station_id: station,
-          item_id: l.item_id, quantity: toFaction ? l.quantity : -l.quantity, credits_signed: null, source_command: source, raw_ref: raw, tick,
-          dedupe_key: `${profileId}:${kind}:${l.item_id}:${l.quantity}:${tick ?? stamp}`, timestamp: opts.at }) ? 1 : 0
+        const signedQty = toFaction ? l.quantity : -l.quantity
+        const booked = insertFactionLedger({ faction_id: fac.id, faction_tag: fac.tag, kind, profile_id: profileId, station_id: station,
+          item_id: l.item_id, quantity: signedQty, credits_signed: null, source_command: source, raw_ref: raw, tick,
+          dedupe_key: `${profileId}:${kind}:${l.item_id}:${l.quantity}:${tick ?? stamp}`, timestamp: opts.at })
+        rows += booked ? 1 : 0
+        // The vault inventory moves with the ledger, not only on the next view_faction_storage.
+        // Gated on `booked` because that row's UNIQUE dedupe_key is the idempotency token — a
+        // replayed result must not apply the delta twice. See applyFactionStorageDelta.
+        if (booked && fac.id && station) applyFactionStorageDelta(fac.id, station, l.item_id, signedQty, profileName)
       }
       return rows
     }
