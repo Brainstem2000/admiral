@@ -198,7 +198,11 @@ export function galaxyMarketLines(
     if (id.startsWith('package:')) continue
     const q = snapshot.get(id)
     if (isLocked(id, opts.profileId)) {
-      cargoLines.push(`${id}: reserved by YOUR open commission (do not sell)`)
+      // Say what the reserve DOES and does not stop. "reserved (do not sell)" was read by
+      // two agents on 2026-09-16 as "cannot touch": both halted a crafting job because a
+      // commission reserved the steel it was about to consume — which is precisely what the
+      // reserve exists to protect it FOR. The guard gates sell/gift/sell_cargo only.
+      cargoLines.push(`${id}: reserved by YOUR open commission — DO NOT SELL or gift it, but you are free to SPEND it on crafting and facility builds (that is what it is reserved for)`)
     } else if (q) {
       cargoLines.push(`${id}: ${q.empire} bids ${q.bid} x${q.depth}`)
     } else {

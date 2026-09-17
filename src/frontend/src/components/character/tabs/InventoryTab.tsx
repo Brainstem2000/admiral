@@ -10,6 +10,7 @@ interface Bid { price: number; qty: number | null; station: string; observed_at:
 
 interface Row {
   item_id: string
+  item_name: string
   quantity: number
   location: string   // 'Ship cargo' or station id
   inCargo: boolean
@@ -23,6 +24,38 @@ const STALE_MS = 48 * 3600_000
 
 function stationLabel(id: string): string {
   return id.replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase())
+}
+
+/**
+ * Some package names arrive hex-encoded ("0x347820447261…" = "4x Drone Command
+ * Module | Node Beta -> Central Nexus"). The game sends them that way; decoding
+ * is display-only so the raw value stays intact in the ledger.
+ */
+function decodeName(raw: string): string {
+  if (!/^0x[0-9a-fA-F]+$/.test(raw) || raw.length % 2 !== 0) return raw
+  let out = ''
+  for (let i = 2; i < raw.length; i += 2) {
+    const code = parseInt(raw.slice(i, i + 2), 16)
+    if (!Number.isFinite(code) || code < 9) return raw   // not text — leave it alone
+    out += String.fromCharCode(code)
+  }
+  return out
+}
+
+/** A dismantled facility packs into a numbered crate SET — "Foo materials (3/21)".
+ *  A partial set blocks the rebuild entirely, so completeness is the thing to see. */
+const CRATE_RE = /^(.+?) materials \((\d+)\/(\d+)\)$/
+
+interface PackageInfo { isPackage: boolean; label: string; crate?: { set: string; total: number } }
+
+function packageInfo(r: Row): PackageInfo {
+  const isPackage = r.item_id.startsWith('package:')
+  if (!isPackage) return { isPackage: false, label: r.item_id }
+  const name = decodeName(r.item_name || '').trim()
+  if (!name || name.toLowerCase() === 'package') return { isPackage: true, label: 'Package (contents not reported)' }
+  const m = CRATE_RE.exec(name)
+  if (m) return { isPackage: true, label: name, crate: { set: m[1], total: Number(m[3]) } }
+  return { isPackage: true, label: name }
 }
 
 /** Realisable = min(held, bid depth) × price. Depth-less bids are an unvalidated ceiling. */
@@ -51,13 +84,13 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
         const bids: Record<string, Bid> = d.bids ?? {}
         const out: Row[] = []
         for (const c of d.cargo ?? []) {
-          out.push({ item_id: c.item_id, quantity: c.quantity, location: 'Ship cargo', inCargo: true, updated_at: c.updated_at ?? '', bid: bids[c.item_id] })
+          out.push({ item_id: c.item_id, item_name: c.item_name ?? '', quantity: c.quantity, location: 'Ship cargo', inCargo: true, updated_at: c.updated_at ?? '', bid: bids[c.item_id] })
         }
         for (const [station, items] of Object.entries(d.stations ?? {})) {
-          for (const it of items as Array<{ item_id: string; quantity: number; updated_at: string; observed_at?: string | null }>) {
+          for (const it of items as Array<{ item_id: string; item_name?: string; quantity: number; updated_at: string; observed_at?: string | null }>) {
             // "Seen" is the last AUTHORITATIVE view_storage of the station; a row that
             // exists only from ledger deltas has no observed_at and shows as never seen.
-            out.push({ item_id: it.item_id, quantity: it.quantity, location: station, inCargo: false, updated_at: it.observed_at ?? '', bid: bids[it.item_id] })
+            out.push({ item_id: it.item_id, item_name: it.item_name ?? '', quantity: it.quantity, location: station, inCargo: false, updated_at: it.observed_at ?? '', bid: bids[it.item_id] })
           }
         }
         setRows(out)
@@ -82,11 +115,16 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
     const needle = filter.trim().toLowerCase()
     return (rows ?? [])
       .filter(r => locFilter === 'all' || (locFilter === 'cargo' ? r.inCargo : !r.inCargo))
-      .filter(r => !needle || r.item_id.toLowerCase().includes(needle) || r.location.toLowerCase().includes(needle))
+      // A package's id is an opaque hash, so searching must reach its decoded
+      // name — that is where "30x Lead Sheet" or "Foundry materials (3/21)" lives.
+      .filter(r => !needle
+        || r.item_id.toLowerCase().includes(needle)
+        || r.location.toLowerCase().includes(needle)
+        || packageInfo(r).label.toLowerCase().includes(needle))
       .slice()
       .sort((a, b) => {
         let cmp = 0
-        if (sortKey === 'item') cmp = a.item_id.localeCompare(b.item_id)
+        if (sortKey === 'item') cmp = packageInfo(a).label.localeCompare(packageInfo(b).label)
         else if (sortKey === 'quantity') cmp = a.quantity - b.quantity
         else if (sortKey === 'location') cmp = a.location.localeCompare(b.location)
         else if (sortKey === 'value') cmp = (realisable(a)?.value ?? -1) - (realisable(b)?.value ?? -1)
@@ -94,6 +132,23 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
         return sortDir === 'asc' ? cmp : -cmp
       })
   }, [rows, filter, locFilter, sortKey, sortDir])
+
+  /** Crate sets are per-station: the rebuild draws them at the build site, and
+   *  holding only part of a set blocks it, so group by (set, location). */
+  const crateSets = useMemo(() => {
+    const m = new Map<string, { set: string; location: string; have: number; total: number }>()
+    for (const r of rows ?? []) {
+      const c = packageInfo(r).crate
+      if (!c) continue
+      const key = `${c.set}@${r.location}`
+      const e = m.get(key) ?? { set: c.set, location: r.location, have: 0, total: c.total }
+      e.have += r.quantity
+      m.set(key, e)
+    }
+    return [...m.values()]
+      .map(e => ({ ...e, complete: e.have >= e.total }))
+      .sort((a, b) => Number(a.complete) - Number(b.complete) || a.set.localeCompare(b.set))
+  }, [rows])
 
   const stats = useMemo(() => {
     const totalUnits = view.reduce((n, r) => n + r.quantity, 0)
@@ -157,6 +212,27 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
         />
       </div>
 
+      {crateSets.length > 0 && (
+        <div className="px-3 py-2 border-b border-border/40">
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground mb-1">
+            Dismantled facility crate sets
+          </div>
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            {crateSets.map(s => (
+              <span key={`${s.set}@${s.location}`} className="text-[11.5px]"
+                title={s.complete
+                  ? 'Complete set — can be rebuilt into this facility at a station'
+                  : 'INCOMPLETE — a partial set blocks the rebuild; the missing crates are elsewhere or lost'}>
+                <span style={{ color: `hsl(var(--smui-${s.complete ? 'green' : 'orange'}))` }}>
+                  {s.complete ? '✓' : '✗'} {s.set}
+                </span>
+                <span className="text-muted-foreground"> {s.have}/{s.total} · {stationLabel(s.location)}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center gap-2 flex-wrap px-3 py-2 border-b border-border/40">
         <input
           value={filter}
@@ -195,7 +271,21 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
               const stale = seenTs > 0 && Date.now() - seenTs > STALE_MS
               return (
                 <tr key={`${r.item_id}-${r.location}-${i}`} className="border-b border-border/40">
-                  <td className="px-3 py-1.5 font-medium">{r.item_id}</td>
+                  <td className="px-3 py-1.5 font-medium">
+                    {(() => {
+                      const p = packageInfo(r)
+                      if (!p.isPackage) return r.item_id
+                      // Show what is actually inside; keep the hash available for lookups.
+                      return (
+                        <span title={`${r.item_id}\n${p.label}`}>
+                          <span style={{ color: 'hsl(var(--smui-frost-2))' }}>{p.label}</span>
+                          <span className="text-muted-foreground/40 text-[10px] block font-normal">
+                            {p.crate ? `crate set · ${p.crate.set}` : 'package'} · {r.item_id.slice(8, 16)}…
+                          </span>
+                        </span>
+                      )
+                    })()}
+                  </td>
                   <td className="px-3 py-1.5 text-right">{r.quantity.toLocaleString()}</td>
                   <td className="px-3 py-1.5 text-right">
                     {v ? (

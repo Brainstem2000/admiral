@@ -267,6 +267,132 @@ future session must not re-derive or get wrong:
    dashboard (or `GET /api/profiles/:id/logs?stream=true`).
 4. Stop any test server and remove the throwaway `data/` dir when done.
 
+## Where the plans live, and which sources are AUTHORITATIVE
+
+Two different things get confused constantly, and confusing them has produced most of this
+project's wrong orders. Read this before quoting any number to an agent.
+
+### The standing plans (in the Admiral's memory, not this repo)
+
+`~/.claude/projects/-Users-brian-dev-admiral/memory/` — `MEMORY.md` is the index loaded every
+session; one line per file. The campaign plans, newest understanding last:
+
+| file | what it is |
+|---|---|
+| `devastator-industrial-plan.md` | **THE build plan.** 29 sections, each later one superseding earlier ones. §25 is the reconciled bill; §26-27 are codex corrections; **§28-29 are the 2026-09-16 live-read corrections and the cache-vs-live rule below.** Read §§25-29 before anything else — the early sections are kept for their lessons, not their numbers. |
+| `post-devastator-industrial-operations.md` | **THE post-build plan.** Revenue architecture, tax structure, the quartermaster role, what actually blocks the industry. |
+| `lead-chain-economics.md` | why the lead wall is a price problem, not a supply one |
+| `scope-before-quoting.md` | every wrong fact given to an agent has been a real number at the wrong scope |
+| `verify-live-before-ordering.md` · `never-quote-empire-prices.md` · `grade-routes-on-police-level.md` | the three recurring directive defects |
+| `travel-doctrine-risk-tiered.md` | lawless is tiered, not banned; the 5-island policed geography |
+| `fleet-funding-policy.md` | deposits reopened 2026-09-16 for industrial funding; Morg exempt |
+
+A section heading is not a section. Reading the table of contents and acting on it has caused
+errors that the section body would have prevented.
+
+### AUTHORITATIVE vs CACHED — the rule
+
+| source | status | use it for |
+|---|---|---|
+| `/api/catalog.json`, `/api/codex/recipe/<id>` | **authoritative, static** | recipes, build materials, `hand_craftable`, `extracted_by`, facility tiers and costs |
+| `https://spacemolt.com/docs/*.md` (below) | **authoritative** | mechanics, rules, command contracts |
+| a live game read through an agent | **authoritative, current** | what is actually in a locker, a vault, a market book, or a facility list |
+| `data/admiral.db` | **CACHE — drifts** | finding *where to look*. Never *what is there*. |
+| `/api/market` | **per-EMPIRE aggregate** | research only; a station's book differs enormously |
+
+**`storage_inventory`, `faction_storage_inventory` and `fleet_intel_facilities` are caches.**
+`storage_inventory` is documented above as a ledger that drifts until a `view_storage` reconciles
+it; `fleet_intel_facilities` is passively scraped from whatever agents happened to report.
+
+On 2026-09-16 four cached figures went into directives and all four were wrong:
+
+| put in a directive | source | live truth |
+|---|---|---|
+| vault holds 3,346 steel_plate at the yard | `faction_storage_inventory` summed with no station filter | **0** there |
+| copper_wiring buyable at 12, depth 1,348 | `/api/market` empire aggregate | bid-only at that station, no seller at all |
+| we own 2 faction facilities, 338/cycle | `fleet_intel_facilities` | **4**, 708/cycle, incl. one nobody knew about |
+| Morg holds 3,175 platinum_ore | `storage_inventory` | **3** |
+
+**A number may enter a plan or a directive ONLY if it came from a live read or the codex.**
+Two live calls overturned three standing claims. That is the cost ratio.
+
+### Live reads — you can run these yourself, without spending an agent turn
+
+Reads are free (`QUERY_COMMANDS` in `tools.ts`, no game tick) and `silent: true` keeps them out of
+the agent's context. The agent must be **docked** for storage and market reads.
+
+```bash
+ID=<profile-id>
+curl -s -X POST http://127.0.0.1:3031/api/profiles/$ID/command \
+  -H 'Content-Type: application/json' \
+  -d '{"command":"view_storage","args":{},"silent":true}'
+```
+
+The reads that settle arguments:
+
+| command | answers |
+|---|---|
+| `facility` `{"action":"faction_owned"}` | every faction facility and **the true total rent per cycle** — works undocked |
+| `view_faction_storage` | the vault at the docked station, plus live treasury |
+| `view_storage` | that agent's personal locker at the docked station |
+| `view_market` `{"item_id":"..."}` | the real local order book with depth |
+| `get_tax_estimate` / `get_faction_tax_estimate` | tax position, loss carryforward, per-empire rows |
+
+**`fleet_intel_systems` contains a row with an EMPTY `system_id`, and it poisons every
+station-to-system lookup.** The natural query — `WHERE <station> LIKE system_id||'%'` — matches
+that row for EVERY station, because `x LIKE '%'` is always true. On 2026-09-16 that made
+`the_anvil_arsenal`, `iron_reach_mining_colony` and `blood_forge_smelting_works` all report as
+**outside our policed island** when all three are inside it — nearly abandoning 10,022 steel_plate
+sitting one jump away. Always exclude it and prefer the longest match:
+
+```sql
+SELECT system_id FROM fleet_intel_systems
+ WHERE system_id <> '' AND :station LIKE system_id || '%'
+ ORDER BY length(system_id) DESC LIMIT 1
+```
+
+**`view_storage` REQUIRES `station_id`.** Called with no arguments it returns an INDEX of every
+storage LOCATION you own (base_id / name / item COUNT), not the items at the docked station. A
+parser looking for item rows finds none and reports **zero for everything** — which reads exactly
+like an empty locker and is not. This cost three wrong orders to one agent on 2026-09-16, including
+telling him his locker was empty when it held 109 control nodes. Always pass an explicit
+`args: {"station_id": "<id>"}`. Note `base_id` is **rejected** — the valid parameters are
+action, target, item_id, quantity, credits, message, station_id, source, bucket, dest_bucket, items.
+
+Response shape varies: some come back as `{result: {...}}`, some as a char-indexed string object
+(reassemble with `Object.keys(r).filter(k=>/^\d+$/.test(k)).sort((a,b)=>a-b).map(k=>r[k]).join('')`).
+**Look at the raw JSON before trusting a parser** — a parse that returns all zeros is far more
+likely to be a broken parser than an empty locker.
+
+### The documentation — every page also serves as Markdown
+
+`https://spacemolt.com/sitemap.md` indexes everything. Any page + `.md` returns clean Markdown:
+
+**Mechanics** — `/docs/crafting` · `/docs/markets` · `/docs/economy` · `/docs/storage` ·
+`/docs/stations` (player stations & facilities) · `/docs/factions` · `/docs/mining` · `/docs/travel` ·
+`/docs/police` · `/docs/shipyard` · `/docs/ships` · `/docs/empires` · `/docs/missions` · `/docs/combat` ·
+`/docs/death` · `/docs/wrecks` · `/docs/drones` · `/docs/skills` · `/docs/espionage` · `/docs/hospitality`
+
+**The 16 guides** — `/docs/guides/` + `crafting` · `base-builder` · `factions` · **`taxes`** ·
+`trader` · `arbitrage` · `miner` · `mission-runner` · `explorer` · `pirate-hunter` · `boarding` ·
+`passenger-lines` · `packages` · `drones` · `fuel` · `client-dev`
+
+Facts from these that overturned standing assumptions, all on 2026-09-16:
+- **Facility tiers run ×1/×3/×9/×27 on speed but only ×3.5 on footprint** — upgrading in place beats
+  building more, and a faction may hold only one facility of each type per station anyway.
+- **Corporate tax is profit-based**, and facility rent, treasury-funded builds/upgrades and inputs
+  bought for resale are all deductible — so buy industrial inputs **through the faction**.
+- `faction_create_sell_order` needs a **Market Runner facility at that station**; the faction vault
+  is **per station** while the treasury is global.
+- **Public facility rental** (`set_access` + `set_output_price`) earns a per-run fee with no
+  materials, no hauling and no agent turns — the only revenue that costs no attention.
+- **Finished goods have two different correct destinations.** A facility build searches
+  *packages, faction storage at that station, then cargo* — **never personal storage**. A ship
+  commission at an NPC station is the opposite: *cargo, then the pilot's personal station storage*.
+  So facility materials and sale stock belong in the VAULT; the Devastator's own bill belongs in
+  the pilot's locker at the yard. `craft(recipe_id=..., source="faction", deliver_to="faction")`
+  crafts straight into the vault and skips the deposit step. Full rule: plan §30.
+
 ## SpaceMolt information sources — check these BEFORE brute-forcing
 
 The game exposes far more knowledge than the Admiral DB holds. Every source below has,

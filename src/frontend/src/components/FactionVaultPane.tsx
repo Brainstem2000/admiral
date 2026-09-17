@@ -14,7 +14,7 @@
  * an agent off to mine 200 steel_plate for a lockbox that already existed.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { Warehouse, RefreshCw, Search, LockOpen, Lock, Hammer, AlertTriangle } from 'lucide-react'
+import { Warehouse, RefreshCw, Search, LockOpen, Lock, Hammer, AlertTriangle, Receipt, Factory } from 'lucide-react'
 
 const DISPLAY = { fontFamily: "'Chakra Petch', system-ui, sans-serif" } as const
 
@@ -42,6 +42,10 @@ export function FactionVaultPane() {
   const [q, setQ] = useState('')
   const [sort, setSort] = useState<'qty' | 'name' | 'need'>('qty')
   const [onlyNeeded, setOnlyNeeded] = useState(false)
+  // Two jobs live here and they are read at different times: 'what do we hold against the
+  // builds' and 'where did the money go'. One page made both harder to scan, so they are
+  // separate views rather than one long scroll.
+  const [tab, setTab] = useState<'inventory' | 'ledger' | 'rent' | 'build'>('inventory')
 
   const load = async (fresh = false) => {
     setLoading(true); setError(null)
@@ -107,7 +111,13 @@ export function FactionVaultPane() {
         <div className="flex items-baseline gap-3 flex-wrap border-b-2 pb-3" style={{ borderColor: 'hsl(var(--smui-yellow) / 0.6)' }}>
           <Warehouse size={18} style={{ color: 'hsl(var(--smui-yellow))' }} />
           <h1 className="text-xl font-bold uppercase tracking-[0.06em] m-0" style={DISPLAY}>Faction Vault</h1>
-          <span className="text-[11px] text-muted-foreground">shared stock — anyone docked there can draw it</span>
+          <span className="text-[11px] text-muted-foreground">
+            {tab === 'inventory'
+              ? 'shared stock — anyone docked there can draw it'
+              : tab === 'ledger' ? 'every credit in and out of the faction treasury, with a reason'
+              : tab === 'rent' ? 'what the fleet pays to keep its facilities standing'
+              : 'the facility programme in build order — each entry measured against what the one above leaves behind'}
+          </span>
           <span className="ml-auto flex items-center gap-3">
             <span className="text-[10.5px] text-muted-foreground tabular-nums">
               {new Date(data.fetched_at).toLocaleTimeString()}
@@ -119,6 +129,28 @@ export function FactionVaultPane() {
           </span>
         </div>
 
+        <div className="flex items-center gap-1.5">
+          <TabButton active={tab === 'inventory'} onClick={() => setTab('inventory')} icon={<Warehouse size={12} />}>
+            Inventory
+          </TabButton>
+          <TabButton active={tab === 'ledger'} onClick={() => setTab('ledger')} icon={<Receipt size={12} />}>
+            Treasury ledger
+          </TabButton>
+          <TabButton active={tab === 'rent'} onClick={() => setTab('rent')} icon={<Factory size={12} />}>
+            Facility rent
+          </TabButton>
+          <TabButton active={tab === 'build'} onClick={() => setTab('build')} icon={<Hammer size={12} />}>
+            Build queue
+          </TabButton>
+        </div>
+
+        {tab === 'build' && <BuildQueue />}
+
+        {tab === 'rent' && <FacilityRent />}
+
+        {tab === 'ledger' && <TreasuryStatement />}
+
+        {tab === 'inventory' && <>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <Stat label="Item types" value={totals.types.toLocaleString()} />
           <Stat label="Units held" value={totals.units.toLocaleString()} accent="var(--smui-yellow)" />
@@ -194,8 +226,22 @@ export function FactionVaultPane() {
             )
           })}
         </div>
+        </>}
       </div>
     </div>
+  )
+}
+
+/** Tab switch. Two distinct readings of the same vault, not two halves of one page. */
+function TabButton({ active, onClick, icon, children }:
+  { active: boolean; onClick: () => void; icon: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <button onClick={onClick}
+      className={`flex items-center gap-1.5 px-3 py-1.5 text-[11.5px] uppercase tracking-[0.1em] border transition-colors ${
+        active ? 'border-transparent' : 'border-border text-muted-foreground hover:text-foreground'}`}
+      style={active ? { background: 'hsl(var(--smui-yellow) / 0.15)', color: 'hsl(var(--smui-yellow))' } : undefined}>
+      {icon}{children}
+    </button>
   )
 }
 
@@ -204,6 +250,436 @@ function Stat({ label: l, value, accent }: { label: string; value: string; accen
     <div className="dossier-card p-3">
       <div className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">{l}</div>
       <div className="text-[19px] font-bold tabular-nums mt-0.5" style={{ ...DISPLAY, color: accent ? `hsl(var(${accent}))` : undefined }}>{value}</div>
+    </div>
+  )
+}
+
+/**
+ * Treasury statement — every credit in and out, with a reason.
+ *
+ * The game never reports facility rent as a command result; it is auto-deducted
+ * every ~17-minute facility cycle "wherever you are". A ledger built only from
+ * command results therefore loses the single biggest recurring outflow, and on
+ * 2026-09-16 roughly 193,000 credits had drained from the treasury with nothing
+ * to point at. The server reconstructs those by differencing the balances the
+ * game DID state against the movements we booked, so this table shows the
+ * unattributed remainder as its own line rather than hiding it.
+ */
+interface TEntry {
+  at: string; kind: string; reason: string; credits: number
+  balance_after: number | null; profile_name: string | null; inferred: boolean
+}
+interface TPayload {
+  opening: { credits: number; at: string } | null
+  closing: { credits: number; at: string; reported_by: string | null } | null
+  entries: TEntry[]
+  totals: { in: number; out: number; booked: number; inferred: number; net: number; rent: number; rent_cycles: number }
+}
+
+// Timestamps are stored UTC without a zone marker; the Admiral reads in Central.
+const ct = (iso: string) => {
+  const raw = String(iso).trim().replace(' ', 'T')
+  const d = new Date(/[Zz]|[+-]\d\d:?\d\d$/.test(raw) ? raw : raw + 'Z')
+  return Number.isNaN(d.getTime()) ? String(iso) : d.toLocaleString('en-US', {
+    timeZone: 'America/Chicago', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  })
+}
+
+function TreasuryStatement() {
+  const [t, setT] = useState<TPayload | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [showAll, setShowAll] = useState(false)
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await fetch('/api/faction/treasury/statement?limit=500')
+        const j = await r.json()
+        if (j.error) setErr(String(j.error)); else setT(j)
+      } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
+    })()
+  }, [])
+
+  if (err) return <div className="dossier-card p-3 text-[11.5px]" style={{ color: 'hsl(var(--smui-red))' }}>Treasury statement unavailable: {err}</div>
+  if (!t) return <div className="dossier-card p-3 text-[11.5px] text-muted-foreground">Reading the treasury statement…</div>
+
+  const rows = showAll ? t.entries : t.entries.slice(-25)
+  // Rent bills every ~17 minutes; express it per day so it can be compared to income.
+  const rentPerDay = t.totals.rent_cycles > 0
+    ? Math.round((t.totals.rent / t.totals.rent_cycles) * (1440 / 17))
+    : 0
+  const colourFor = (e: TEntry) =>
+    e.kind === 'facility_rent' ? 'hsl(var(--smui-yellow))'
+      : e.credits > 0 ? 'hsl(var(--smui-green))' : 'hsl(var(--smui-red))'
+
+  return (
+    <div className="dossier-card p-3 space-y-2">
+      <div className="flex items-baseline gap-2 flex-wrap">
+        <Receipt size={13} style={{ color: 'hsl(var(--smui-yellow))' }} />
+        <h2 className="text-[12px] font-bold uppercase tracking-[0.12em] m-0" style={DISPLAY}>Treasury statement</h2>
+        <span className="text-[10.5px] text-muted-foreground">every credit in and out, with a reason</span>
+        {t.closing && (
+          <span className="ml-auto text-[11px] tabular-nums">
+            <span className="text-muted-foreground">balance </span>
+            <b style={{ color: 'hsl(var(--smui-green))' }}>{t.closing.credits.toLocaleString()}</b>
+            <span className="text-muted-foreground"> as of {ct(t.closing.at)} CT</span>
+          </span>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <Stat label="Paid in" value={t.totals.in.toLocaleString()} accent="var(--smui-green)" />
+        <Stat label="Paid out" value={t.totals.out.toLocaleString()} accent="var(--smui-red)" />
+        <Stat label="Facility rent / day" value={rentPerDay ? rentPerDay.toLocaleString() : '—'} accent="var(--smui-yellow)" />
+        <Stat label="Unattributed" value={(t.totals.inferred - t.totals.rent).toLocaleString()} />
+      </div>
+
+      {rentPerDay !== 0 && (
+        <div className="text-[11px] leading-relaxed text-foreground/80">
+          Rent is charged every ~17-minute facility cycle wherever the owner is — being docked or
+          present changes nothing. Unpaid cycles accrue as arrears and the facility is repossessed
+          once the station&apos;s grace period lapses, so the treasury has to stay funded even when idle.
+        </div>
+      )}
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11.5px] tabular-nums">
+          <thead>
+            <tr className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground text-left">
+              <th className="font-normal py-1 pr-3">When (CT)</th>
+              <th className="font-normal py-1 pr-3">Reason</th>
+              <th className="font-normal py-1 pr-3 text-right">Amount</th>
+              <th className="font-normal py-1 text-right">Balance</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.slice().reverse().map((e, i) => (
+              <tr key={`${e.at}-${i}`} className="border-t border-border/40">
+                <td className="py-1 pr-3 whitespace-nowrap text-muted-foreground">{ct(e.at)}</td>
+                <td className="py-1 pr-3">
+                  <span style={{ color: colourFor(e) }}>{e.reason}</span>
+                  {e.inferred && e.kind !== 'facility_rent' && (
+                    <span className="ml-1 text-[9.5px] uppercase tracking-wider text-muted-foreground">inferred</span>
+                  )}
+                </td>
+                <td className="py-1 pr-3 text-right" style={{ color: colourFor(e) }}>
+                  {e.credits > 0 ? '+' : ''}{e.credits.toLocaleString()}
+                </td>
+                <td className="py-1 text-right text-foreground/70">
+                  {e.balance_after === null ? '—' : e.balance_after.toLocaleString()}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {t.entries.length > 25 && (
+        <button onClick={() => setShowAll(v => !v)}
+          className="text-[10.5px] uppercase tracking-[0.12em] text-muted-foreground hover:text-foreground transition-colors">
+          {showAll ? 'Show recent only' : `Show all ${t.entries.length} entries`}
+        </button>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Facility rent — the treasury's largest standing outflow.
+ *
+ * The game never reports rent as a command result: it is auto-deducted every facility
+ * cycle from the owner's wallet (the faction treasury for faction facilities) wherever
+ * the owner is, so it is invisible to a command-result ledger. The per-facility rate IS
+ * stated in `facility action=list`, which is captured whenever an agent docks — so this
+ * page is only as complete as our last visit to each station, and says so.
+ */
+interface RentRow {
+  station_id: string; facility_type: string; facility_name: string | null
+  level: number | null; rent_per_cycle: number; per_day: number
+  faction_owned: number; build_cost: number | null; last_seen: string
+}
+interface RentPayload {
+  cycles_per_day: number; cycle_minutes: number
+  facilities: RentRow[]
+  totals: { per_cycle: number; per_day: number }
+  note: string
+}
+
+interface BuiltFacility {
+  facility_id: string; type: string; name: string
+  station_id: string; station_name: string; system_id: string
+  rent_per_cycle: number; labor_per_run: number
+  under_construction: boolean; first_seen: string | null
+}
+
+interface QueueMaterial { item_id: string; needed: number; available: number; short: number; pct: number }
+interface QueueEntry {
+  id: string; name: string; order: number
+  build_cost: number; build_time: number | null; credits_ok: boolean
+  materials: QueueMaterial[]; pct: number; buildable: boolean; built?: boolean
+  binding: string | null; short_count: number
+  missing_from_catalog?: boolean
+}
+
+/**
+ * The facility programme as an ordered queue.
+ *
+ * Two things this shows that the flat "needed" column on the Inventory tab cannot:
+ *
+ *  - **It measures the FACTION VAULT, not fleet-wide stock.** A `faction_build`
+ *    draws from faction storage then the builder's cargo and never sees a personal
+ *    locker, so fleet totals overstate readiness — a count of 436 control_node on
+ *    2026-09-16 was only 202 buildable.
+ *  - **The queue is sequential.** Building the first facility consumes its bill, so
+ *    each entry is measured against what the entries above it leave behind. That is
+ *    why #2 can read 0% on an item the vault visibly holds: #1 has claimed it.
+ *
+ * Percent is the BINDING ratio — the scarcest input — because that is what gates a
+ * build. Averaging would report a facility 100% stocked on steel and 0% on nodes as
+ * half done, which is the opposite of useful.
+ */
+function BuildQueue() {
+  const [data, setData] = useState<{ station: string; treasury: number; queue: QueueEntry[]; built?: BuiltFacility[] } | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const r = await fetch('/api/faction/build-queue')
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        const j = await r.json()
+        if (alive) { setData(j); setErr(null) }
+      } catch (e) { if (alive) setErr(e instanceof Error ? e.message : String(e)) }
+    }
+    void load()
+    const t = setInterval(load, 30000)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  if (err) return <div className="text-[12px] text-muted-foreground px-1 py-4">Build queue unavailable: {err}</div>
+  if (!data) return <div className="text-[12px] text-muted-foreground px-1 py-4">Loading build queue…</div>
+
+  // 'Next up' is the first entry that is neither already standing nor unbuildable-
+  // for-lack-of-catalog. A built facility is not next up; it is done.
+  const next = data.queue.find(q => !q.missing_from_catalog && !q.built && !q.buildable)
+  const ready = data.queue.filter(q => q.buildable)
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        <Stat label="Treasury" value={`${data.treasury.toLocaleString()} cr`} accent="var(--smui-yellow)" />
+        <Stat label="Buildable now" value={String(ready.length)} accent={ready.length ? 'var(--smui-green)' : undefined} />
+        <Stat label="Next up" value={next ? `${(next.pct * 100).toFixed(0)}%` : '—'}
+          accent={next && next.pct > 0.8 ? 'var(--smui-green)' : 'var(--smui-orange)'} />
+      </div>
+
+      <p className="text-[10.5px] text-muted-foreground/70 px-1">
+        Measured against the faction vault at <span className="font-mono">{data.station}</span> — a build cannot
+        see personal lockers. Entries are sequential: each is measured against what the ones above it leave behind.
+        Percent is the scarcest input, not an average.
+      </p>
+
+      <div className="flex flex-col gap-2">
+        {data.queue.map(q => {
+          if (q.missing_from_catalog) {
+            return (
+              <div key={q.id} className="border border-border/60 px-3 py-2 text-[11.5px] text-muted-foreground">
+                {q.order}. <span className="font-mono">{q.id}</span> — not in the catalog
+              </div>
+            )
+          }
+          if (q.built) {
+            return (
+              <div key={q.id} className="border px-3 py-2 flex items-baseline gap-2 flex-wrap"
+                style={{ borderColor: 'hsl(var(--smui-green) / 0.35)' }}>
+                <span className="text-[10px] text-muted-foreground tabular-nums">{q.order}.</span>
+                <span className="text-[13px] font-semibold" style={{ color: 'hsl(var(--smui-green))' }}>{q.name}</span>
+                <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5"
+                  style={{ color: 'hsl(var(--smui-green))', border: '1px solid hsl(var(--smui-green) / 0.5)' }}>built</span>
+                <span className="text-[10.5px] text-muted-foreground">
+                  already standing — its bill is spent and reserves nothing from the entries below
+                </span>
+              </div>
+            )
+          }
+          const tone = q.buildable ? 'var(--smui-green)' : q.pct > 0.8 ? 'var(--smui-yellow)' : 'var(--smui-orange)'
+          return (
+            <div key={q.id} className="border px-3 py-2.5"
+              style={{ borderColor: q.buildable ? 'hsl(var(--smui-green) / 0.6)' : 'hsl(var(--border))' }}>
+              <div className="flex items-baseline gap-2 flex-wrap">
+                <span className="text-[10px] text-muted-foreground tabular-nums">{q.order}.</span>
+                <span className="text-[13px] font-semibold">{q.name}</span>
+                <span className="text-[11px] tabular-nums font-semibold" style={{ color: `hsl(${tone})` }}>
+                  {(q.pct * 100).toFixed(1)}%
+                </span>
+                {q.buildable
+                  ? <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5"
+                      style={{ color: 'hsl(var(--smui-green))', border: '1px solid hsl(var(--smui-green) / 0.5)' }}>buildable now</span>
+                  : <span className="text-[10.5px] text-muted-foreground">
+                      blocked on <span className="font-mono" style={{ color: `hsl(${tone})` }}>{q.binding}</span>
+                      {q.short_count > 1 ? ` (+${q.short_count - 1} more short)` : ''}
+                    </span>}
+                <span className="ml-auto text-[10.5px] text-muted-foreground tabular-nums">
+                  {q.build_cost.toLocaleString()} cr
+                  {!q.credits_ok && <span style={{ color: 'hsl(var(--smui-orange))' }}> · treasury short</span>}
+                </span>
+              </div>
+
+              {/* One bar per material: filled to its own ratio, so the binding line is visible at a glance. */}
+              <div className="mt-2 flex flex-col gap-1">
+                {q.materials.map(m => (
+                  <div key={m.item_id} className="flex items-center gap-2 text-[11px]">
+                    <span className="font-mono w-[172px] shrink-0 truncate" title={m.item_id}>{m.item_id}</span>
+                    <span className="relative h-[9px] flex-1 min-w-[60px] bg-border/40 overflow-hidden">
+                      <span className="absolute inset-y-0 left-0"
+                        style={{
+                          width: `${Math.max(m.pct * 100, m.pct > 0 ? 1.5 : 0)}%`,
+                          background: m.short === 0 ? 'hsl(var(--smui-green) / 0.75)' : 'hsl(var(--smui-orange) / 0.75)',
+                        }} />
+                    </span>
+                    <span className="tabular-nums text-muted-foreground w-[124px] shrink-0 text-right">
+                      {m.available.toLocaleString()} / {m.needed.toLocaleString()}
+                    </span>
+                    <span className="tabular-nums w-[92px] shrink-0 text-right"
+                      style={{ color: m.short === 0 ? 'hsl(var(--smui-green))' : 'hsl(var(--smui-orange))' }}>
+                      {m.short === 0 ? 'met' : `short ${m.short.toLocaleString()}`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {(data.built?.length ?? 0) > 0 && (
+        <div className="mt-2">
+          <div className="text-[9px] uppercase tracking-wider text-muted-foreground mb-1.5 flex items-baseline gap-2">
+            <span>Standing — what the faction already owns</span>
+            <span className="text-muted-foreground/50 normal-case tracking-normal">
+              {data.built!.filter(b => !b.under_construction).length} active
+              {data.built!.some(b => b.under_construction) ? ', 1 building' : ''}
+              {' · '}
+              {data.built!.reduce((n, b) => n + b.rent_per_cycle, 0).toLocaleString()} cr/cycle
+              {' · '}
+              {(data.built!.reduce((n, b) => n + b.rent_per_cycle, 0) * 86).toLocaleString()} cr/day
+            </span>
+          </div>
+          <div className="border border-border/60">
+            {data.built!.map(b => (
+              <div key={b.facility_id || `${b.station_id}-${b.type}`}
+                className="flex items-baseline gap-2 flex-wrap px-3 py-1.5 border-b border-border/30 last:border-b-0 text-[11.5px]">
+                <span className="font-semibold" style={{ color: b.under_construction ? 'hsl(var(--smui-yellow))' : undefined }}>
+                  {b.name}
+                </span>
+                {b.under_construction && (
+                  <span className="text-[9px] uppercase tracking-wider px-1.5"
+                    style={{ color: 'hsl(var(--smui-yellow))', border: '1px solid hsl(var(--smui-yellow) / 0.5)' }}>
+                    building
+                  </span>
+                )}
+                {/* Location is the point: faction storage and builds are per-station,
+                    so "we own one" is meaningless without knowing where it stands. */}
+                <span className="text-muted-foreground">
+                  {b.station_name}
+                  {b.system_id ? <span className="text-muted-foreground/50"> · {b.system_id}</span> : null}
+                </span>
+                <span className="ml-auto tabular-nums text-muted-foreground/80">
+                  {b.rent_per_cycle.toLocaleString()} cr/cycle
+                  <span className="text-muted-foreground/40"> · {(b.rent_per_cycle * 86).toLocaleString()}/day</span>
+                </span>
+                <span className="tabular-nums text-muted-foreground/50 w-[86px] text-right"
+                  title={b.first_seen ? 'Earliest record WE have of it, not the game’s build date' : 'No prior record — newly observed'}>
+                  {b.first_seen ? b.first_seen.slice(0, 10) : 'new'}
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-muted-foreground/60 mt-1">
+            Read live from <span className="font-mono">facility action=faction_owned</span>, not the intel cache —
+            that cache held 2 facilities at 338 cr/cycle when the game returned 4 at 708. Dates are our earliest
+            record, not the game's build date; the game does not report one.
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function FacilityRent() {
+  const [d, setD] = useState<RentPayload | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await fetch('/api/faction/rent')
+        const j = await r.json()
+        if (j.error) setErr(String(j.error)); else setD(j)
+      } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
+    })()
+  }, [])
+
+  if (err) return <div className="dossier-card p-3 text-[11.5px]" style={{ color: 'hsl(var(--smui-red))' }}>Rent unavailable: {err}</div>
+  if (!d) return <div className="dossier-card p-3 text-[11.5px] text-muted-foreground">Reading facility rents…</div>
+
+  const byStation = new Map<string, RentRow[]>()
+  for (const f of d.facilities) {
+    const k = f.station_id || '(unknown station)'
+    byStation.set(k, [...(byStation.get(k) ?? []), f])
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Stat label="Facilities billed" value={String(d.facilities.length)} />
+        <Stat label="Rent per cycle" value={d.totals.per_cycle.toLocaleString()} accent="var(--smui-yellow)" />
+        <Stat label="Rent per day" value={d.totals.per_day.toLocaleString()} accent="var(--smui-red)" />
+        <Stat label="Cycle length" value={`~${d.cycle_minutes} min`} />
+      </div>
+
+      <div className="dossier-card p-3 text-[11.5px] leading-relaxed text-foreground/85">
+        Rent bills <b>every ~{d.cycle_minutes} minutes</b> ({d.cycles_per_day} cycles a day) from the
+        faction treasury, wherever the owner happens to be — being docked or present changes nothing.
+        Unpaid cycles accrue as arrears and the facility is repossessed once the station&apos;s grace
+        period lapses, so an idle facility still has to be funded. Selling it is the only way to stop the bill.
+      </div>
+
+      {[...byStation.entries()].map(([station, rows]) => {
+        const cyc = rows.reduce((s, r) => s + r.rent_per_cycle, 0)
+        return (
+          <div key={station} className="dossier-card">
+            <div className="flex items-baseline gap-2 px-3 py-2 border-b border-border/60">
+              <span className="text-[12px] font-bold" style={DISPLAY}>{label(station)}</span>
+              <span className="ml-auto text-[11.5px] tabular-nums text-muted-foreground">
+                {cyc.toLocaleString()}/cycle · <b style={{ color: 'hsl(var(--smui-red))' }}>
+                  {(cyc * d.cycles_per_day).toLocaleString()}/day</b>
+              </span>
+            </div>
+            <div className="grid grid-cols-[1fr_auto_auto_auto] gap-3 px-3 py-1.5 text-[10px] uppercase tracking-[0.12em] text-muted-foreground border-b border-border/30">
+              <span>Facility</span><span className="text-right">Per cycle</span>
+              <span className="text-right">Per day</span><span className="text-right pr-1">Built for</span>
+            </div>
+            {rows.map(f => (
+              <div key={f.facility_type} className="grid grid-cols-[1fr_auto_auto_auto] gap-3 px-3 py-1.5 border-t border-border/20 items-baseline">
+                <span className="text-[12px] truncate">
+                  {(f.facility_name || f.facility_type).replace(/_/g, ' ')}
+                  {f.level != null && <span className="text-[10px] text-muted-foreground ml-1.5">L{f.level}</span>}
+                  {!!f.faction_owned && <span className="text-[9.5px] uppercase tracking-wider ml-1.5" style={{ color: 'hsl(var(--smui-yellow))' }}>faction</span>}
+                </span>
+                <span className="text-[12px] tabular-nums text-right">{f.rent_per_cycle.toLocaleString()}</span>
+                <span className="text-[12px] tabular-nums text-right" style={{ color: 'hsl(var(--smui-red))' }}>{f.per_day.toLocaleString()}</span>
+                <span className="text-[11px] tabular-nums text-right pr-1 text-muted-foreground">
+                  {f.build_cost ? f.build_cost.toLocaleString() : '—'}
+                </span>
+              </div>
+            ))}
+          </div>
+        )
+      })}
+
+      <div className="text-[11px] text-muted-foreground leading-relaxed">{d.note}</div>
     </div>
   )
 }

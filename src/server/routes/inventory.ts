@@ -87,11 +87,16 @@ inventory.get('/profile/:id', (c) => {
   const rows = getStorageForProfile(id, station)
   // updated_at = last ledger delta; observed_at = last authoritative view_storage
   // of that station (null when the row exists only from deltas).
-  const byStation: Record<string, Array<{ item_id: string; quantity: number; updated_at: string; observed_at: string | null }>> = {}
+  // item_name carries the only human-readable description a `package:<hash>` row
+  // ever gets — the game names them "Market Order Delivery: 46x Solarian Biotic…"
+  // or "Lithium Cell Foundry materials (3/21)". Dropping it here rendered every
+  // package in the UI as an opaque hash, hiding both freight contents and whether
+  // a dismantled facility's crate set was complete.
+  const byStation: Record<string, Array<{ item_id: string; item_name: string; quantity: number; updated_at: string; observed_at: string | null }>> = {}
   for (const r of rows) {
-    ;(byStation[r.station_id] ??= []).push({ item_id: r.item_id, quantity: r.quantity, updated_at: r.updated_at, observed_at: r.observed_at ?? null })
+    ;(byStation[r.station_id] ??= []).push({ item_id: r.item_id, item_name: r.item_name ?? '', quantity: r.quantity, updated_at: r.updated_at, observed_at: r.observed_at ?? null })
   }
-  const cargo = getCargoForProfile(id).map(r => ({ item_id: r.item_id, quantity: r.quantity, updated_at: r.updated_at }))
+  const cargo = getCargoForProfile(id).map(r => ({ item_id: r.item_id, item_name: r.item_name ?? '', quantity: r.quantity, updated_at: r.updated_at }))
   const itemIds = [...new Set([...rows.map(r => r.item_id), ...cargo.map(r => r.item_id)])]
   return c.json({
     profile_id: id,

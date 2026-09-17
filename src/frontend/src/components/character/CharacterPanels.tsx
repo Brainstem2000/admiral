@@ -1,5 +1,6 @@
 /** Dossier panels for the Character page. Read-focused; reuses existing renderers. */
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { NudgeButton } from './NudgeButton'
 import {
   FileText, ListTodo, Brain, BookOpen, Activity, TrendingUp, RefreshCw,
   Plug, Square, Anchor, SquarePen, Check, X,
@@ -66,6 +67,10 @@ export function CharacterHeader({ profile, status, onOpenEditor }: {
         {status.safeDocking ? <Anchor size={11} className="animate-pulse" /> : status.connected ? <Plug size={11} /> : <Square size={11} />}
         {stateLabel}
       </span>
+
+      {/* The most common corrective action on this screen. Disabled when the agent
+          is not running, because a nudge restarts a turn that is not happening. */}
+      <NudgeButton profileId={profile.id} running={status.running} />
 
       <button
         onClick={onOpenEditor}

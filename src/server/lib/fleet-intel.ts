@@ -204,11 +204,14 @@ export class FleetIntelCollector {
     const stationName = str(r.base_name || r.station_name || '')
     // player_facilities rows belong to the CALLING agent — that array membership is
     // the only ownership signal the payload carries.
-    const groups: Array<{ rows: unknown; owned: boolean }> = [
+    const groups: Array<{ rows: unknown; owned: boolean; faction?: boolean }> = [
       { rows: r.station_facilities, owned: false },
       { rows: r.facilities, owned: false },
       { rows: r.player_facilities, owned: true },
-      { rows: r.faction_facilities, owned: false },
+      // Faction facilities are OURS even though they are not in player_facilities — they are
+      // the fleet's, billed to the treasury. Marking them lets the rent page separate
+      // 'what we pay for' from 'what this station happens to have'.
+      { rows: r.faction_facilities, owned: true, faction: true },
     ]
     if (!groups.some(g => Array.isArray(g.rows) && g.rows.length > 0)) return
 
@@ -219,8 +222,9 @@ export class FleetIntelCollector {
     const q = db.query(`
       INSERT INTO fleet_intel_facilities
         (station_id, facility_type, facility_name, station_name, status, maintenance,
-         owned, owner_profile_id, build_cost, reported_by, last_seen)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+         owned, owner_profile_id, build_cost, reported_by, last_seen,
+         rent_per_cycle, facility_uid, faction_owned, level)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)
       ON CONFLICT(station_id, facility_type) DO UPDATE SET
         facility_name = COALESCE(NULLIF(excluded.facility_name, ''), fleet_intel_facilities.facility_name),
         station_name  = COALESCE(NULLIF(excluded.station_name, ''),  fleet_intel_facilities.station_name),
@@ -229,6 +233,10 @@ export class FleetIntelCollector {
         owned            = MAX(fleet_intel_facilities.owned, excluded.owned),
         owner_profile_id = COALESCE(excluded.owner_profile_id, fleet_intel_facilities.owner_profile_id),
         build_cost       = COALESCE(fleet_intel_facilities.build_cost, excluded.build_cost),
+        rent_per_cycle   = COALESCE(excluded.rent_per_cycle, fleet_intel_facilities.rent_per_cycle),
+        facility_uid     = COALESCE(excluded.facility_uid, fleet_intel_facilities.facility_uid),
+        faction_owned    = MAX(fleet_intel_facilities.faction_owned, excluded.faction_owned),
+        level            = COALESCE(excluded.level, fleet_intel_facilities.level),
         last_seen     = datetime('now')
     `)
     for (const g of groups) {
@@ -246,9 +254,15 @@ export class FleetIntelCollector {
         // Look up by `type` first (the row key), then facility_id — payloads have
         // carried the catalog id in either field depending on the array.
         const buildCost = (getFacility(type) ?? getFacility(str(f.facility_id || '')))?.build_cost ?? null
+        // rent_per_cycle is stated per facility ONLY on faction/player rows; a station's own
+        // facilities carry a per-run rental_fee instead, which is a different thing entirely
+        // and must never be summed into our rent bill.
+        const rent = typeof f.rent_per_cycle === 'number' ? f.rent_per_cycle : null
+        const lvl = typeof f.level === 'number' ? f.level : null
         q.run(stationId, type, str(f.name || ''), stationName,
               str(f.status || ''), maintenance,
-              g.owned ? 1 : 0, g.owned ? ownerId : null, buildCost, reportedBy)
+              g.owned ? 1 : 0, (g.owned && !g.faction) ? ownerId : null, buildCost, reportedBy,
+              rent, str(f.facility_id || '') || null, g.faction ? 1 : 0, lvl)
       }
     }
   }
