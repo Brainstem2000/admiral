@@ -10,6 +10,8 @@ import {
   getItemHistory,
   getStorageDirty,
   getStorageLedger,
+  findItemEverywhere,
+  getEverythingTotals,
 } from '../lib/db'
 import { getShip } from '../lib/catalog'
 
@@ -210,6 +212,75 @@ inventory.get('/dirty', (c) => {
     since: r.since,
   }))
   return c.json({ dirty: rows, count: rows.length })
+})
+
+/**
+ * GET /api/inventory/where/:itemId — THE "where is it, and who can reach it" answer.
+ *
+ * Distinct from /item/:itemId above, which reads personal lockers and ship holds
+ * only and has never read faction storage. That blind spot hid seven faction
+ * vaults from the API, the dashboard and the Admiral at once: on 2026-09-17,
+ * weapon_core 228 sat in grand_exchange_station while the ship bill reported the
+ * line unsourceable, and 3,346 steel_plate across four vaults read as missing.
+ *
+ * The three holders are not interchangeable, so each row says what can consume it:
+ *
+ *   cargo   ship commission takes it FIRST; facility build reads it LAST
+ *   locker  ship commission reads it SECOND; facility build NEVER reads it
+ *   vault   facility build reads it AT THAT STATION; ship commission never does
+ *
+ * Deposits land only at crimson_war_citadel; withdrawals work from any vault.
+ */
+inventory.get('/where/:itemId', (c) => {
+  const itemId = c.req.param('itemId')
+  const names = new Map(listProfiles().map(p => [p.id, p.name]))
+  const rows = findItemEverywhere(itemId)
+
+  const CONSUMERS: Record<string, { facility_build: string; ship_commission: string }> = {
+    cargo:  { facility_build: 'yes (searched last)',  ship_commission: 'yes (searched first)' },
+    locker: { facility_build: 'NO — never read',      ship_commission: 'yes (searched second)' },
+    vault:  { facility_build: 'yes, at this station', ship_commission: 'NO — never read' },
+  }
+
+  const locations = rows.map(r => ({
+    holder_kind: r.holder_kind,
+    holder: r.holder_kind === 'vault' ? 'FACTION' : (names.get(r.profile_id ?? '') ?? r.profile_id),
+    station_id: r.station_id,
+    quantity: r.quantity,
+    updated_at: r.updated_at,
+    stale: (Date.now() - Date.parse(String(r.updated_at).replace(' ', 'T') + 'Z')) > 86_400_000,
+    reachable_by: CONSUMERS[r.holder_kind],
+  }))
+
+  const sum = (k: string) => locations.filter(l => l.holder_kind === k).reduce((n, l) => n + l.quantity, 0)
+  const byStation = new Map<string, number>()
+  for (const l of locations) if (l.station_id !== '(cargo)') byStation.set(l.station_id, (byStation.get(l.station_id) ?? 0) + l.quantity)
+
+  return c.json({
+    item_id: itemId,
+    total: locations.reduce((n, l) => n + l.quantity, 0),
+    in_cargo: sum('cargo'),
+    in_lockers: sum('locker'),
+    in_vaults: sum('vault'),
+    stale_rows: locations.filter(l => l.stale).length,
+    stations: [...byStation.entries()].map(([station_id, quantity]) => ({ station_id, quantity }))
+      .sort((a, b) => b.quantity - a.quantity),
+    locations,
+    note: 'storage_inventory and faction_storage_inventory are CACHES that drift; rows flagged stale are over a day old. Verify with a live read before ordering against a number here.',
+  })
+})
+
+/** GET /api/inventory/everything[?q=&limit=] — the searchable index of all holdings. */
+inventory.get('/everything', (c) => {
+  const q = c.req.query('q') || undefined
+  const limit = Math.min(Number(c.req.query('limit') ?? 200) || 200, 1000)
+  const rows = getEverythingTotals({ search: q, limit })
+  return c.json({
+    query: q ?? null,
+    count: rows.length,
+    items: rows,
+    note: 'Totals span ship holds, personal lockers and all faction vaults. A total is NOT what any one consumer can reach — open an item to see the split.',
+  })
 })
 
 export default inventory

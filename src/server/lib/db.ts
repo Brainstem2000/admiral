@@ -3209,6 +3209,80 @@ export function findItemAcrossFleet(itemId: string): StorageRow[] {
     ORDER BY quantity DESC`).all(itemId, itemId) as StorageRow[]
 }
 
+/**
+ * Where a thing ACTUALLY is — all three holders, each labelled with who can reach
+ * it and for what. `findItemAcrossFleet` above reads personal lockers and ship
+ * holds only; it has never read faction storage, which is why seven faction vaults
+ * were invisible to the API, the dashboard and the Admiral alike (2026-09-17:
+ * weapon_core 228 sat in grand_exchange_station while the ship bill showed the
+ * line as unsourceable, and 3,346 steel_plate across four vaults read as missing).
+ *
+ * The three holders are NOT interchangeable, and conflating them is this project's
+ * most expensive recurring error:
+ *
+ *   cargo   the pilot's hold. A ship commission takes from here FIRST. A facility
+ *           build reads it LAST. Moves with the ship.
+ *   locker  personal station storage, per player per station. A ship commission
+ *           reads it second. A facility build NEVER reads it — material here is
+ *           invisible to every build.
+ *   vault   faction storage, per station. A facility build reads it at THAT
+ *           station. A ship commission never reads it (that needs a station the
+ *           faction owns, and we own none). Withdrawable from any vault; only
+ *           crimson_war_citadel accepts deposits.
+ */
+export type HolderKind = 'cargo' | 'locker' | 'vault'
+
+export interface ItemLocation {
+  holder_kind: HolderKind
+  profile_id: string | null
+  station_id: string
+  item_id: string
+  item_name: string
+  quantity: number
+  updated_at: string
+}
+
+export function findItemEverywhere(itemId: string): ItemLocation[] {
+  return db.query(`
+    SELECT 'locker' AS holder_kind, profile_id, station_id, item_id, item_name, quantity, updated_at
+      FROM storage_inventory        WHERE item_id = ? AND quantity > 0
+    UNION ALL
+    SELECT 'cargo'  AS holder_kind, profile_id, '(cargo)' AS station_id, item_id, item_name, quantity, updated_at
+      FROM cargo_inventory          WHERE item_id = ? AND quantity > 0
+    UNION ALL
+    SELECT 'vault'  AS holder_kind, NULL AS profile_id, station_id, item_id, item_name, quantity, updated_at
+      FROM faction_storage_inventory WHERE item_id = ? AND quantity > 0
+    ORDER BY quantity DESC`).all(itemId, itemId, itemId) as ItemLocation[]
+}
+
+/** Every item the faction can see anywhere, with its split across the three holders. */
+export function getEverythingTotals(opts: { search?: string; limit?: number } = {}): Array<{
+  item_id: string; item_name: string; total: number; in_cargo: number; in_lockers: number; in_vaults: number; locations: number
+}> {
+  const like = opts.search ? `%${opts.search}%` : '%'
+  return db.query(`
+    SELECT item_id,
+           MAX(item_name) AS item_name,
+           SUM(quantity)  AS total,
+           SUM(CASE WHEN src = 'cargo'  THEN quantity ELSE 0 END) AS in_cargo,
+           SUM(CASE WHEN src = 'locker' THEN quantity ELSE 0 END) AS in_lockers,
+           SUM(CASE WHEN src = 'vault'  THEN quantity ELSE 0 END) AS in_vaults,
+           COUNT(*) AS locations
+      FROM (
+        SELECT item_id, item_name, quantity, 'locker' AS src FROM storage_inventory         WHERE quantity > 0
+        UNION ALL
+        SELECT item_id, item_name, quantity, 'cargo'  AS src FROM cargo_inventory           WHERE quantity > 0
+        UNION ALL
+        SELECT item_id, item_name, quantity, 'vault'  AS src FROM faction_storage_inventory WHERE quantity > 0
+      )
+     WHERE item_id LIKE ?
+     GROUP BY item_id
+     ORDER BY total DESC
+     LIMIT ?`).all(like, opts.limit ?? 200) as Array<{
+    item_id: string; item_name: string; total: number; in_cargo: number; in_lockers: number; in_vaults: number; locations: number
+  }>
+}
+
 /** Fleet-wide total per item across every agent, station and ship hold. */
 export function getFleetItemTotals(): Array<{
   item_id: string; total: number; locations: number; in_cargo: number

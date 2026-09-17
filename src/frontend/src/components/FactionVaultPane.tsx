@@ -14,7 +14,7 @@
  * an agent off to mine 200 steel_plate for a lockbox that already existed.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { Warehouse, RefreshCw, Search, LockOpen, Lock, Hammer, AlertTriangle, Receipt, Factory, Rocket } from 'lucide-react'
+import { Warehouse, RefreshCw, Search, LockOpen, Lock, Hammer, AlertTriangle, Receipt, Factory, Rocket, Radar } from 'lucide-react'
 
 const DISPLAY = { fontFamily: "'Chakra Petch', system-ui, sans-serif" } as const
 
@@ -45,7 +45,7 @@ export function FactionVaultPane() {
   // Two jobs live here and they are read at different times: 'what do we hold against the
   // builds' and 'where did the money go'. One page made both harder to scan, so they are
   // separate views rather than one long scroll.
-  const [tab, setTab] = useState<'inventory' | 'ledger' | 'rent' | 'build' | 'ship'>('inventory')
+  const [tab, setTab] = useState<'inventory' | 'ledger' | 'rent' | 'build' | 'ship' | 'find'>('inventory')
 
   const load = async (fresh = false) => {
     setLoading(true); setError(null)
@@ -145,11 +145,16 @@ export function FactionVaultPane() {
           <TabButton active={tab === 'ship'} onClick={() => setTab('ship')} icon={<Rocket size={12} />}>
             Ship build
           </TabButton>
+          <TabButton active={tab === 'find'} onClick={() => setTab('find')} icon={<Radar size={12} />}>
+            Find anything
+          </TabButton>
         </div>
 
         {tab === 'build' && <BuildQueue />}
 
         {tab === 'ship' && <ShipBuild />}
+
+        {tab === 'find' && <FindAnything />}
 
         {tab === 'rent' && <FacilityRent />}
 
@@ -819,6 +824,148 @@ function ShipBuild() {
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  )
+}
+
+interface WhereLoc {
+  holder_kind: 'cargo' | 'locker' | 'vault'
+  holder: string; station_id: string; quantity: number
+  updated_at: string; stale: boolean
+  reachable_by: { facility_build: string; ship_commission: string }
+}
+interface WherePayload {
+  item_id: string; total: number; in_cargo: number; in_lockers: number; in_vaults: number
+  stale_rows: number; stations: Array<{ station_id: string; quantity: number }>
+  locations: WhereLoc[]
+}
+interface EveryRow {
+  item_id: string; item_name: string; total: number
+  in_cargo: number; in_lockers: number; in_vaults: number; locations: number
+}
+
+/**
+ * Find anything — one search across ship holds, every personal locker, and all
+ * faction vaults.
+ *
+ * It exists because the fleet-wide lookups read only two of the three holders:
+ * personal lockers and cargo, never faction storage. That blind spot hid seven
+ * faction vaults from this dashboard and from the Admiral at once — weapon_core
+ * 228 sat in grand_exchange_station while the ship bill called the line
+ * unsourceable, and 3,346 steel_plate across four vaults read as missing.
+ *
+ * A total is deliberately NOT presented as "what we can use": the three holders
+ * feed different consumers, so each row states what can actually reach it.
+ */
+function FindAnything() {
+  const [q, setQ] = useState('')
+  const [rows, setRows] = useState<EveryRow[] | null>(null)
+  const [sel, setSel] = useState<WherePayload | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const t = setTimeout(async () => {
+      try {
+        const r = await fetch(`/api/inventory/everything?q=${encodeURIComponent(q)}&limit=60`)
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        const j = await r.json()
+        if (alive) { setRows(j.items ?? []); setErr(null) }
+      } catch (e) { if (alive) setErr(e instanceof Error ? e.message : String(e)) }
+    }, 250)
+    return () => { alive = false; clearTimeout(t) }
+  }, [q])
+
+  const open = async (itemId: string) => {
+    try {
+      const r = await fetch(`/api/inventory/where/${encodeURIComponent(itemId)}`)
+      setSel(await r.json())
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
+  }
+
+  const KIND: Record<WhereLoc['holder_kind'], { label: string; tone: string }> = {
+    vault:  { label: 'faction vault', tone: 'var(--smui-green)' },
+    locker: { label: 'personal locker', tone: 'var(--smui-yellow)' },
+    cargo:  { label: 'ship hold', tone: 'var(--smui-orange)' },
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2">
+        <Search size={13} className="text-muted-foreground" />
+        <input
+          value={q} onChange={e => { setQ(e.target.value); setSel(null) }}
+          placeholder="search everything we own — steel, weapon_core, silicon…"
+          className="flex-1 bg-transparent border border-border/60 px-2 py-1 text-[12px] font-mono outline-none focus:border-foreground/40"
+        />
+      </div>
+
+      <p className="text-[10.5px] text-muted-foreground/70 px-1">
+        Searches <strong>ship holds, every personal locker, and all faction vaults</strong> together. A total
+        is not what any one consumer can reach: a facility build never reads a personal locker, and a ship
+        commission never reads faction storage. Click an item to see who can actually get at it.
+      </p>
+
+      {err && <div className="text-[11.5px]" style={{ color: 'hsl(var(--smui-orange))' }}>Lookup failed: {err}</div>}
+
+      {sel && (
+        <div className="border px-3 py-2.5" style={{ borderColor: 'hsl(var(--smui-green) / 0.4)' }}>
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <span className="text-[13px] font-semibold font-mono">{sel.item_id}</span>
+            <span className="text-[12px] tabular-nums font-semibold">{sel.total.toLocaleString()} total</span>
+            <span className="text-[10.5px] text-muted-foreground">
+              vaults {sel.in_vaults.toLocaleString()} · lockers {sel.in_lockers.toLocaleString()} · cargo {sel.in_cargo.toLocaleString()}
+            </span>
+            {sel.stale_rows > 0 && (
+              <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5"
+                style={{ color: 'hsl(var(--smui-orange))', border: '1px solid hsl(var(--smui-orange) / 0.5)' }}>
+                {sel.stale_rows} row{sel.stale_rows > 1 ? 's' : ''} over a day old
+              </span>
+            )}
+            <button onClick={() => setSel(null)} className="ml-auto text-[10.5px] text-muted-foreground hover:text-foreground">close</button>
+          </div>
+          <div className="mt-2 flex flex-col gap-1">
+            {sel.locations.map((l, i) => (
+              <div key={i} className="flex items-baseline gap-2 text-[11px] flex-wrap">
+                <span className="text-[9.5px] uppercase tracking-wider px-1.5 py-0.5 shrink-0"
+                  style={{ color: `hsl(${KIND[l.holder_kind].tone})`, border: `1px solid hsl(${KIND[l.holder_kind].tone} / 0.45)` }}>
+                  {KIND[l.holder_kind].label}
+                </span>
+                <span className="font-mono">{l.holder}</span>
+                <span className="text-muted-foreground font-mono">{l.station_id}</span>
+                <span className="tabular-nums font-semibold">{l.quantity.toLocaleString()}</span>
+                {l.stale && <span style={{ color: 'hsl(var(--smui-orange))' }} className="text-[10px]">stale</span>}
+                <span className="ml-auto text-[10px] text-muted-foreground">
+                  build: {l.reachable_by.facility_build} · ship: {l.reachable_by.ship_commission}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="flex flex-col gap-0.5">
+        <div className="flex items-baseline gap-2 text-[10px] uppercase tracking-wider text-muted-foreground px-2 pb-1">
+          <span className="flex-1">item</span>
+          <span className="w-20 text-right">total</span>
+          <span className="w-20 text-right">vaults</span>
+          <span className="w-20 text-right">lockers</span>
+          <span className="w-16 text-right">cargo</span>
+          <span className="w-14 text-right">places</span>
+        </div>
+        {(rows ?? []).map(r => (
+          <button key={r.item_id} onClick={() => open(r.item_id)}
+            className="flex items-baseline gap-2 text-[11.5px] px-2 py-1 hover:bg-foreground/5 text-left border-b border-border/20">
+            <span className="flex-1 font-mono">{r.item_id}</span>
+            <span className="w-20 text-right tabular-nums font-semibold">{r.total.toLocaleString()}</span>
+            <span className="w-20 text-right tabular-nums" style={{ color: 'hsl(var(--smui-green))' }}>{r.in_vaults.toLocaleString()}</span>
+            <span className="w-20 text-right tabular-nums" style={{ color: 'hsl(var(--smui-yellow))' }}>{r.in_lockers.toLocaleString()}</span>
+            <span className="w-16 text-right tabular-nums text-muted-foreground">{r.in_cargo.toLocaleString()}</span>
+            <span className="w-14 text-right tabular-nums text-muted-foreground">{r.locations}</span>
+          </button>
+        ))}
+        {rows && !rows.length && <div className="text-[11.5px] text-muted-foreground px-2 py-3">Nothing matches “{q}”.</div>}
       </div>
     </div>
   )
