@@ -1917,17 +1917,34 @@ export function jettisonItems(args: Record<string, unknown> | undefined): Array<
  * So the rule is now the game's own rule, checked here: allowed only in space,
  * at a POI, for ore that POI's deposits contain. Null means allowed.
  */
+/**
+ * Brian, 2026-09-17: **"Cyberspock should not be allowed to Jettison anything. No one should.
+ * Everything gets stored."**
+ *
+ * This used to permit a dump that would settle back into the deposit it came from — legal under
+ * patch 0.594.0 and genuinely lossless. It fired correctly all day (Grit docked, Juno docked, Rook
+ * at the wrong POI) and then ALLOWED CyberSpock to dump 53 fury_crystal at Iron Reach Mineral
+ * Fields, because that field does mine fury_crystal. Nothing was destroyed; the ore went back into
+ * the rock. But he had just spent the turns mining it, and fury_crystal is the best-paying cargo in
+ * the game at 320 into a 10,849-deep wall — so "lossless" is a technicality when the agent throws
+ * away the very thing it was sent to fetch and keeps carbon_ore at a bid of 2.
+ *
+ * The command is now refused OUTRIGHT, wherever the ship is. There is no judgement left for an
+ * agent to get wrong. `mine_until_full(keep=…)` keeps its own dump cycle, which is deliberate and
+ * carved out below — it returns filler to the deposit that produced it in order to make room for
+ * the ore that pays, which is the mechanism that gets valuable cargo STORED rather than left behind.
+ */
 export function jettisonVerdict(items: Array<{ item_id: string; quantity: number | null }>, site: JettisonSite | null | undefined): string | null {
   const named = items.length ? items.map((i) => `${i.item_id}${i.quantity ? 'x' + i.quantity : ''}`).join(', ') : 'cargo'
-  const head = `BLOCKED by Admiral doctrine: jettison (attempted: ${named}) — `
-  const tail = ' Ore only settles back into a deposit when you dump it IN SPACE at the POI that holds that deposit (game patch 0.594.0); anywhere else it is destroyed. Deposit it at a station, or sell it where it bids.'
-  if (!site || !site.poiId) return head + 'your position is unknown, so the harness cannot tell whether this cargo would settle back into a deposit.' + tail
-  if (site.docked) return head + 'you are docked; use deposit_items into storage instead (storage is free).' + tail
-  if (site.inTransit) return head + 'you are in flight, and cargo dumped mid-flight is destroyed.' + tail
-  if (site.deposits.length === 0) return head + `${site.poiId} has no deposits, so nothing dumped here settles back.` + tail
-  const lost = items.filter((i) => !site.deposits.includes(i.item_id)).map((i) => i.item_id)
-  if (items.length === 0 || lost.length) return head + `${site.poiId} does not mine ${lost.join(', ') || 'that'} (deposits here: ${site.deposits.join(', ')}), so it would be destroyed.` + tail
-  return null
+  const where = site?.docked ? 'you are docked — ' : site?.inTransit ? 'you are in flight — ' : ''
+  return `BLOCKED by Admiral doctrine: jettison (attempted: ${named}) — ${where}`
+    + 'NOTHING is ever jettisoned by hand. Everything gets stored. '
+    + 'Dock and deposit_items into storage (free), deposit to the faction vault (target="faction", '
+    + 'no permission needed), or sell it where it actually bids — read the counter with view_market '
+    + 'first, never an empire average. '
+    + 'If your hold is full of filler while you are mining, that is what mine_until_full(keep=<ore>) '
+    + 'is for: it returns the other ores to the deposit for you and keeps the one that pays. '
+    + 'Do not hand-dump cargo to make room.'
 }
 
 export function checkDoctrineGuards(
@@ -2073,9 +2090,11 @@ export function checkDoctrineGuards(
       if (churn) return churn
       if (!(abandonTitle && isRefusedMissionTitle(abandonTitle))) noteAbandon(profileId)
     }
+    // Unconditional since 2026-09-17. The preference can still disable the gate entirely, which is
+    // the operator's escape hatch, but there is no per-site judgement any more: an agent asking to
+    // jettison is always refused and told where to put the cargo instead.
     if ((bare === 'jettison' || bare.endsWith('_jettison')) && getPreference('jettison_gate') !== 'off') {
-      const verdict = jettisonVerdict(jettisonItems(commandArgs), here)
-      if (verdict) return verdict
+      return jettisonVerdict(jettisonItems(commandArgs), here)
     }
   }
 
