@@ -307,6 +307,18 @@ const FACILITY_QUEUE = [
   'plasma_injector_assembly',
   'plasma_residue_condenser',
   'tritium_cryo_extractor',
+  // Added 2026-09-17. This list is the ONLY thing the build page renders, so a
+  // facility the fleet is actively assembling is invisible until it appears here —
+  // Brian asked where the Tungsten Drawing Frame was and the answer was "nowhere",
+  // while three agents were buying, forging and hauling its materials. If you decide
+  // to build something, put it in this list in the same change.
+  //
+  // It sits ahead of the chamber because it is the nearer win: 102,000cr against
+  // 314,000, its materials are ~90% assembled, and it unblocks the Devastator's
+  // LARGEST open line — weapon_core, 218 short — out of 7,340 tungsten_ore the fleet
+  // already owns and had written off as dead weight. draw_tungsten_rod is the one
+  // rung of build_weapon_core that is not hand-craftable.
+  'tungsten_drawing_frame',
   // The polonium cell was missing from this list for the whole campaign, and its
   // absence hid the fact that the programme could not reach its own goal. The
   // chain is: breeder (owned) -> reactor_grade_plutonium -> polonium_doping_cell
