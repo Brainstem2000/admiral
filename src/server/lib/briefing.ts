@@ -13,7 +13,28 @@ import { listObligations, getProfile, listPlaybook, getStorageSummaryForProfile,
 import type { ObligationRow, PlaybookEntry } from './db'
 import { galaxyMarketLines, directiveMarketLines } from './galaxy-market'
 
-const REFRESH_INTERVAL = 60_000 // 60 seconds
+/**
+ * How often the background collector re-reads the game for briefing content.
+ *
+ * This is NOT a free knob, and not for the reason it looks like. The collector
+ * itself is cheap — the reads are free game queries and cost no LLM tokens. The
+ * cost is that the briefing text it produces is interpolated INTO the cached
+ * system prompt, so every refresh that changes the text invalidates the prompt
+ * cache and forces a full rewrite on the next call.
+ *
+ * At 60s that guaranteed a cache invalidation every minute per agent, no matter
+ * what else was tuned. Measured 2026-09-16: 159.6M cache-WRITE tokens in a day
+ * with write/read ratios of 50-266% (healthy is 5-10%), so we were paying the
+ * 1.25x write premium instead of banking the 0.1x read discount — caching was
+ * barely net-positive. Raised to 300s, which cuts the floor on invalidations 5x.
+ *
+ * This is a mitigation, not the fix. The real fix is to move the briefing (and
+ * memory/todo/fleet orders) OUT of the cached prefix into a post-cache message —
+ * see docs/PROMPT-ARCHITECTURE.md and the "cost lever is cache WRITES" note in
+ * CLAUDE.md. Until that lands, do not lower this back toward 60s: the staleness
+ * it buys is seconds of game state, and the price is the whole cache.
+ */
+const REFRESH_INTERVAL = 300_000 // 5 minutes
 
 // Agent role: ONE resolver (role.ts) so prompt.md, the command list and the
 // briefing can never disagree about who is a hunter. Re-exported for callers

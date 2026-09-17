@@ -55,6 +55,9 @@ let catalog: Catalog | null = null
 let itemsById = new Map<string, CatalogItem>()
 let recipesById = new Map<string, CatalogRecipe>()
 let recipesByOutput = new Map<string, CatalogRecipe[]>()
+// The craft QUEUE reports a recipe by its display name ('Assemble Platinum Control
+// Node'), never its id, so pacing cannot price a queue without this index.
+let recipesByName = new Map<string, CatalogRecipe>()
 let shipsById = new Map<string, CatalogShip>()
 let facilitiesById = new Map<string, CatalogFacility>()
 let skillsById = new Map<string, Record<string, unknown> & { id: string; name: string }>()
@@ -63,6 +66,7 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null
 function buildIndexes(c: Catalog): void {
   itemsById = new Map(c.items.map((i) => [i.id, i]))
   recipesById = new Map(c.recipes.map((r) => [r.id, r]))
+  recipesByName = new Map(c.recipes.filter(r => r.name).map((r) => [r.name.toLowerCase(), r]))
   recipesByOutput = new Map()
   for (const r of c.recipes) {
     for (const out of r.outputs ?? []) {
@@ -134,6 +138,21 @@ export function catalogVersion(): string | null {
 }
 
 export function getItem(id: string): CatalogItem | undefined { return itemsById.get(id) }
+
+/**
+ * Seconds per RUN for a recipe, looked up by the display name the craft queue
+ * reports (it does not return recipe ids). Falls back to the id, then to null
+ * when the catalog has not loaded or the name is unknown — callers must treat
+ * null as unknown, never as zero, or a queue of unknown recipes would price
+ * as empty and an agent would be paced as if it had nothing to do.
+ */
+export function craftingSecondsFor(recipeNameOrId: string): number | null {
+  const key = String(recipeNameOrId || '').trim().toLowerCase()
+  if (!key) return null
+  const r = recipesByName.get(key) ?? recipesById.get(key)
+  const secs = r?.crafting_time
+  return typeof secs === 'number' && secs > 0 ? secs : null
+}
 export function getFacility(id: string): CatalogFacility | undefined { return facilitiesById.get(id) }
 
 /** Fittable-module catalog entry: any item declaring a mount slot. The raw

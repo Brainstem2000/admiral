@@ -42,7 +42,7 @@ const PROMPT_MD = fs.readFileSync(path.join(REPO, 'prompt.md'), 'utf-8')
 //   bun -e 'import fs from "node:fs"; import {createHash} from "node:crypto";
 //     import {renderPromptForRole} from "./src/server/lib/role";
 //     console.log(createHash("sha256").update(renderPromptForRole(fs.readFileSync("prompt.md","utf-8"),"default")).digest("hex"))'
-const DEFAULT_PROMPT_SHA256 = '31822ae308c126832cf16eb66dac858ca412e3555ba6ddb79be981b10b098392'
+const DEFAULT_PROMPT_SHA256 = '84f037713ee1a12f460f040a963d135fa142eee3cab43199a052e6aec798504b'
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
 

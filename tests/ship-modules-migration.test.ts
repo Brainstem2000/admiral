@@ -41,7 +41,10 @@ async function migrateFrom(shape: 'legacy' | 'drift'): Promise<Record<string, an
 describe('ship_modules migration v9', () => {
   test('a legacy name-keyed table is rebuilt on the slot key', async () => {
     const r = await migrateFrom('legacy')
-    expect(r.userVersion).toBe(9)
+    // At LEAST v9 — this test is about the v9 rebuild having run, not about 9
+    // being the newest schema version. Pinning the exact number made an unrelated
+    // migration (v10, faction credits) fail this file for no real reason.
+    expect(r.userVersion).toBeGreaterThanOrEqual(9)
     expect(r.tableSql).toContain('PRIMARY KEY (profile_id, ship_id, slot, slot_index)')
   })
 
@@ -56,7 +59,7 @@ describe('ship_modules migration v9', () => {
     // Every seeded row carries slot_index 7. Copying that through would violate
     // the new primary key and abort the migration.
     const r = await migrateFrom('drift')
-    expect(r.userVersion).toBe(9)
+    expect(r.userVersion).toBeGreaterThanOrEqual(9)
     expect(r.tableSql).toContain('PRIMARY KEY (profile_id, ship_id, slot, slot_index)')
     expect(r.preservedCount).toBe(5)
     expect(r.preservedIndexes.sort()).toEqual(['defense#0', 'utility#0', 'utility#1', 'utility#2', 'weapon#0'])

@@ -12,13 +12,14 @@ import { resolveAgentRole, renderPromptForRole, type AgentRole } from './role'
 import { resolveModel, resolveApiKey } from './model'
 import { resolveProfileModelRouting, isCodexBusinessRole } from './model-routing'
 import { fetchGameCommands, formatCommandList } from './schema'
+import { craftingSecondsFor } from './catalog'
 import { isCodeDefect } from './swallow'
 import { captureFactionFromCommand } from './faction-ledger'
 import { allTools, toolsForRole, memoryDirtyFlags, ACTION_PENDING_SENTINEL, cleanupProfileToolState, checkDoctrineGuards, recordStorageFromCommand, recordCargoFromCommand, recordStorageMutationFromCommand, captureFromCommandResult, bookLedgerFromCommand, isQueryCommand, consumeContextFlushRequest, reputationLockedSystemIds, jettisonSiteFrom, clearDestinationCommit } from './tools'
 import { directiveForbidsSystem } from './directive-rules'
 import { runAgentTurn, VOLATILE_STATE_HEADER, VOLATILE_STATE_END, type CompactionState } from './loop'
 import { runCodexAgentTurn } from './codex-app-server'
-import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles, FORBIDDEN_SYSTEMS, assessSystemDanger, recordPosition, describeStorageDrift } from './db'
+import { addLogEntry, getProfile, updateProfile, getPreference, getFleetOrders, listProfiles, FORBIDDEN_SYSTEMS, assessSystemDanger, recordPosition, describeStorageDrift, getStorageForProfile, getFactionStorageQuantity } from './db'
 import { advancePlanQueue } from './plan-queue'
 import { FleetIntelCollector, buildDepositBriefing } from './fleet-intel'
 import { safeTruncate } from './text-safe'
@@ -31,6 +32,19 @@ import fs from 'fs'
 import path from 'path'
 
 const TURN_INTERVAL = 2000
+
+/**
+ * Items whose whole purpose is to be consumed by SOMEONE ELSE — the shared
+ * industrial inputs that a faction build or a vault-sourced craft reads. Holding
+ * these in a personal locker while the vault is empty stalls other agents, so an
+ * agent doing it is not paced long however deep its own queue is.
+ */
+const SUPPLY_ITEMS = new Set([
+  'control_node', 'platinum_wiring', 'copper_wiring', 'circuit_board',
+  'steel_plate', 'copper_piping', 'heat_sink', 'plasma_injector',
+])
+/** Below this, a holding is a working remainder rather than a withheld supply. */
+const SUPPLY_HOLD_MIN = 20
 /** Providers that serve models off the local machine rather than a hosted API.
  *  Their generation rate is bounded by local memory bandwidth, not by a
  *  datacenter GPU, so the hosted-API timeout is wildly wrong for them. */
@@ -744,7 +758,18 @@ export class Agent {
       // idle backoff override a 30-minute pace, which is backwards: pacing is
       // a floor the operator set, not a ceiling.
       const paced = Math.max(this.pacingMs(), TURN_INTERVAL)
-      const sleepMs = Math.max(idleBackoffMs, paced)
+      // Queue-aware pacing (Brian, 2026-09-16: "if the queue can continue
+      // processing without thought, then pace it that way"). A crafter's output
+      // comes from the workshop advancing on game ticks, not from its own turns,
+      // so sleep as long as the bench has work and wake with enough margin to
+      // requeue before it drains. Only consulted for an agent the operator has
+      // already paced — an unpaced agent keeps its previous behaviour exactly.
+      let queueAware = paced
+      if (this.pacingMs() > 0) {
+        const runway = await this.craftQueueRunwayMs()
+        queueAware = pacedSleepMs(runway, paced, { holdingSupply: this.holdingBlockedSupply() })
+      }
+      const sleepMs = Math.max(idleBackoffMs, queueAware)
       if (sleepMs >= 60_000) {
         this.setActivity(`Paced: next turn in ${Math.round(sleepMs / 60_000)}m (nudge to wake)...`)
       }
@@ -1078,6 +1103,87 @@ export class Agent {
   }
 
   /** Abort current turn and restart the loop with the updated directive. */
+  /**
+   * Milliseconds of work already queued at this agent's bench, or null if it
+   * cannot be read. Used to pace the agent to its own workload — see
+   * pacedSleepMs.
+   *
+   * `craft action=queue` is a FREE query (no game tick), and one free query that
+   * replaces several paid LLM turns is the whole point. Failures return null so
+   * the caller falls back to the operator's floor: "I could not read the queue"
+   * must never be mistaken for "there is nothing to do".
+   */
+  private async craftQueueRunwayMs(): Promise<number | null> {
+    if (!this.connection) return null
+    try {
+      const res = await this.executeCommand('craft', { action: 'queue' }, { silent: true })
+      const data = ((res as { structuredContent?: unknown }).structuredContent ?? res.result) as
+        Record<string, unknown> | undefined
+      const details = (data?.details ?? data) as Record<string, unknown> | undefined
+      const jobs = details?.jobs as Array<Record<string, unknown>> | undefined
+      if (!Array.isArray(jobs)) return null
+      let secs = 0
+      for (const j of jobs) {
+        const runs = Number(j.runs_remaining ?? 0)
+        if (!Number.isFinite(runs) || runs <= 0) continue
+        // The queue names the recipe, never its id. An unknown recipe is priced
+        // at the game's own tick (10s) rather than skipped — undercounting the
+        // runway would pace a busy agent as if it were idle.
+        const per = craftingSecondsFor(String(j.recipe ?? '')) ?? 10
+        secs += runs * per
+      }
+      return secs > 0 ? secs * 1000 : 0
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * True when this agent is sitting on stock the faction vault is OUT of at the
+   * same station — i.e. output other agents are blocked on and physically cannot
+   * reach, because a faction build and `source="faction"` both read the vault and
+   * never a personal locker.
+   *
+   * Deliberately narrow: only items the vault has ZERO of count. A vault that
+   * merely holds less than the agent is not a blockage, and a broad rule would
+   * pace every producer to the floor and undo the saving entirely.
+   *
+   * Reads the local ledger, not the game — this runs every turn-end and must cost
+   * nothing. A stale ledger here is acceptable: the worst case is one extra short
+   * sleep, which is exactly the safe direction to be wrong in.
+   */
+  private holdingBlockedSupply(): boolean {
+    try {
+      const station = (this.connection?.getLocalState?.() as
+        { location?: { docked_at?: string | null } } | null)?.location?.docked_at
+      if (!station) return false
+      const mine = getStorageForProfile(this.profileId, station)
+      if (!mine.length) return false
+      for (const row of mine) {
+        const qty = Number(row.quantity ?? 0)
+        if (qty < SUPPLY_HOLD_MIN) continue
+        if (!SUPPLY_ITEMS.has(row.item_id)) continue
+        // Fire when this agent holds the OVERWHELMING MAJORITY of a shared input,
+        // not merely when the vault is at literal zero.
+        //
+        // The first version tested `vault === 0` and missed the real case by a
+        // hair: on 2026-09-16 the vault held 12 platinum_wiring while Morg'Thar
+        // held 86, so it did not fire and he paced to the 10-minute cap while
+        // three assemblers shared 12 units between them — enough for six nodes.
+        //
+        // The ratio is scale-free, which matters because these items span three
+        // orders of magnitude (86 wiring is a hoard; 86 steel_plate is a rounding
+        // error against a 2,850 bill). "The vault has less than a third of the
+        // total" reads the same for both.
+        const inVault = getFactionStorageQuantity(row.item_id, station)
+        if (inVault * 2 < qty) return true
+      }
+      return false
+    } catch {
+      return false
+    }
+  }
+
   /** Operator-set minimum gap between turns, in ms. 0 when unpaced. */
   private pacingMs(): number {
     const v = getProfile(this.profileId)?.turn_interval_sec
@@ -1234,6 +1340,63 @@ function createConnection(profile: Profile): GameConnection {
  *
  * Enabled per agent via `profiles.volatile_split`.
  */
+/**
+ * How long an agent can safely sleep given the work already queued at its bench.
+ *
+ * Brian, 2026-09-16: "I want it synced better so that there is no wasted time
+ * thinking about nothing that needs thought of. If the queue can continue
+ * processing without thought, then pace it that way."
+ *
+ * A crafting agent's output is produced by the station workshop on 10-second game
+ * ticks, NOT by its own thinking. Morg'Thar burned 2,006 LLM calls in a day — 28%
+ * of the whole fleet — while every unit he produced came from a queue that ran
+ * whether he was awake or not. But a fixed pace is wrong in the other direction:
+ * if the queue drains between wakes the bench sits idle, and a 19-run node batch
+ * is only ~3 minutes long.
+ *
+ * So sleep until the queue is nearly empty, and no longer:
+ *
+ *   sleep = clamp(runway - margin, floor, cap)
+ *
+ * - `runway` is the queued work in ms (sum of runs_remaining x seconds/run).
+ * - `margin` leaves time to wake and requeue BEFORE the bench goes idle.
+ * - `floor` is the operator's `turn_interval_sec` — pacing is a floor they set,
+ *   never something this function may undercut.
+ * - `cap` keeps the agent responsive and, more importantly, keeps finished output
+ *   moving: nodes sitting in a personal locker are invisible to a faction build,
+ *   which cost this project half an hour on its first facility.
+ *
+ * A null/unknown runway returns the floor unchanged — never treat "I could not
+ * read the queue" as "there is nothing to do".
+ */
+export function pacedSleepMs(
+  runwayMs: number | null,
+  floorMs: number,
+  opts: { marginMs?: number; capMs?: number; holdingSupply?: boolean } = {},
+): number {
+  const margin = opts.marginMs ?? 120_000     // 2 min of headroom to requeue
+  const cap = opts.capMs ?? 600_000           // never sleep past 10 min
+
+  // A DEEP QUEUE IS NOT THE ONLY REASON TO STAY AWAKE.
+  //
+  // The first version of this asked only "does this agent's bench have work?".
+  // For a solo producer that is the right question. For a SUPPLIER it is exactly
+  // backwards: Morg'Thar is the fleet's only source of platinum_wiring, and on
+  // 2026-09-16 he sat on a 123-minute queue — so this paced him to the 10-minute
+  // cap — while holding 51 wiring with ZERO in the faction vault and three
+  // assemblers blocked on it. He was "busy" precisely because he was hoarding.
+  //
+  // Output nobody else can reach is not output. When the caller reports that the
+  // agent is holding stock others are waiting on, pace to the floor and let it
+  // wake to deposit — the tokens are cheaper than three idle agents.
+  if (opts.holdingSupply) return floorMs
+
+  if (runwayMs == null || !Number.isFinite(runwayMs) || runwayMs <= 0) return floorMs
+  const usable = runwayMs - margin
+  if (usable <= floorMs) return floorMs
+  return Math.min(usable, Math.max(cap, floorMs))
+}
+
 export function buildVolatileState(profile: Profile, profileId?: string): string {
   return `## Agent Memory
 ${profile.memory || '(No memory stored yet. Use update_memory to save important information.)'}

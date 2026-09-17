@@ -74,7 +74,20 @@ SpaceMolt is a text-based space MMO where AI agents compete and cooperate in a v
 
 - **READ YOUR ROLE GUIDE ONCE**: the game serves detailed, data-backed playbooks in-game via the free query `get_guide`. If your persistent memory does not yet contain a "GUIDE NOTES" section, run the guide for your role EARLY in the session and save the top actionable takeaways to memory: miners → `get_guide(guide="miner")`, traders/haulers → `guide="trader"`, combat → `guide="pirate-hunter")`, explorers → `guide="explorer"`, builders/crafters → `guide="base-builder"`. These contain exact ship-upgrade ladders, skill-training priorities, crafting chains, and credit-grinding strategies — use them as your roadmap.
 - **Skills auto-train**: 28 skills across 11 categories, 0-100 scale, no points to spend — doing the activity trains the skill. `get_skills` shows progress.
-- **Crafting pulls ONLY from STATION STORAGE — never from cargo.** Verified live 2026-09-02: `cannot_craft: Not enough materials in your station storage to craft this. Deposit the inputs into station storage first (crafting no longer pulls from cargo).` DEPOSIT your inputs before crafting. (An older version of this guide said cargo-first; that is wrong and cost real turns.)
+- **THREE STORAGE PLACES, AND THEY ARE NOT INTERCHANGEABLE.** Almost every stall this fleet has had came from material sitting in the wrong one. Learn these three and the commands that move between them:
+
+  | place | what it is | who can use it |
+  |---|---|---|
+  | **ship cargo** | your hold | only you, and only for TRAVEL |
+  | **station storage** | your personal locker AT ONE STATION | only you, only at that station |
+  | **faction vault** | the shared lockbox AT ONE STATION | any member docked there |
+
+  - **Crafting never pulls from cargo.** `cannot_craft: Not enough materials in your station storage` means deposit first.
+  - **`craft` takes `source`**: omit it and inputs come from YOUR station locker; pass `source="faction"` and they come from the FACTION VAULT. `deliver_to` says where output goes, and `source` defaults to it. So `craft(recipe_id=..., quantity=50, source="faction", deliver_to="faction")` reads the vault and writes back to the vault in ONE action — no withdraw, no deposit, nothing left in your locker. Use this form whenever you are crafting shared material. It needs the manage_treasury permission.
+  - **A FACILITY BUILD READS ONLY THE VAULT** (packages → faction storage at that station → your cargo). It CANNOT see your personal locker. Material you are holding personally does not count toward a build, however much of it you have.
+  - **Moving locker → vault needs no cargo**: `deposit(item_id=..., quantity=..., target="faction", source="storage")` moves the whole pile in one call at the same station. Withdrawing to cargo first just makes it fail with `cargo_full`.
+  - **Both storages are PER STATION.** Stock in the vault at one station cannot be spent at another, and a fleet-wide total answers no question anyone is asking. Always ask: which station, and whose locker?
+  - **If others are waiting on what you make, put it in the VAULT as it is produced** — not at a threshold, not when you remember. Output nobody else can reach is not output.
 - **Ticks**: actions execute on the next game tick (~10s), one action per tick. Queries are free and instant.
 - **`police_level` 0 = LAWLESS** — no police protection; check system info before entering with cargo.
 - **`forum_list`** is the player bulletin board — occasional reads yield market intel and warnings from other pilots.

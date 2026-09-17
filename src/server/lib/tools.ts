@@ -4,7 +4,7 @@ import type { GameConnection } from './connections/interface'
 import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
 import { scrubLiveState, scrubNotice, dedupeTodoAgainstMemory, ageCompletedTodoLines, scrubMemoryTaskLines, hygieneNotice, resetNoteHygiene } from './note-hygiene'
 import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor, refuseAbandon, noteAbandon, knownTitle, isRefusedMissionTitle } from './mission-guard'
-import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, isStorageDirty, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS, systemHasStation, cheapestRecentAsk, applyStorageDelta, markStorageDirty, findProfileByPlayer, recordPosition, describeStorageDrift, getCargoForProfile, type StorageDrift } from './db'
+import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getFactionStorageQuantity, isStorageDirty, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS, systemHasStation, cheapestRecentAsk, applyStorageDelta, markStorageDirty, findProfileByPlayer, recordPosition, describeStorageDrift, getCargoForProfile, type StorageDrift } from './db'
 import { swallow } from './swallow'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
@@ -1042,6 +1042,21 @@ function checkCraftInputs(ctx: ToolContext, deep: string, commandArgs: Record<st
   const yieldPerRun = Math.max(1, Number(outputs[0]?.quantity ?? 1) || 1)
   const runs = Math.ceil(qty / yieldPerRun)
 
+  // WHERE the inputs come from is the agent's choice, and this gate must read the
+  // same place the game will. `source` defaults to `deliver_to` (docs/crafting),
+  // and either may be "faction" or "faction:<bucket>" — then inputs are drawn from
+  // the FACTION VAULT at this station, not the agent's own locker.
+  //
+  // Reading personal storage regardless was a hard blocker: on 2026-09-16 Bob
+  // Comet ran `craft(assemble_platinum_control_node, source="faction",
+  // deliver_to="faction")` — exactly right, and the vault held the inputs — and
+  // this gate refused it with "station storage has 0" and sent him to HALT. It
+  // blocked the vault-to-vault pattern the whole fleet had just been moved onto,
+  // without a single game tick being spent to find out it was wrong.
+  const sourceArg = String(commandArgs?.source ?? commandArgs?.deliver_to ?? '').trim().toLowerCase()
+  const fromFaction = sourceArg === 'faction' || sourceArg.startsWith('faction:')
+  const whereLabel = fromFaction ? `the faction vault at ${station}` : `station storage at ${station}`
+
   const missing: string[] = []
   for (const inp of inputs) {
     const item = String(inp.item_id ?? '')
@@ -1049,7 +1064,11 @@ function checkCraftInputs(ctx: ToolContext, deep: string, commandArgs: Record<st
     if (!item || per <= 0) continue
     const need = per * runs
     let have = 0
-    try { have = getStorageQuantity(ctx.profileId, station, item) } catch { have = 0 }
+    try {
+      have = fromFaction
+        ? getFactionStorageQuantity(item, station)
+        : getStorageQuantity(ctx.profileId, station, item)
+    } catch { have = 0 }
     if (have >= need) continue
 
     // Where are the missing units — our own cargo (one deposit away), or elsewhere?
@@ -1057,13 +1076,15 @@ function checkCraftInputs(ctx: ToolContext, deep: string, commandArgs: Record<st
     try {
       const inCargo = getCargoQuantity(ctx.profileId, item)
       if (inCargo > 0) {
-        hint = ` — you are CARRYING ${inCargo}; deposit(item_id="${item}", quantity=${Math.min(inCargo, need - have)}) first`
+        hint = fromFaction
+          ? ` — you are CARRYING ${inCargo}; deposit(item_id="${item}", quantity=${Math.min(inCargo, need - have)}, target="faction", source="cargo") first`
+          : ` — you are CARRYING ${inCargo}; deposit(item_id="${item}", quantity=${Math.min(inCargo, need - have)}) first`
       } else {
         const other = getStorageElsewhere(station, item).filter(r => r.quantity > 0).slice(0, 2)
         if (other.length) hint = ` — fleet storage holds some at ${other.map(o => `${o.station_id} (${o.quantity})`).join(', ')}`
       }
     } catch { /* hints are a bonus */ }
-    missing.push(`${item}: need ${need}, station storage has ${have}${hint}`)
+    missing.push(`${item}: need ${need}, ${fromFaction ? "the faction vault has" : "station storage has"} ${have}${hint}`)
   }
   if (missing.length === 0) { craftBlocks.delete(ctx.profileId); return null }
 
@@ -1075,9 +1096,13 @@ function checkCraftInputs(ctx: ToolContext, deep: string, commandArgs: Record<st
   craftBlocks.set(ctx.profileId, key)
 
   return (
-    `BLOCKED: craft(${recipeId} x${qty}${yieldPerRun > 1 ? ` = ${runs} run(s) of ${yieldPerRun}` : ''}) would fail — crafting draws ONLY from station storage at ${station}, never from cargo.\n` +
+    `BLOCKED: craft(${recipeId} x${qty}${yieldPerRun > 1 ? ` = ${runs} run(s) of ${yieldPerRun}` : ''}) would fail — this craft draws from ${whereLabel}, never from cargo.\n` +
     missing.map(m => `  • ${m}`).join('\n') +
-    `\nDeposit or acquire the missing inputs, then craft. Checked locally; no game tick was spent.`
+    (fromFaction
+      ? `\nYou asked for source="faction", so this reads the VAULT. If the stock is in your own locker instead,`
+        + ` either deposit it (target="faction") or drop source="faction" and craft from your locker.`
+      : `\nDeposit or acquire the missing inputs, then craft.`)
+    + ` Checked locally; no game tick was spent.`
   )
 }
 
@@ -3455,7 +3480,7 @@ export async function executeTool(
       } catch { /* never break game execution */ }
       // Invalidate briefing cache — action changed game state; trigger async refresh
       invalidateBriefingCache(ctx.profileId, ctx.connection)
-      return truncateResult(pendingResult, deepBare) + missionIndexFor(pendingResult, resultData, deepBare) + (fleetRecord ? `\n\n${fleetRecord}` : '')
+      return truncateResult(pendingResult, deepBare) + missionIndexFor(pendingResult, resultData, deepBare) + storageIndexFor(pendingResult, resultData, deepBare) + (fleetRecord ? `\n\n${fleetRecord}` : '')
     }
 
     // Passively collect fleet intel from game results (resultData: see note above —
@@ -3552,7 +3577,7 @@ export async function executeTool(
     const topOff = !isQuery && deepBare === 'dock' ? await autoTopOffAfterDock(ctx) : ''
 
     // The fleet record rides OUTSIDE the cap so a long map cannot cut it.
-    return truncateResult(result, deepBare) + missionIndexFor(result, resultData, deepBare) + topOff + (fleetRecord ? `\n\n${fleetRecord}` : '')
+    return truncateResult(result, deepBare) + missionIndexFor(result, resultData, deepBare) + storageIndexFor(result, resultData, deepBare) + topOff + (fleetRecord ? `\n\n${fleetRecord}` : '')
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     const errMsg = `Error executing ${command}: ${msg}`
@@ -5893,6 +5918,45 @@ function missionIndexFor(text: string, resultData: unknown, deepCommand?: string
   if (!lines.length) return ''
   return `\n\nEVERY MISSION ID ON THIS BOARD (the listing above was cut at ${cap} characters,`
     + ` so some entries lost their detail — accept by the id below):\n${lines.join('\n')}`
+}
+
+/**
+ * A truncated storage listing hides the QUANTITIES past the cut, and an item you
+ * cannot see is an item you conclude you do not have.
+ *
+ * Same defect as the mission board above, with a worse failure mode: a missing
+ * mission id reads as "not found", but a missing storage line reads as ZERO. The
+ * agent does not know it was cut — it concludes the material is absent and acts
+ * on that. Observed 2026-09-16 at Crimson War Citadel, whose faction vault holds
+ * 106 line items and renders well past the 4,000-char cap: Morg'Thar reported
+ * "the faction storage view returned the same truncated list as before, without
+ * showing control_node" while 249 control_node sat in that vault, and Nova Reyes
+ * hit the identical cut on copper_ore with 2,931 of it present. Both were
+ * blocked on stock they were standing next to.
+ *
+ * structuredContent carries every item regardless of text length, so when the
+ * text is cut, append a compact id/qty index built from it. Ids, not display
+ * names — the agent crafts and deposits by item_id.
+ */
+export function storageIndexFor(text: string, resultData: unknown, deepCommand?: string): string {
+  if (deepCommand !== 'view_storage' && deepCommand !== 'view_faction_storage') return ''
+  const cap = (deepCommand && RESULT_CHAR_CAPS[deepCommand]) || MAX_RESULT_CHARS
+  if (text.length <= cap) return ''          // nothing was lost
+  const d = resultData as Record<string, unknown> | undefined
+  const arr = d?.items as Array<Record<string, unknown>> | undefined
+  if (!Array.isArray(arr) || arr.length === 0) return ''
+  const lines = arr
+    .map(it => {
+      const id = String(it.item_id ?? it.id ?? '').trim()
+      const qty = Number(it.quantity ?? it.qty ?? 0)
+      return id && qty > 0 ? `  ${id} ${qty}` : ''
+    })
+    .filter(Boolean)
+  if (!lines.length) return ''
+  const where = String(d?.base_id ?? d?.station_id ?? '').trim()
+  return `\n\nCOMPLETE ITEM LIST${where ? ` AT ${where}` : ''} (the listing above was cut at ${cap}`
+    + ` characters, so lines past the cut are MISSING, not zero — this index is the whole contents,`
+    + ` ${lines.length} items, as item_id followed by quantity):\n${lines.join('\n')}`
 }
 
 function truncate(text: string, max: number): string {
