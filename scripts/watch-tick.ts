@@ -23,8 +23,40 @@ const DB = process.env.ADMIRAL_DB || `${import.meta.dir}/../data/admiral.db`
 const STATE = process.env.WATCH_STATE || `${import.meta.dir}/../data/watch-state.txt`
 const db = new Database(DB, { readonly: true })
 
-/** Agents safe-docked on purpose. Silence from these is the intended outcome. */
-const PARKED = new Set((process.env.WATCH_PARKED ?? 'CyberSpock - Smuggler,CyberSapper - Smuggler').split(',').map(s => s.trim()).filter(Boolean))
+/**
+ * Agents safe-docked on purpose. Silence from these is the intended outcome.
+ *
+ * This used to DEFAULT to 'CyberSpock - Smuggler,CyberSapper - Smuggler' — two names hardcoded
+ * during some earlier session. By 2026-09-17 both were flying active missions and the watch was
+ * blind to them, while crying wolf every tick about Zibal, who had just been safe-docked
+ * deliberately. Exactly backwards, and the kind of noise that gets a watcher switched off.
+ *
+ * The default is now EMPTY and parked status is derived from the server instead (see
+ * `parked()`), so a safe-dock silences the right agent without anyone editing this file.
+ * WATCH_PARKED still overrides by name for anything the heuristic cannot see.
+ */
+const PARKED = new Set((process.env.WATCH_PARKED ?? '').split(',').map(s => s.trim()).filter(Boolean))
+
+/**
+ * Deliberately parked, as opposed to crashed. `safe-dock` stops the loop AND clears autoconnect;
+ * a crash or a server restart leaves autoconnect set, because the fleet is still trying to bring
+ * that agent back. So "not running and not trying to" is the honest signal for intent.
+ */
+const parked = (p: { running?: unknown; autoconnect?: unknown }) => !p.running && !p.autoconnect
+
+/**
+ * One roster read, shared by every check below. The silence check used to run off the DB alone,
+ * so a deliberately parked agent went quiet and then tripped "SILENT: no log line" every tick —
+ * the same false alarm the liveness check was producing, from a different direction.
+ * A failed fetch yields an empty set and every check falls back to its old behaviour.
+ */
+const roster: Array<{ name?: string; running?: boolean; connected?: boolean; activity?: string; autoconnect?: boolean }> =
+  await fetch('http://127.0.0.1:3031/api/profiles', { signal: AbortSignal.timeout(5000) })
+    .then(r => r.json())
+    .then(b => (Array.isArray(b) ? b : (b as { profiles?: unknown[] }).profiles ?? []) as Array<Record<string, never>>)
+    .catch(() => [])
+const parkedNames = new Set(roster.filter(parked).map(p => String(p.name ?? '')).filter(Boolean))
+const quiet = (name: string) => PARKED.has(name) || parkedNames.has(name)
 
 const seen = new Set<string>(existsSync(STATE) ? readFileSync(STATE, 'utf8').split('\n').filter(Boolean) : [])
 const out: string[] = []
@@ -39,7 +71,7 @@ const q = (item: string) => {
 // 1. Silence. A mine_until_full macro still writes log lines, so real silence is real.
 for (const r of db.query(`SELECT p.name, MAX(l.timestamp) t FROM profiles p
     JOIN log_entries l ON l.profile_id = p.id GROUP BY p.id`).all() as Array<{ name: string; t: string }>) {
-  if (PARKED.has(r.name)) continue
+  if (quiet(r.name)) continue
   const mins = (Date.now() - Date.parse(String(r.t).replace(' ', 'T') + 'Z')) / 60000
   if (mins > 25) emit(`q:${r.name}`, `SILENT: ${r.name} no log line ${Math.round(mins)}min`)
   else clear(`q:${r.name}`)
@@ -56,21 +88,16 @@ for (const r of db.query(`SELECT p.name, MAX(l.timestamp) t FROM profiles p
 //    false positives in one hour (mine_until_full, then a hauler at hop 26 of 31) and would
 //    keep producing them as new macros appear. `running` plus a live `activity` string is
 //    macro-agnostic and cannot drift out of date.
-try {
-  const res = await fetch('http://127.0.0.1:3031/api/profiles', { signal: AbortSignal.timeout(5000) })
-  const body = await res.json() as unknown
-  const rows = (Array.isArray(body) ? body : (body as { profiles?: unknown[] }).profiles ?? []) as Array<{
-    name?: string; running?: boolean; connected?: boolean; activity?: string
-  }>
-  for (const p of rows) {
+if (roster.length) {
+  for (const p of roster) {
     const name = String(p.name ?? '')
-    if (!name || PARKED.has(name)) continue
+    if (!name || quiet(name)) continue
     const busy = /Executing|Planning|Waiting for LLM/i.test(String(p.activity ?? ''))
     if (p.running && busy) { clear(`dead:${name}`); continue }
     if (p.running) { clear(`dead:${name}`); continue }   // paced between turns is healthy
     emit(`dead:${name}`, `NOT RUNNING: ${name} connected=${p.connected} activity="${String(p.activity ?? '').slice(0, 40)}"`)
   }
-} catch {
+} else {
   // The Admiral being unreachable is itself worth one line, but only once.
   emit(`api:${Math.floor(Date.now() / 1800000)}`, 'ADMIRAL API UNREACHABLE — cannot read agent run state')
 }
