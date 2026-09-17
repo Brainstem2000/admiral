@@ -14,7 +14,7 @@
  * an agent off to mine 200 steel_plate for a lockbox that already existed.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { Warehouse, RefreshCw, Search, LockOpen, Lock, Hammer, AlertTriangle, Receipt, Factory } from 'lucide-react'
+import { Warehouse, RefreshCw, Search, LockOpen, Lock, Hammer, AlertTriangle, Receipt, Factory, Rocket } from 'lucide-react'
 
 const DISPLAY = { fontFamily: "'Chakra Petch', system-ui, sans-serif" } as const
 
@@ -45,7 +45,7 @@ export function FactionVaultPane() {
   // Two jobs live here and they are read at different times: 'what do we hold against the
   // builds' and 'where did the money go'. One page made both harder to scan, so they are
   // separate views rather than one long scroll.
-  const [tab, setTab] = useState<'inventory' | 'ledger' | 'rent' | 'build'>('inventory')
+  const [tab, setTab] = useState<'inventory' | 'ledger' | 'rent' | 'build' | 'ship'>('inventory')
 
   const load = async (fresh = false) => {
     setLoading(true); setError(null)
@@ -142,9 +142,14 @@ export function FactionVaultPane() {
           <TabButton active={tab === 'build'} onClick={() => setTab('build')} icon={<Hammer size={12} />}>
             Build queue
           </TabButton>
+          <TabButton active={tab === 'ship'} onClick={() => setTab('ship')} icon={<Rocket size={12} />}>
+            Ship build
+          </TabButton>
         </div>
 
         {tab === 'build' && <BuildQueue />}
+
+        {tab === 'ship' && <ShipBuild />}
 
         {tab === 'rent' && <FacilityRent />}
 
@@ -680,6 +685,132 @@ function FacilityRent() {
       })}
 
       <div className="text-[11px] text-muted-foreground leading-relaxed">{d.note}</div>
+    </div>
+  )
+}
+
+interface ShipLine {
+  item_id: string; name: string; needed: number
+  cargo: number; locker: number; commission_ready: number
+  vault: number; elsewhere: number; short: number
+  pct: number; status: 'ready' | 'withdraw' | 'withdraw_partial' | 'fetch' | 'short'
+}
+interface ShipPayload {
+  ship: string; ship_name: string; station: string; pilot: string
+  bare_hull: boolean; shipyard_tier_required: number | null; build_time: number | null
+  treasury: number; lines: ShipLine[]; pct: number; binding: string | null
+  ready_count: number; withdraw_count: number; total: number
+}
+
+/**
+ * The ship commission bill. Deliberately NOT shaped like the facility queue,
+ * because the two consumers read opposite places: a facility build reads the
+ * FACTION VAULT and never a personal locker, while `supply_commission` reads the
+ * pilot's CARGO then their PERSONAL locker and never the vault.
+ *
+ * So the vault column here is a WARNING, not stock. Parts sitting in the vault
+ * are in the right station and the wrong pocket — the yard cannot see them, and
+ * a page that added them into "have" would show the ship ready to order while
+ * the shipyard reported nothing. That is why `commission_ready` is only
+ * cargo + locker, and vault surfaces as a "withdraw" action.
+ */
+function ShipBuild() {
+  const [d, setD] = useState<ShipPayload | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const r = await fetch('/api/faction/ship-build')
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        const j = await r.json()
+        if (alive) { setD(j); setErr(null) }
+      } catch (e) { if (alive) setErr(e instanceof Error ? e.message : String(e)) }
+    }
+    void load()
+    const t = setInterval(load, 30000)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  if (err) return <div className="text-[12px] text-muted-foreground px-1 py-4">Ship build unavailable: {err}</div>
+  if (!d) return <div className="text-[12px] text-muted-foreground px-1 py-4">Loading ship bill…</div>
+
+  const TONE: Record<ShipLine['status'], string> = {
+    ready: 'var(--smui-green)', withdraw: 'var(--smui-yellow)', withdraw_partial: 'var(--smui-yellow)',
+    fetch: 'var(--smui-orange)', short: 'var(--smui-red)',
+  }
+  const VERB: Record<ShipLine['status'], string> = {
+    ready: 'ready', withdraw: 'in vault — withdraw', withdraw_partial: 'withdraw vault, then top up',
+    fetch: 'elsewhere — haul it in', short: 'buy, craft or mine',
+  }
+  const rows = [...d.lines].sort((a, b) => a.pct - b.pct)
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Stat label="Lines ready" value={`${d.ready_count}/${d.total}`}
+          accent={d.ready_count === d.total ? 'var(--smui-green)' : undefined} />
+        <Stat label="Binding line" value={d.binding ? d.binding.replace(/_/g, ' ') : '—'}
+          accent={d.binding ? 'var(--smui-orange)' : 'var(--smui-green)'} />
+        <Stat label="In vault, not visible" value={String(d.withdraw_count)}
+          accent={d.withdraw_count ? 'var(--smui-yellow)' : undefined} />
+        <Stat label="Treasury" value={`${d.treasury.toLocaleString()} cr`} accent="var(--smui-yellow)" />
+      </div>
+
+      <div className="flex items-baseline gap-2 flex-wrap px-1">
+        <span className="text-[13px] font-semibold" style={DISPLAY}>{d.ship_name}</span>
+        <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5"
+          style={{ color: 'hsl(var(--smui-green))', border: '1px solid hsl(var(--smui-green) / 0.5)' }}>bare hull</span>
+        <span className="text-[10.5px] text-muted-foreground">
+          pilot <span className="font-mono">{d.pilot}</span> at <span className="font-mono">{d.station}</span>
+          {d.build_time ? ` · ${d.build_time.toLocaleString()} ticks` : ''}
+        </span>
+      </div>
+
+      <p className="text-[10.5px] text-muted-foreground/70 px-1">
+        A commission takes materials from the pilot's <strong>cargo first, then their personal station
+        storage</strong> — it never reads faction storage (that applies only at a station the faction owns,
+        and we own none). So the vault column below is <strong>not stock</strong>: those parts are in the right
+        station and the wrong pocket, and must be withdrawn before the yard can see them. This is the exact
+        opposite of the facility Build queue tab, which reads the vault and never a locker.
+      </p>
+      <p className="text-[10.5px] text-muted-foreground/70 px-1">
+        This is the <strong>bare hull</strong> — the catalog's own bill. A commission quote with no arguments
+        prices the <em>default loadout</em> instead and adds fitted modules (fury cannon, mass driver,
+        piercing railgun), three of which have no seller anywhere and would each need a seven-figure
+        facility. Those are not part of the ship; fit them afterwards.
+      </p>
+
+      <div className="flex flex-col gap-1">
+        {rows.map(l => (
+          <div key={l.item_id} className="border px-3 py-2"
+            style={{ borderColor: l.status === 'ready' ? 'hsl(var(--smui-green) / 0.35)' : 'hsl(var(--border))' }}>
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <span className="text-[12.5px] font-semibold font-mono">{l.name}</span>
+              <span className="text-[11px] tabular-nums font-semibold" style={{ color: `hsl(${TONE[l.status]})` }}>
+                {l.commission_ready.toLocaleString()} / {l.needed.toLocaleString()}
+              </span>
+              <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5"
+                style={{ color: `hsl(${TONE[l.status]})`, border: `1px solid hsl(${TONE[l.status]} / 0.5)` }}>
+                {VERB[l.status]}
+              </span>
+              <span className="ml-auto text-[10.5px] text-muted-foreground tabular-nums">
+                {l.cargo > 0 && <span>cargo {l.cargo.toLocaleString()} · </span>}
+                {l.locker > 0 && <span>locker {l.locker.toLocaleString()} · </span>}
+                {l.vault > 0 && (
+                  <span style={{ color: 'hsl(var(--smui-yellow))' }}>vault {l.vault.toLocaleString()} (not visible) · </span>
+                )}
+                {l.elsewhere > 0 && <span>elsewhere {l.elsewhere.toLocaleString()} · </span>}
+                {l.short > 0 ? <span style={{ color: `hsl(${TONE[l.status]})` }}>short {l.short.toLocaleString()}</span> : <span>complete</span>}
+              </span>
+            </div>
+            <div className="mt-1.5 h-[3px] w-full bg-border/40">
+              <div className="h-full" style={{ width: `${Math.round(l.pct * 100)}%`, background: `hsl(${TONE[l.status]})` }} />
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

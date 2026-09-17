@@ -1,7 +1,8 @@
 import { Hono } from 'hono'
 import { agentManager } from '../lib/agent-manager'
-import { listProfiles, getDb, getFactionStorage, getFactionLedger, getFactionTreasurySummary, getFactionTreasuryStatement } from '../lib/db'
-import { getFacility } from '../lib/catalog'
+import { listProfiles, getDb, getFactionStorage, getFactionLedger, getFactionTreasurySummary, getFactionTreasuryStatement, getStorageForProfile, getStorageElsewhere } from '../lib/db'
+import { getFacility, getShip } from '../lib/catalog'
+import { computeShipBuild, parseCargoItems } from '../lib/ship-build'
 
 /**
  * Faction-level view: overview (treasury, members/roles, personnel, fuel) plus
@@ -447,6 +448,71 @@ async function refreshBuilt(): Promise<void> {
 faction.get('/build-queue/built', async (c) => {
   await refreshBuilt()
   return c.json({ built: builtCache?.rows ?? [], cached_at: builtCache?.at ?? null })
+})
+
+/**
+ * GET /api/faction/ship-build — the SHIP commission bill, gated on what the
+ * commission can actually reach.
+ *
+ * Deliberately NOT the same shape as /build-queue, because the two consumers read
+ * OPPOSITE places (plan §30, verified against the guides):
+ *
+ *   facility_build     -> packages, FACTION STORAGE at the station, then cargo.
+ *                         Never a personal locker.
+ *   supply_commission  -> the pilot's CARGO, then the pilot's PERSONAL locker.
+ *                         Never faction storage — that applies only at a station
+ *                         the faction owns, and we own none.
+ *
+ * So a part sitting in the faction vault is invisible to the yard even though it
+ * is in the same station. The accounting lives in lib/ship-build.ts so it can be
+ * tested without a catalog or an HTTP round trip.
+ */
+faction.get('/ship-build', (c) => {
+  const shipId = c.req.query('ship') || 'crimson_devastator'
+  const station = c.req.query('station') || 'crimson_war_citadel'
+  const pilotHint = c.req.query('pilot') || "Morg'Thar"
+
+  const ship = getShip(shipId)
+  if (!ship) return c.json({ error: `ship ${shipId} not in catalog` }, 404)
+
+  const pilot = listProfiles().find(p => p.name?.toLowerCase().includes(pilotHint.toLowerCase().split("'")[0]))
+  if (!pilot) return c.json({ error: `no profile matching pilot ${pilotHint}` }, 404)
+
+  // Cargo comes from the live agent state, not the DB: storage_inventory tracks
+  // station lockers and never the hold.
+  const st = agentManager.getStatus(pilot.id) as { gameState?: { ship?: { cargoItems?: unknown[] } } } | undefined
+  const cargo = parseCargoItems(st?.gameState?.ship?.cargoItems ?? [])
+
+  const locker = new Map<string, number>()
+  for (const r of getStorageForProfile(pilot.id, station)) {
+    const q = Number((r as { quantity?: number }).quantity ?? 0)
+    if (q > 0) locker.set(String((r as { item_id?: string }).item_id ?? ''), q)
+  }
+
+  const vault = new Map<string, number>()
+  for (const r of getFactionStorage(station)) vault.set(r.item_id, (vault.get(r.item_id) ?? 0) + Number(r.quantity))
+
+  // The catalog's build_materials IS the bare hull. A commission_quote with no
+  // arguments prices the DEFAULT LOADOUT instead — 24 lines for the Devastator
+  // against the hull's 17 — and three of those seven extras have no seller in the
+  // galaxy and would each need a 1.1-1.6M facility. Costing them as part of the
+  // ship invented a 3.94M wall that does not exist (plan §43).
+  const bill = (ship.build_materials ?? []) as Array<{ item_id: string; quantity: number }>
+  const result = computeShipBuild({
+    bill, cargo, locker, vault,
+    elsewhereFor: (itemId) => getStorageElsewhere(station, itemId).reduce((sum, r) => sum + Number(r.quantity), 0),
+  })
+
+  return c.json({
+    ship: shipId,
+    ship_name: ship.name ?? shipId,
+    station, pilot: pilot.name, pilot_id: pilot.id,
+    bare_hull: true,
+    shipyard_tier_required: ship.shipyard_tier ?? null,
+    build_time: ship.build_time ?? null,
+    treasury: getFactionTreasurySummary().latest?.credits ?? 0,
+    ...result,
+  })
 })
 
 export default faction
