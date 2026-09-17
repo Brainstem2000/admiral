@@ -544,6 +544,22 @@ mechanism to the agent's state**, because interruption cost scales with how mobi
 | `PUT /:id {memory}` | silent — **agent-owned, they rewrite it** | facts worth surviving, expect edits |
 | disconnect → `PUT` → `connect_llm` | clean boot on the new state | agent is MID-ROUTE or oscillating |
 
+**There is no `/connect_llm` ROUTE.** `connect_llm` is an *action* in the body of `POST /:id/connect`;
+the bare path exists but only opens the game connection, leaving the agent `connected: true, running:
+false` — which reads exactly like a failed reconnect and is not. After a server restart, the whole
+fleet needs the action form, one at a time:
+
+```bash
+curl -s -X POST http://127.0.0.1:3031/api/profiles/$ID/connect \
+  -H 'Content-Type: application/json' -d '{"action":"connect_llm"}'
+```
+
+**A restart silently stops part of the fleet every time** — 8/12 and 10/12 on two prior occasions,
+5/12 on 2026-09-17. Autoconnect logs its own score (`[Autoconnect] 7 connected, 3 failed`) and does
+NOT start the LLM loops it failed to reach. Snapshot `running` before killing the server, re-read
+`/api/profiles` about 20s after boot, and reconnect the difference by hand. The loop start is async,
+so the connect response saying `running: false` is not the verdict — re-read the roster.
+
 **Only `directive` triggers `restartTurn()`.** But `todo` and `memory` are AGENT-OWNED — they have
 `update_todo`/`update_memory` and will overwrite you. One rewritten TODO was replaced by the agent
 **40 seconds** after restart, and the replacement cancelled the job it contained, because she was
