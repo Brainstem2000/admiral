@@ -4127,14 +4127,33 @@ async function macroAction(
  * beside live progress. Throttled by wall time so fast macros
  * (mine_until_full fires several times a minute) cannot flood the lane.
  */
+/** Test seam for the narrator's de-duplication; see macro-narration-not-repeated.test.ts. */
+export function __testMakeMacroNarrator(
+  ctx: { log: (kind: string, msg: string) => void }, macro: string, reason?: string, minIntervalMs = 15_000,
+) { return makeMacroNarrator(ctx as unknown as ToolContext, macro, reason, minIntervalMs) }
+
 function makeMacroNarrator(ctx: ToolContext, macro: string, reason?: string, minIntervalMs = 15_000) {
   const intent = (reason || '').trim().replace(/\s+/g, ' ').slice(0, 140)
   let last = 0
+  // The intent is the agent's ORIGINAL reason for the macro, and it does not change
+  // while the macro runs. Re-attaching it to every narration wrote the same 140
+  // characters once per hop: an 18-jump transit logged one thought verbatim 18
+  // times, and the fleet produced 291 near-duplicate rows in three hours. Those
+  // rows cost no LLM tokens — the macro flies server-side and makes no calls — but
+  // they bury the log the watch and the dashboard read. Say it once, then report
+  // progress only.
+  let saidIntent = false
   return (progress: string, force = false): void => {
     const now = Date.now()
     if (!force && now - last < minIntervalMs) return
     last = now
-    ctx.log('llm_thought', intent ? `[${macro} ${progress}] ${intent}` : `[${macro} ${progress}]`)
+    const head = `[${macro} ${progress}]`
+    if (intent && !saidIntent) {
+      saidIntent = true
+      ctx.log('llm_thought', `${head} ${intent}`)
+    } else {
+      ctx.log('llm_thought', head)
+    }
   }
 }
 
