@@ -80,10 +80,17 @@ for (const r of db.query(`SELECT p.name, l.summary FROM log_entries l JOIN profi
     WHERE l.timestamp > datetime('now','-6 minutes') AND l.type IN ('system','tool_call','tool_result')
       AND l.summary NOT LIKE '%CHAT_MESSAGE%' AND l.summary NOT LIKE '%MAYDAY%' AND l.summary NOT LIKE '%Wexler%'
       AND l.summary NOT LIKE 'Directive updated%' AND l.summary NOT LIKE 'Nudge delivered%'
-      AND l.summary NOT LIKE '%ADMIRAL%' AND l.summary NOT LIKE 'update_todo%' AND l.summary NOT LIKE 'update_memory%'
-      AND (l.summary LIKE '%no_facility%' OR l.summary LIKE '%build_failed%' OR l.summary LIKE '%insufficient_%'
+      AND l.summary NOT LIKE 'update_todo%' AND l.summary NOT LIKE 'update_memory%'
+      -- An agent saying HALT is the single most important thing this watch can see, and it was
+      -- MISSING: the filter listed specific error strings and never the word itself. Worse, the
+      -- blanket '%ADMIRAL%' exclusion (added to stop my own orders echoing back) swallowed exactly
+      -- the phrasing agents use — "HALT: awaiting Admiral". Grit sat halted and unreported because
+      -- of it. Now: my own orders are excluded by their PREFIX, and HALT is always reported.
+      AND (l.summary LIKE '%HALT%' OR l.summary LIKE '%STALLED%' OR l.summary LIKE '%BLOCKED%'
+           OR l.summary LIKE '%awaiting Admiral%' OR l.summary LIKE '%AWAITING ADMIRAL%'
+           OR l.summary LIKE '%no_facility%' OR l.summary LIKE '%build_failed%' OR l.summary LIKE '%insufficient_%'
            OR l.summary LIKE '%would fail%' OR l.summary LIKE '%no route%' OR l.summary LIKE '%too_sparse%'
-           OR l.summary LIKE '%hull%critical%' OR l.summary LIKE '%cannot afford%')
+           OR l.summary LIKE '%hull%critical%' OR l.summary LIKE '%cannot afford%' OR l.summary LIKE '%no_permission%')
     ORDER BY l.timestamp DESC LIMIT 8`).all() as Array<{ name: string; summary: string }>) {
   const body = String(r.summary).replace(/\s+/g, ' ').slice(0, 125)
   emit(`b:${r.name}:${body.slice(0, 55)}`, `BLOCKED ${r.name}: ${body}`)

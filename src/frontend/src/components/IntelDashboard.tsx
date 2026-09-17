@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Globe, Radar, TrendingUp, Users, Gem, Factory, Crosshair, AlertTriangle, Skull, RefreshCw } from 'lucide-react'
+import { Globe, Radar, TrendingUp, Users, Gem, Factory, Crosshair, AlertTriangle, Skull, RefreshCw, Package, Map as MapIcon, Search } from 'lucide-react'
+import { FindAnything, Packages, Places } from './IntelLookups'
 
 interface FeedRow { kind: string; name: string; detail: string; by: string; at: string }
 interface LeaderRow { by: string; total: number; last_24h: number; systems: number; market: number; players: number; deposits: number; facilities: number }
@@ -31,7 +32,7 @@ function age(iso: string): string {
   return `${Math.floor(hours / 24)}d`
 }
 
-export function IntelDashboard() {
+function IntelFeed() {
   const [data, setData] = useState<DashData | null>(null)
   const [loading, setLoading] = useState(false)
   const [kindFilter, setKindFilter] = useState<string | null>(null)
@@ -214,6 +215,60 @@ export function IntelDashboard() {
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+
+type IntelTab = 'feed' | 'find' | 'packages' | 'places'
+
+function IntelTabButton({ active, onClick, icon, children }:
+  { active: boolean; onClick: () => void; icon: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <button onClick={onClick}
+      className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] border transition-colors"
+      style={{
+        borderColor: active ? 'hsl(var(--foreground) / 0.4)' : 'hsl(var(--border) / 0.6)',
+        color: active ? 'hsl(var(--foreground))' : 'hsl(var(--muted-foreground))',
+      }}>
+      {icon}{children}
+    </button>
+  )
+}
+
+/**
+ * The Intel page. The passive feed is one view; the other three are lookups that
+ * answer questions about the whole fleet and the whole galaxy — where any item is
+ * across every holder, where the sealed packages sit, and what a place holds or a
+ * route costs in risk. They were briefly on the Vault page, which was the wrong
+ * home: the vault is one of several places these searches look, not their subject.
+ */
+export function IntelDashboard() {
+  const [tab, setTab] = useState<IntelTab>('feed')
+  return (
+    <div className="h-full overflow-y-auto">
+      <div className="flex items-center gap-1.5 px-4 pt-4">
+        <IntelTabButton active={tab === 'feed'} onClick={() => setTab('feed')} icon={<Radar size={12} />}>
+          Intelligence feed
+        </IntelTabButton>
+        <IntelTabButton active={tab === 'find'} onClick={() => setTab('find')} icon={<Search size={12} />}>
+          Find anything
+        </IntelTabButton>
+        <IntelTabButton active={tab === 'packages'} onClick={() => setTab('packages')} icon={<Package size={12} />}>
+          Packages
+        </IntelTabButton>
+        <IntelTabButton active={tab === 'places'} onClick={() => setTab('places')} icon={<MapIcon size={12} />}>
+          Places &amp; routes
+        </IntelTabButton>
+      </div>
+
+      {tab === 'feed' ? <IntelFeed /> : (
+        <div className="p-4">
+          {tab === 'find' && <FindAnything />}
+          {tab === 'packages' && <Packages />}
+          {tab === 'places' && <Places />}
+        </div>
+      )}
     </div>
   )
 }
