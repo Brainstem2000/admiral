@@ -65,7 +65,10 @@ for (const r of db.query(`SELECT p.name FROM profiles p
         AND w.timestamp > datetime('now','-15 minutes')
         AND (w.type IN ('tool_call','tool_result')
              OR w.summary LIKE '%MINING_YIELD%' OR w.summary LIKE '%mine_until_full%'
-             OR w.summary LIKE '%CRAFTING%'))`).all() as Array<{ name: string }>) {
+             OR w.summary LIKE '%CRAFTING%'
+             -- travel is work too: goto_system runs hop-by-hop for a long transit
+             -- (a hauler was mid hop 26 of 31 when this flagged him as stopped)
+             OR w.summary LIKE '%goto_system%' OR w.summary LIKE '%"action":"jump"%'))`).all() as Array<{ name: string }>) {
   if (PARKED.has(r.name)) continue
   emit(`dead:${r.name}:${Math.floor(Date.now() / 1800000)}`,
        `NOT TURNING: ${r.name} no LLM call in 30min and no work in 15min — loop may be stopped`)
