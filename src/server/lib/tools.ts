@@ -5,6 +5,7 @@ import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
 import { scrubLiveState, scrubNotice, dedupeTodoAgainstMemory, ageCompletedTodoLines, scrubMemoryTaskLines, hygieneNotice, resetNoteHygiene } from './note-hygiene'
 import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor, refuseAbandon, noteAbandon, knownTitle, isRefusedMissionTitle } from './mission-guard'
 import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getFactionStorageQuantity, isStorageDirty, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS, systemHasStation, cheapestRecentAsk, applyStorageDelta, markStorageDirty, findProfileByPlayer, recordPosition, describeStorageDrift, getCargoForProfile, type StorageDrift } from './db'
+import { systemForBase } from './stations-feed'
 import { swallow } from './swallow'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
@@ -4359,7 +4360,29 @@ async function executeMacroTool(name: string, args: Record<string, unknown>, ctx
   // can hand it back (see the goto_system case below).
   const priorCommitment = name === 'goto_system' ? lastDestinations.get(ctx.profileId) : undefined
   if (name === 'goto_system') {
-    const target = String(args.target_system ?? args.system ?? '')
+    let target = String(args.target_system ?? args.system ?? '')
+
+    // goto_system takes a SYSTEM; agents keep handing it a STATION, because every
+    // directive and every package list names stations. Three did it in one evening
+    // (iron_reach_mining_colony for iron_reach, frontier_station for starfall,
+    // node_beta_industrial_station for node_beta), each costing a turn to a refusal
+    // they then had to reason their way out of.
+    //
+    // The station feed already knows the answer, so resolve it here instead of
+    // asking every agent to remember the distinction. Prompt wording has not fixed
+    // this and cannot: the ids genuinely look interchangeable.
+    const station = target
+    const resolved = station ? systemForBase(station) : null
+    if (resolved && resolved !== station) {
+      ctx.log('system', `goto_system: "${station}" is a STATION, not a system — routing to its system "${resolved}"`)
+      target = resolved
+      if (args.target_system !== undefined) args.target_system = resolved
+      if (args.system !== undefined) args.system = resolved
+      // Keep the station they named as the dock target when they gave none, so they
+      // arrive where they meant to be rather than merely in the right system.
+      if (args.dock_at_poi === undefined) args.dock_at_poi = station
+    }
+
     const refusal = checkDestinationCommit(ctx, target)
     if (refusal) {
       ctx.log('tool_result', refusal)
