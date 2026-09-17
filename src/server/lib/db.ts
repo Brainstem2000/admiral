@@ -1854,6 +1854,32 @@ export function getCommissionRequirement(itemId: string, profileId?: string): nu
   return row?.q ?? 0
 }
 
+/**
+ * Is this item reserved by the agent's OWN unbuilt ship, as distinct from a
+ * fleet-wide plan row (profile_id NULL)?
+ *
+ * `getCommissionRequirement` deliberately treats both as a lock — a fleet plan
+ * reserving raw materials should stop a sale just as a personal commission does.
+ * But the BRIEFING has to say whose reserve it is, and calling both "YOUR open
+ * commission" is how Juno Freight ended up in a repeating halt on 2026-09-17: he
+ * ran commission_status, got "No active commissions", and could not reconcile
+ * that with injected state asserting the opposite every turn. Injected state
+ * outranks anything an Admiral nudge says, so the fix had to be the wording.
+ *
+ * Same self-correcting ownership check as above: owning the hull retires its bill.
+ */
+export function getOwnCommissionRequirement(itemId: string, profileId: string): number {
+  if (!profileId) return 0
+  const owned = `SELECT 1 FROM storage_ships ss
+                  WHERE ss.profile_id = commission_requirements.profile_id
+                    AND LOWER(ss.class) = LOWER(commission_requirements.ship_class)`
+  const row = db.query(
+    `SELECT MAX(quantity) AS q FROM commission_requirements
+      WHERE item_id = ? AND profile_id = ? AND NOT EXISTS (${owned})`,
+  ).get(String(itemId).toLowerCase(), profileId) as { q: number | null } | null
+  return row?.q ?? 0
+}
+
 export function listCommissionRequirements(shipClass?: string): Array<{ ship_class: string; item_id: string; quantity: number; profile_id: string | null; updated_at: string }> {
   const sql = shipClass
     ? 'SELECT * FROM commission_requirements WHERE ship_class = ? ORDER BY item_id'

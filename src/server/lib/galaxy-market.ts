@@ -18,7 +18,7 @@
  *    than the intel is worth.
  */
 
-import { getCommissionRequirement } from './db'
+import { getCommissionRequirement, getOwnCommissionRequirement } from './db'
 
 const FEED_URL = 'https://game.spacemolt.com/api/market'
 const FETCH_INTERVAL_MS = 10 * 60 * 1000
@@ -41,6 +41,14 @@ const RERENDER_THRESHOLD = 0.25
  *  It is also scoped per agent — another agent's open commission must never
  *  reserve your stock, because commissions consume only the commissioning
  *  player's own storage. */
+/** True only when the reservation belongs to THIS agent's own unbuilt ship, as opposed
+ *  to a fleet-wide plan row (profile_id NULL). The distinction is what the briefing
+ *  needs in order to say whose reserve it is. */
+function ownReservation(itemId: string, profileId?: string): boolean {
+  if (!profileId) return false
+  try { return getOwnCommissionRequirement(itemId, profileId) > 0 } catch { return false }
+}
+
 function isLocked(itemId: string, profileId?: string): boolean {
   if (!profileId) return false   // unknown caller: never invent a lock
   try {
@@ -202,7 +210,18 @@ export function galaxyMarketLines(
       // two agents on 2026-09-16 as "cannot touch": both halted a crafting job because a
       // commission reserved the steel it was about to consume — which is precisely what the
       // reserve exists to protect it FOR. The guard gates sell/gift/sell_cargo only.
-      cargoLines.push(`${id}: reserved by YOUR open commission — DO NOT SELL or gift it, but you are free to SPEND it on crafting and facility builds (that is what it is reserved for)`)
+      //
+      // And say WHOSE reserve it is. A row with profile_id NULL is a FLEET-WIDE plan
+      // reservation (the industrial programme's raw materials); only a row carrying this
+      // agent's own profile_id is their ship. Calling both "YOUR open commission" sent Juno
+      // Freight into a repeating halt on 2026-09-17 — he checked commission_status, found
+      // "No active commissions", and could not reconcile it with a briefing that reasserted
+      // the claim every turn. Injected state outranks a nudge, so the wording had to change,
+      // not the agent.
+      const mine = ownReservation(id, opts.profileId)
+      cargoLines.push(mine
+        ? `${id}: reserved by YOUR open commission — DO NOT SELL or gift it, but you are free to SPEND it on crafting and facility builds (that is what it is reserved for)`
+        : `${id}: reserved by the FLEET's industrial plan (not a commission of yours — commission_status will correctly show you none) — DO NOT SELL or gift it, but you are free to SPEND it on crafting and facility builds`)
     } else if (q) {
       cargoLines.push(`${id}: ${q.empire} bids ${q.bid} x${q.depth}`)
     } else {
