@@ -1,5 +1,6 @@
 /** Plan tab — the agent's directive queue: plan steps with conditions, applied between turns (docs/plans/directive-queue.md). */
 import { useState, useEffect, useCallback } from 'react'
+import { formatStamp, currentTimeZone } from '../../../lib/displayTime'
 import { ListChecks, Plus, Play, Check, X, Trash2, ChevronUp, ChevronDown, RefreshCw, Pencil } from 'lucide-react'
 import type { Profile, PlanStep, PlanCondition } from '@/types'
 import { DossierCard } from '../DossierCard'
@@ -175,7 +176,7 @@ export function PlanTab({ profile }: { profile: Profile; connected: boolean }) {
                     {s.completion && <> · <span className="text-foreground/70">until:</span> {describeCondition(s.completion)}{s.restore_on_done ? ' → restores previous directive' : ''}</>}
                   </div>
                   {s.waiting_on && <div className="pl-7 text-[10px] text-amber-400/90">waiting on: {s.waiting_on}</div>}
-                  {(s.fired_at || s.completed_at) && <div className="pl-7 text-[10px] text-muted-foreground tabular-nums">{s.fired_at ? `fired ${new Date(s.fired_at).toLocaleTimeString()}` : ''}{s.completed_at ? ` · done ${new Date(s.completed_at).toLocaleTimeString()}` : ''}</div>}
+                  {(s.fired_at || s.completed_at) && <div className="pl-7 text-[10px] text-muted-foreground tabular-nums">{s.fired_at ? `fired ${formatStamp(s.fired_at, currentTimeZone(), { month: undefined, day: undefined })}` : ''}{s.completed_at ? ` · done ${formatStamp(s.completed_at, currentTimeZone(), { month: undefined, day: undefined })}` : ''}</div>}
                   <details className="pl-7">
                     <summary className="text-[10px] text-muted-foreground cursor-pointer">directive</summary>
                     <pre className="mt-1 text-[10px] font-mono whitespace-pre-wrap text-foreground/80 max-h-48 overflow-y-auto">{s.directive}</pre>

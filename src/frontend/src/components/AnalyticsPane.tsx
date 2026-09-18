@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { formatStamp, currentTimeZone } from '../lib/displayTime'
 import { ArrowDown, Loader2, Clock, DollarSign, Cpu, Users, MessageSquare, CalendarClock } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { Profile, LogEntry } from '@/types'
@@ -552,7 +553,7 @@ function FinancialTab({ profiles }: { profiles: Profile[] }) {
         const d = await resp.json() as FinancialData
         setData(d)
         setHistory(prev => {
-          const now = new Date().toLocaleTimeString()
+          const now = formatStamp(new Date().toISOString(), currentTimeZone(), { month: undefined, day: undefined, second: '2-digit' })
           const next = [...prev, { time: now, total: d.fleetTotal }]
           if (next.length > 60) return next.slice(-60)
           return next
@@ -1114,7 +1115,7 @@ function AutomationTab({ profiles }: { profiles: Profile[] }) {
               {t.event_match && <span className="text-muted-foreground">contains "{t.event_match}"</span>}
               <span className="text-muted-foreground">→ {t.action}</span>
               {t.action_params && <span className="text-muted-foreground truncate max-w-40">({t.action_params})</span>}
-              {t.last_fired_at && <span className="text-muted-foreground ml-auto text-[10px]">Last: {new Date(t.last_fired_at).toLocaleTimeString()}</span>}
+              {t.last_fired_at && <span className="text-muted-foreground ml-auto text-[10px]">Last: {formatStamp(t.last_fired_at, currentTimeZone(), { month: undefined, day: undefined })}</span>}
               <button onClick={() => deleteTrigger(t.id)} className="text-red-400 hover:text-red-300 ml-1">✕</button>
             </div>
           ))}

@@ -13,8 +13,9 @@
  * deposits. The distinction is drawn explicitly here because collapsing it sent
  * an agent off to mine 200 steel_plate for a lockbox that already existed.
  */
-import { useEffect, useMemo, useState } from 'react'
-import { Warehouse, RefreshCw, Search, LockOpen, Lock, Hammer, AlertTriangle, Receipt, Factory, Rocket } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useDisplayTimeZone, formatStamp, tzAbbrev, currentTimeZone } from '../lib/displayTime'
+import { Warehouse, RefreshCw, Search, LockOpen, Lock, Hammer, AlertTriangle, Receipt, Factory, Rocket, ArrowLeftRight } from 'lucide-react'
 
 const DISPLAY = { fontFamily: "'Chakra Petch', system-ui, sans-serif" } as const
 
@@ -45,7 +46,8 @@ export function FactionVaultPane() {
   // Two jobs live here and they are read at different times: 'what do we hold against the
   // builds' and 'where did the money go'. One page made both harder to scan, so they are
   // separate views rather than one long scroll.
-  const [tab, setTab] = useState<'inventory' | 'ledger' | 'rent' | 'build' | 'ship'>('inventory')
+  const [tab, setTab] = useState<'inventory' | 'vault' | 'ledger' | 'rent' | 'build' | 'ship'>('inventory')
+  const tzTop = useDisplayTimeZone()
 
   const load = async (fresh = false) => {
     setLoading(true); setError(null)
@@ -114,13 +116,14 @@ export function FactionVaultPane() {
           <span className="text-[11px] text-muted-foreground">
             {tab === 'inventory'
               ? 'shared stock — anyone docked there can draw it'
+              : tab === 'vault' ? 'every item in and out of the vault — what, how many, and who moved it'
               : tab === 'ledger' ? 'every credit in and out of the faction treasury, with a reason'
               : tab === 'rent' ? 'what the fleet pays to keep its facilities standing'
               : 'the facility programme in build order — each entry measured against what the one above leaves behind'}
           </span>
           <span className="ml-auto flex items-center gap-3">
             <span className="text-[10.5px] text-muted-foreground tabular-nums">
-              {new Date(data.fetched_at).toLocaleTimeString()}
+              {formatStamp(data.fetched_at, tzTop, { month: undefined, day: undefined, second: '2-digit' })} {tzAbbrev(tzTop)}
             </span>
             <button onClick={() => void load(true)} disabled={loading}
               className="text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors">
@@ -132,6 +135,9 @@ export function FactionVaultPane() {
         <div className="flex items-center gap-1.5">
           <TabButton active={tab === 'inventory'} onClick={() => setTab('inventory')} icon={<Warehouse size={12} />}>
             Inventory
+          </TabButton>
+          <TabButton active={tab === 'vault'} onClick={() => setTab('vault')} icon={<ArrowLeftRight size={12} />}>
+            Item ledger
           </TabButton>
           <TabButton active={tab === 'ledger'} onClick={() => setTab('ledger')} icon={<Receipt size={12} />}>
             Treasury ledger
@@ -153,6 +159,8 @@ export function FactionVaultPane() {
 
 
         {tab === 'rent' && <FacilityRent />}
+
+        {tab === 'vault' && <VaultItemLedger />}
 
         {tab === 'ledger' && <TreasuryStatement />}
 
@@ -282,14 +290,232 @@ interface TPayload {
   totals: { in: number; out: number; booked: number; inferred: number; net: number; rent: number; rent_cycles: number }
 }
 
-// Timestamps are stored UTC without a zone marker; the Admiral reads in Central.
-const ct = (iso: string) => {
-  const raw = String(iso).trim().replace(' ', 'T')
-  const d = new Date(/[Zz]|[+-]\d\d:?\d\d$/.test(raw) ? raw : raw + 'Z')
-  return Number.isNaN(d.getTime()) ? String(iso) : d.toLocaleString('en-US', {
-    timeZone: 'America/Chicago', month: 'short', day: 'numeric',
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  })
+// Timestamps are stored UTC without a zone marker. This used to hardcode
+// America/Chicago, which was right for this operator and wrong as a rule — the
+// zone is a PREFERENCE (`display_timezone`, served by /api/preferences/timezone)
+// and changing it left this formatter stuck on Central. It now reads the
+// resolved zone, falling back to the same default it used to assume.
+const ct = (iso: string) => formatStamp(iso, currentTimeZone(), { hour12: false })
+
+interface VMove {
+  id: number; timestamp: string; station_id: string; item_id: string; delta: number
+  agent: string; profile_id: string | null; kind: string; source_command: string | null
+  balance_after: number | null
+}
+interface VRoll { item_id?: string; agent?: string; in: number; out: number; net: number; moves: number; last: string }
+interface VRecon {
+  station: string
+  unexplained: Array<{ item_id: string; expected: number; actual: number; difference: number }>
+  unexplained_total: number
+  items_without_checkpoint: number
+  note: string
+}
+interface VPayload {
+  movements: VMove[]
+  by_item: VRoll[]
+  by_agent: VRoll[]
+  reconciliation?: VRecon
+  totals: { deposited: number; withdrawn: number; net: number; movements: number; items: number; agents: number; first: string | null; last: string | null }
+  truncated: boolean
+}
+
+/**
+ * The faction vault as a double-entry item ledger: what went in, what came out, how much,
+ * and who moved it.
+ *
+ * Every row behind this has been written to `faction_ledger` since the storage-ledger work,
+ * but nothing rendered it — the "ledger" tab next door shows the TREASURY statement, which
+ * is credits only. So the fleet could not answer "who put the steel in the vault" from the
+ * UI at all, and the question was asked repeatedly.
+ *
+ * Three deliberate choices:
+ *  - Deposits and withdrawals are SIGNED here. The table stores a magnitude and puts the
+ *    direction in `kind`, so anything that sums `quantity` silently adds withdrawals to
+ *    deposits. The sign is applied server-side, once, and the summary rows depend on it.
+ *  - `balance_after` is shown only where the game actually reported a running total. A
+ *    blank cell means the game did not say, not zero — reconstructing it from our own
+ *    sums would look authoritative and drift.
+ *  - When the window is truncated the totals are labelled as covering the window, never
+ *    presented as all-time. A partial total passed off as complete is how the treasury
+ *    attribution went wrong before.
+ */
+function VaultItemLedger() {
+  const [d, setD] = useState<VPayload | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [view, setView] = useState<'moves' | 'items' | 'agents' | 'recon'>('moves')
+  const [q, setQ] = useState('')
+  const [limit, setLimit] = useState(500)
+  const tz = useDisplayTimeZone()
+
+  const load = useCallback(() => {
+    void (async () => {
+      try {
+        const r = await fetch(`/api/faction/vault-ledger?limit=${limit}`)
+        const j = await r.json()
+        if (j.error) setErr(String(j.error)); else { setD(j); setErr(null) }
+      } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
+    })()
+  }, [limit])
+  useEffect(load, [load])
+
+  if (err) return <div className="dossier-card p-3 text-[11.5px]" style={{ color: 'hsl(var(--smui-red))' }}>Vault ledger unavailable: {err}</div>
+  if (!d) return <div className="dossier-card p-3 text-[11.5px] text-muted-foreground">Reading the vault ledger…</div>
+
+  const needle = q.trim().toLowerCase()
+  const moves = needle
+    ? d.movements.filter(m => m.item_id.toLowerCase().includes(needle) || m.agent.toLowerCase().includes(needle) || m.station_id.toLowerCase().includes(needle))
+    : d.movements
+  const items = needle ? d.by_item.filter(r => (r.item_id ?? '').toLowerCase().includes(needle)) : d.by_item
+  const agents = needle ? d.by_agent.filter(r => (r.agent ?? '').toLowerCase().includes(needle)) : d.by_agent
+  const n = (v: number) => v.toLocaleString()
+  // Stored stamps are UTC with no zone marker; formatStamp pins that before rendering.
+  const when = (t: string) => formatStamp(t, tz)
+  const green = 'hsl(var(--smui-green))', red = 'hsl(var(--smui-red))'
+
+  return (
+    <div className="dossier-card p-3 space-y-2">
+      <div className="flex items-baseline gap-2 flex-wrap">
+        <ArrowLeftRight size={13} style={{ color: 'hsl(var(--smui-green))' }} />
+        <h2 className="text-[12px] font-bold uppercase tracking-[0.12em] m-0" style={DISPLAY}>Vault item ledger</h2>
+        <span className="text-[10.5px] text-muted-foreground">what, how many, and who moved it</span>
+        <button onClick={load} className="ml-auto text-[10.5px] text-muted-foreground hover:text-foreground flex items-center gap-1">
+          <RefreshCw size={10} /> refresh
+        </button>
+      </div>
+
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] tabular-nums">
+        <span><span className="text-muted-foreground">deposited </span><span style={{ color: green }}>+{n(d.totals.deposited)}</span></span>
+        <span><span className="text-muted-foreground">withdrawn </span><span style={{ color: red }}>-{n(d.totals.withdrawn)}</span></span>
+        <span><span className="text-muted-foreground">net </span><span style={{ color: d.totals.net >= 0 ? green : red }}>{d.totals.net >= 0 ? '+' : ''}{n(d.totals.net)}</span></span>
+        <span className="text-muted-foreground">{n(d.totals.movements)} movements · {n(d.totals.items)} items · {n(d.totals.agents)} agents</span>
+        {d.totals.first && <span className="text-muted-foreground">{when(d.totals.first)} → {when(d.totals.last ?? '')} {tzAbbrev(tz)}</span>}
+      </div>
+
+      {d.truncated && (
+        <div className="text-[10.5px] flex items-center gap-1" style={{ color: 'hsl(var(--smui-yellow))' }}>
+          <AlertTriangle size={10} />
+          showing the most recent {n(limit)} movements — these totals cover that window, not all time.
+          <button className="underline" onClick={() => setLimit(5000)}>load everything</button>
+        </div>
+      )}
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex gap-1">
+          {(['moves', 'items', 'agents', 'recon'] as const).map(v => (
+            <button key={v} onClick={() => setView(v)}
+              className={`text-[10.5px] px-2 py-0.5 rounded border ${view === v ? 'border-foreground/40 text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>
+              {v === 'moves' ? 'Movements' : v === 'items' ? 'By item' : v === 'agents' ? 'By agent' : 'Unexplained'}
+              {v === 'recon' && (d.reconciliation?.unexplained.length ?? 0) > 0 && (
+                <span className="ml-1" style={{ color: 'hsl(var(--smui-yellow))' }}>{d.reconciliation!.unexplained.length}</span>
+              )}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1 ml-auto">
+          <Search size={11} className="text-muted-foreground" />
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="item, agent or station"
+            className="bg-transparent border-b border-border text-[11px] px-1 py-0.5 outline-none w-44" />
+        </div>
+      </div>
+
+      <div className="overflow-x-auto" style={{ maxHeight: 460, overflowY: 'auto' }}>
+        {view === 'moves' && (
+          <table className="w-full text-[11px] tabular-nums border-collapse">
+            <thead className="sticky top-0 bg-background">
+              <tr className="text-muted-foreground text-left">
+                <th className="font-normal py-1 pr-3">when <span className="opacity-50">{tzAbbrev(tz)}</span></th><th className="font-normal pr-3">item</th>
+                <th className="font-normal pr-3 text-right">qty</th><th className="font-normal pr-3 text-right">balance after</th>
+                <th className="font-normal pr-3">who</th><th className="font-normal pr-3">station</th><th className="font-normal">via</th>
+              </tr>
+            </thead>
+            <tbody>
+              {moves.map(m => (
+                <tr key={m.id} className="border-t border-border/40">
+                  <td className="py-0.5 pr-3 text-muted-foreground whitespace-nowrap">{when(m.timestamp)}</td>
+                  <td className="pr-3">{m.item_id}</td>
+                  <td className="pr-3 text-right" style={{ color: m.delta >= 0 ? green : red }}>{m.delta >= 0 ? '+' : ''}{n(m.delta)}</td>
+                  <td className="pr-3 text-right text-muted-foreground">{m.balance_after === null ? '—' : n(m.balance_after)}</td>
+                  <td className="pr-3">{m.agent}</td>
+                  <td className="pr-3 text-muted-foreground">{m.station_id}</td>
+                  <td className="text-muted-foreground">{m.source_command ?? m.kind}</td>
+                </tr>
+              ))}
+              {!moves.length && <tr><td colSpan={7} className="py-2 text-muted-foreground">No movements match.</td></tr>}
+            </tbody>
+          </table>
+        )}
+
+        {view === 'recon' && (
+          <div className="space-y-2">
+            <div className="text-[10.5px] text-muted-foreground leading-relaxed">
+              {d.reconciliation?.note}
+            </div>
+            {!d.reconciliation?.unexplained.length ? (
+              <div className="text-[11.5px] text-muted-foreground">
+                Every item at {d.reconciliation?.station} reconciles to the books.
+                {(d.reconciliation?.items_without_checkpoint ?? 0) > 0 && (
+                  <> {d.reconciliation!.items_without_checkpoint} item(s) have no game-reported checkpoint yet and cannot be checked either way.</>
+                )}
+              </div>
+            ) : (
+              <table className="w-full text-[11px] tabular-nums border-collapse">
+                <thead className="sticky top-0 bg-background">
+                  <tr className="text-muted-foreground text-left">
+                    <th className="font-normal py-1 pr-3">item</th>
+                    <th className="font-normal pr-3 text-right">books say</th>
+                    <th className="font-normal pr-3 text-right">vault holds</th>
+                    <th className="font-normal pr-3 text-right">unexplained</th>
+                    <th className="font-normal">likely cause</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {d.reconciliation!.unexplained.map(r => (
+                    <tr key={r.item_id} className="border-t border-border/40">
+                      <td className="py-0.5 pr-3">{r.item_id}</td>
+                      <td className="pr-3 text-right text-muted-foreground">{n(r.expected)}</td>
+                      <td className="pr-3 text-right">{n(r.actual)}</td>
+                      <td className="pr-3 text-right" style={{ color: r.difference >= 0 ? green : red }}>
+                        {r.difference >= 0 ? '+' : ''}{n(r.difference)}
+                      </td>
+                      <td className="text-muted-foreground text-[10.5px]">
+                        {r.difference > 0 ? 'deposit outside the harness' : 'consumed by faction-sourced crafting'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {view !== 'moves' && view !== 'recon' && (
+          <table className="w-full text-[11px] tabular-nums border-collapse">
+            <thead className="sticky top-0 bg-background">
+              <tr className="text-muted-foreground text-left">
+                <th className="font-normal py-1 pr-3">{view === 'items' ? 'item' : 'agent'}</th>
+                <th className="font-normal pr-3 text-right">in</th><th className="font-normal pr-3 text-right">out</th>
+                <th className="font-normal pr-3 text-right">net</th><th className="font-normal pr-3 text-right">moves</th>
+                <th className="font-normal">last <span className="opacity-50">{tzAbbrev(tz)}</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {(view === 'items' ? items : agents).map(r => (
+                <tr key={r.item_id ?? r.agent} className="border-t border-border/40">
+                  <td className="py-0.5 pr-3">{r.item_id ?? r.agent}</td>
+                  <td className="pr-3 text-right" style={{ color: green }}>{r.in ? '+' + n(r.in) : '—'}</td>
+                  <td className="pr-3 text-right" style={{ color: red }}>{r.out ? '-' + n(r.out) : '—'}</td>
+                  <td className="pr-3 text-right" style={{ color: r.net >= 0 ? green : red }}>{r.net >= 0 ? '+' : ''}{n(r.net)}</td>
+                  <td className="pr-3 text-right text-muted-foreground">{n(r.moves)}</td>
+                  <td className="text-muted-foreground whitespace-nowrap">{when(r.last)}</td>
+                </tr>
+              ))}
+              {!(view === 'items' ? items : agents).length && <tr><td colSpan={6} className="py-2 text-muted-foreground">Nothing matches.</td></tr>}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  )
 }
 
 function TreasuryStatement() {

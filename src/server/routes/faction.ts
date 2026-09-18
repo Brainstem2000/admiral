@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { agentManager } from '../lib/agent-manager'
-import { listProfiles, getDb, getFactionStorage, getFactionLedger, getFactionTreasurySummary, getFactionTreasuryStatement, getStorageForProfile, getStorageElsewhere, getPreference} from '../lib/db'
+import { listProfiles, getDb, getFactionStorage, getFactionLedger, getVaultMovements, getFactionTreasurySummary, getFactionTreasuryStatement, getStorageForProfile, getStorageElsewhere, getPreference} from '../lib/db'
 import { getFacility, getShip } from '../lib/catalog'
 import { computeShipBuild, parseCargoItems } from '../lib/ship-build'
 
@@ -236,6 +236,110 @@ faction.get('/storage', (c) => {
 faction.get('/ledger', (c) => {
   const q = c.req.query()
   return c.json(getFactionLedger({ since: q.since, kind: q.kind, itemId: q.item, profileId: q.profile, limit: q.limit ? Number(q.limit) : undefined }))
+})
+
+/**
+ * The faction vault as an item ledger: every deposit and withdrawal, who moved it, and
+ * what the vault held afterwards — plus the rollups an accountant asks for first.
+ *
+ * The neighbouring `/ledger` route returns the raw table, and the vault page's "ledger"
+ * tab has always rendered the TREASURY statement, which is credits only. So "what went
+ * into the vault, how much, and who put it there" had no answer in the UI even though
+ * every row needed to answer it was already being written. This is that answer.
+ *
+ * `?station=&item=&profile=&since=&limit=` all narrow it. Rollups are computed over the
+ * rows actually returned, so a narrowed query rolls up the narrowed set — and `truncated`
+ * says when the limit clipped the window, because a total over a clipped window is a
+ * partial total and must never be presented as a complete one.
+ */
+faction.get('/vault-ledger', (c) => {
+  const q = c.req.query()
+  const limit = q.limit ? Math.min(Math.max(Number(q.limit) || 500, 1), 5000) : 500
+  const movements = getVaultMovements({
+    station: q.station, itemId: q.item, profileId: q.profile, since: q.since, limit,
+  })
+
+  const byItem = new Map<string, { item_id: string; in: number; out: number; net: number; moves: number; last: string }>()
+  const byAgent = new Map<string, { agent: string; in: number; out: number; net: number; moves: number; last: string }>()
+  for (const m of movements) {
+    const i = byItem.get(m.item_id) ?? { item_id: m.item_id, in: 0, out: 0, net: 0, moves: 0, last: m.timestamp }
+    const a = byAgent.get(m.agent) ?? { agent: m.agent, in: 0, out: 0, net: 0, moves: 0, last: m.timestamp }
+    for (const r of [i, a]) {
+      if (m.delta >= 0) r.in += m.delta; else r.out += -m.delta
+      r.net += m.delta; r.moves += 1
+      if (m.timestamp > r.last) r.last = m.timestamp
+    }
+    byItem.set(m.item_id, i); byAgent.set(m.agent, a)
+  }
+  const desc = <T extends { net: number }>(rows: T[]) => rows.sort((x, y) => Math.abs(y.net) - Math.abs(x.net))
+
+  // RECONCILIATION — the part that makes this an accounting system rather than a log.
+  //
+  // The ledger is built from OUR agents' command results, so it can only ever explain
+  // what the harness drove. Faction members outside Admiral — UMan, hand-played, who is
+  // the faction's Quartermaster — deposit into the same vault and leave no row, because
+  // Admiral never sees their command responses and the game exposes no faction-level
+  // transaction log to read instead. Brian asked why UMan's deposits do not show up; this
+  // is the answer, stated in the data rather than left as a silent hole.
+  //
+  // Method: every movement the game answered with a running total carries `balance_after`.
+  // Take the newest such checkpoint per item, add the booked deltas that came after it, and
+  // compare to what the vault actually holds now. A non-zero difference is stock that moved
+  // without a booked command — almost always a member we do not drive.
+  //
+  // Items with no checkpoint are reported as `unknown`, never as zero: an unverifiable line
+  // presented as reconciled is worse than one marked unverifiable.
+  const station = q.station || 'crimson_war_citadel'
+  const held = new Map<string, number>()
+  for (const r of getFactionStorage(station)) held.set(r.item_id, Number(r.quantity) || 0)
+
+  const checkpoint = new Map<string, { balance: number; id: number }>()
+  for (const m of movements) {                       // newest first
+    if (m.balance_after === null || m.station_id !== station) continue
+    if (!checkpoint.has(m.item_id)) checkpoint.set(m.item_id, { balance: m.balance_after, id: m.id })
+  }
+  const unexplained: Array<{ item_id: string; expected: number; actual: number; difference: number }> = []
+  let unknownItems = 0
+  for (const [itemId, actual] of held) {
+    const cp = checkpoint.get(itemId)
+    if (!cp) { if (actual > 0) unknownItems += 1; continue }
+    const since = movements
+      .filter(m => m.item_id === itemId && m.station_id === station && m.id > cp.id)
+      .reduce((n, m) => n + m.delta, 0)
+    const expected = cp.balance + since
+    if (expected !== actual) unexplained.push({ item_id: itemId, expected, actual, difference: actual - expected })
+  }
+  unexplained.sort((a, b) => Math.abs(b.difference) - Math.abs(a.difference))
+
+  return c.json({
+    movements,
+    by_item: desc([...byItem.values()]),
+    by_agent: desc([...byAgent.values()]),
+    reconciliation: {
+      station,
+      unexplained,
+      unexplained_total: unexplained.reduce((n, r) => n + r.difference, 0),
+      items_without_checkpoint: unknownItems,
+      note: 'Stock the books cannot explain, and there are two distinct causes — do not read '
+        + 'it as one. POSITIVE: a deposit Admiral never saw, which is usually a faction member '
+        + 'played outside the harness (UMan is Quartermaster and hand-driven), since the game '
+        + 'exposes no faction transaction log to read instead. NEGATIVE: vault stock consumed '
+        + 'without a withdrawal command — craft(source="faction") draws its inputs straight out '
+        + 'of the vault and books nothing, which is why gold_wiring, weapon_core and '
+        + 'platinum_wiring all show short here. Both are real movements; neither is an error.',
+    },
+    totals: {
+      deposited: movements.reduce((n, m) => n + (m.delta > 0 ? m.delta : 0), 0),
+      withdrawn: movements.reduce((n, m) => n + (m.delta < 0 ? -m.delta : 0), 0),
+      net: movements.reduce((n, m) => n + m.delta, 0),
+      movements: movements.length,
+      items: byItem.size,
+      agents: byAgent.size,
+      first: movements.length ? movements[movements.length - 1].timestamp : null,
+      last: movements.length ? movements[0].timestamp : null,
+    },
+    truncated: movements.length >= limit,
+  })
 })
 
 /** Treasury reconciliation: last reported balance vs booked movements. */

@@ -4574,3 +4574,84 @@ export function headQueuedPlanSteps(profileId: string): PlanStepRow[] {
     AND d.seq = (SELECT MIN(x.seq) FROM directive_queue x WHERE x.profile_id = d.profile_id AND x.plan_id = d.plan_id AND x.status = 'queued')
     ORDER BY d.plan_id, d.seq, d.created_at`).all(profileId) as PlanStepRow[]
 }
+
+/** One item movement in or out of a faction vault, as an accountant would want it. */
+export interface VaultMovement {
+  id: number
+  timestamp: string
+  station_id: string
+  item_id: string
+  /** Signed: deposits positive, withdrawals negative. The raw table stores magnitude + kind. */
+  delta: number
+  agent: string
+  profile_id: string | null
+  kind: string
+  source_command: string | null
+  /** Vault total AFTER this movement, when the game reported one. Null when it did not. */
+  balance_after: number | null
+}
+
+/**
+ * The faction vault as a double-sided ledger: every item in and out, who moved it, and
+ * what the vault held afterwards.
+ *
+ * `faction_ledger` has recorded all of this since the storage-ledger work — 886 rows by
+ * 2026-09-17 — but nothing ever rendered it. The vault page's "ledger" tab showed the
+ * TREASURY statement, which is credits only, so the question "what went into the vault,
+ * how much, and who put it there" had no answer in the UI at all. Brian asked for it
+ * repeatedly. This is the query behind it.
+ *
+ * Two things the raw rows do not give you and every caller needs:
+ *
+ * 1. **Sign.** The table stores `quantity` as a magnitude and puts the direction in `kind`
+ *    (`lockbox_deposit` / `lockbox_withdraw`). Summing `quantity` therefore adds
+ *    withdrawals to deposits and overstates everything. Direction is applied here, once.
+ * 2. **Names.** `profile_id` is a uuid. An accounting view keyed on uuids is unreadable,
+ *    so profiles are joined in; a movement by an agent that no longer exists degrades to
+ *    the id rather than vanishing.
+ *
+ * `balance_after` is lifted from the command payload the game returned at the time
+ * (`storage_total` / `dest_total`). It is a genuine reading, not a reconstruction — where
+ * the game did not report one the field is null and the UI must not invent it.
+ */
+export function getVaultMovements(opts: {
+  station?: string; itemId?: string; profileId?: string; since?: string; limit?: number
+} = {}): VaultMovement[] {
+  const cond = ["fl.item_id IS NOT NULL", "fl.item_id <> ''"]
+  const params: (string | number)[] = []
+  if (opts.station) { cond.push('fl.station_id = ?'); params.push(opts.station) }
+  if (opts.itemId) { cond.push('fl.item_id = ?'); params.push(opts.itemId) }
+  if (opts.profileId) { cond.push('fl.profile_id = ?'); params.push(opts.profileId) }
+  if (opts.since) { cond.push('fl.timestamp >= ?'); params.push(opts.since) }
+  const limit = Math.min(Math.max(opts.limit ?? 500, 1), 5000)
+  const rows = getDb().query(`
+    SELECT fl.id, fl.timestamp, fl.station_id, fl.item_id, fl.quantity, fl.kind,
+           fl.profile_id, fl.source_command, fl.raw_ref, p.name AS agent_name
+      FROM faction_ledger fl
+      LEFT JOIN profiles p ON p.id = fl.profile_id
+     WHERE ${cond.join(' AND ')}
+     ORDER BY fl.id DESC LIMIT ?`).all(...params, limit) as Array<Record<string, unknown>>
+
+  return rows.map(r => {
+    const magnitude = Math.abs(Number(r.quantity) || 0)
+    const out = String(r.kind || '').includes('withdraw')
+    let balanceAfter: number | null = null
+    try {
+      const raw = JSON.parse(String(r.raw_ref || '{}')) as Record<string, unknown>
+      const t = raw.storage_total ?? raw.dest_total
+      if (typeof t === 'number' && Number.isFinite(t)) balanceAfter = t
+    } catch { /* raw_ref is a convenience payload, not a contract — never fail a read on it */ }
+    return {
+      id: Number(r.id),
+      timestamp: String(r.timestamp),
+      station_id: String(r.station_id ?? ''),
+      item_id: String(r.item_id),
+      delta: out ? -magnitude : magnitude,
+      agent: String(r.agent_name ?? r.profile_id ?? 'unknown'),
+      profile_id: r.profile_id ? String(r.profile_id) : null,
+      kind: String(r.kind ?? ''),
+      source_command: r.source_command ? String(r.source_command) : null,
+      balance_after: balanceAfter,
+    }
+  })
+}
