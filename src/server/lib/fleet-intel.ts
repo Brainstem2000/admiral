@@ -1,5 +1,5 @@
 import { getDb, gameTimestamp, markAllRentLapsed, markObligationLapsed, listActiveObligations } from './db'
-import { getFacility } from './catalog'
+import { getFacility, recipesForFacility } from './catalog'
 import { safeTruncate } from './text-safe'
 import { feedSaysSystemHasStation, feedServicesForSystem, systemForBase } from './stations-feed'
 import type { FleetIntelData, MarketIntel, SystemIntel, ThreatIntel, KillZone, PlayerSighting } from '../../shared/fleet-intel-types'
@@ -138,7 +138,14 @@ export class FleetIntelCollector {
       case 'list':
       case 'facility_list': return this.processFacilities(r, reportedBy)
       case 'owned':
-      case 'facility_owned': return this.processOwnedFacilities(r, reportedBy)
+      case 'facility_owned':
+      // The FACTION roster answers with action 'faction_owned' — a spelling this switch did
+      // not carry, so processOwnedFacilities never ran for it. Both the rent-lapse logic it
+      // was written for and the roster recording added on 2026-09-18 sat behind a case that
+      // could not match, and a market_runner upgraded into a trading_booth kept billing.
+      case 'faction_owned': return this.processOwnedFacilities(r, reportedBy)
+      case 'set_access':
+      case 'facility_set_access': return this.processFacilityAccess(r)
     }
   }
 
@@ -193,6 +200,77 @@ export class FleetIntelCollector {
       markObligationLapsed(owner.id, ob.facility, ob.station_id)
       console.log(`[Intel] ${reportedBy} no longer owns ${ob.facility} @${ob.station_id} per the game — rent obligation marked lapsed`)
     }
+
+    // RECORD what it just told us. This answer is the AUTHORITATIVE roster of what the
+    // faction owns — it works undocked and covers every station at once, unlike
+    // `facility list`, which only ever sees the station the agent is standing in.
+    // Until 2026-09-18 this method read that roster and wrote none of it: a
+    // ceramite_sintering_kiln built at 17:18 was absent from the rent page entirely,
+    // because the last `facility list` at that station predated it. Owning something the
+    // fleet has no record of is how a facility gets rented twice or built twice.
+    const q = db.query(`
+      INSERT INTO fleet_intel_facilities
+        (station_id, facility_type, facility_name, station_name, system_name, reported_by,
+         last_seen, rent_per_cycle, facility_uid, faction_owned, owned,
+         recipe_id, rental_fee_per_run, labor_per_run, build_cost)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, 1, 1, ?, ?, ?, ?)
+      ON CONFLICT(station_id, facility_type) DO UPDATE SET
+        facility_name      = COALESCE(NULLIF(excluded.facility_name, ''), fleet_intel_facilities.facility_name),
+        station_name       = COALESCE(NULLIF(excluded.station_name, ''),  fleet_intel_facilities.station_name),
+        system_name        = COALESCE(NULLIF(excluded.system_name, ''),   fleet_intel_facilities.system_name),
+        rent_per_cycle     = COALESCE(excluded.rent_per_cycle, fleet_intel_facilities.rent_per_cycle),
+        facility_uid       = COALESCE(excluded.facility_uid, fleet_intel_facilities.facility_uid),
+        faction_owned      = 1,
+        owned              = 1,
+        recipe_id          = COALESCE(NULLIF(excluded.recipe_id, ''), fleet_intel_facilities.recipe_id),
+        rental_fee_per_run = COALESCE(excluded.rental_fee_per_run, fleet_intel_facilities.rental_fee_per_run),
+        labor_per_run      = COALESCE(excluded.labor_per_run, fleet_intel_facilities.labor_per_run),
+        build_cost         = COALESCE(fleet_intel_facilities.build_cost, excluded.build_cost),
+        last_seen          = datetime('now')
+    `)
+    // A facility that is UPGRADED or DISMANTLED vanishes from this roster but its row
+    // survives, and the rent page keeps billing for it: after market_runner became a
+    // trading_booth on 2026-09-18 both rows showed, overstating rent by 106/cycle
+    // (9,116/day). The roster is authoritative for the stations it covers, so anything
+    // faction-owned at one of those stations that it omits is no longer ours.
+    const covered = [...ownedAt.keys()]
+    if (covered.length) {
+      const keep = new Set<string>()
+      for (const f of rows as R[]) {
+        const b = str((f as R).base_id || (f as R).station_id || '')
+        const t = str((f as R).type || (f as R).facility_type || '')
+        if (b && t) keep.add(`${b}\u0000${t}`)
+      }
+      const ph = covered.map(() => '?').join(',')
+      const existing = db.query(
+        `SELECT station_id, facility_type FROM fleet_intel_facilities
+          WHERE faction_owned = 1 AND station_id IN (${ph})`).all(...covered) as Array<{ station_id: string; facility_type: string }>
+      const retire = db.query(
+        `UPDATE fleet_intel_facilities SET faction_owned = 0, owned = 0, rent_per_cycle = NULL,
+                last_seen = datetime('now')
+          WHERE station_id = ? AND facility_type = ?`)
+      for (const e of existing) {
+        if (keep.has(`${e.station_id}\u0000${e.facility_type}`)) continue
+        retire.run(e.station_id, e.facility_type)
+        console.log(`[Intel] ${e.facility_type} @${e.station_id} is no longer faction-owned per the game — retired from the rent roll`)
+      }
+    }
+
+    for (const f of rows as R[]) {
+      if (!f || typeof f !== 'object') continue
+      const base = str(f.base_id || f.station_id || '')
+      const type = str(f.type || f.facility_type || '')
+      if (!base || !type) continue
+      const recipeId = str(f.recipe_id || '') || recipesForFacility(type).map(x => x.id).join(',')
+      q.run(base, type, str(f.name || ''), str(f.base_name || f.station_name || ''),
+            str(f.system_id || f.system_name || ''), reportedBy,
+            typeof f.rent_per_cycle === 'number' ? f.rent_per_cycle : null,
+            str(f.facility_id || '') || null,
+            recipeId,
+            typeof f.rental_fee_per_run === 'number' ? f.rental_fee_per_run : null,
+            typeof f.labor_per_run === 'number' ? f.labor_per_run : null,
+            getFacility(type)?.build_cost ?? null)
+    }
   }
 
   /** Record which crafting facilities exist at a station. `facility_list` is a free query
@@ -207,6 +285,10 @@ export class FleetIntelCollector {
     const groups: Array<{ rows: unknown; owned: boolean; faction?: boolean }> = [
       { rows: r.station_facilities, owned: false },
       { rows: r.facilities, owned: false },
+      // A station whose roster comes back as `public_facilities` recorded NOTHING: the
+      // alzirr survey on 2026-09-18 flew two jumps, listed the station and persisted not
+      // one row, so the next session would have had to fly it again.
+      { rows: r.public_facilities, owned: false },
       { rows: r.player_facilities, owned: true },
       // Faction facilities are OURS even though they are not in player_facilities — they are
       // the fleet's, billed to the treasury. Marking them lets the rent page separate
@@ -223,8 +305,9 @@ export class FleetIntelCollector {
       INSERT INTO fleet_intel_facilities
         (station_id, facility_type, facility_name, station_name, status, maintenance,
          owned, owner_profile_id, build_cost, reported_by, last_seen,
-         rent_per_cycle, facility_uid, faction_owned, level)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)
+         rent_per_cycle, facility_uid, faction_owned, level,
+         recipe_id, rental_fee_per_run, labor_per_run, access)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(station_id, facility_type) DO UPDATE SET
         facility_name = COALESCE(NULLIF(excluded.facility_name, ''), fleet_intel_facilities.facility_name),
         station_name  = COALESCE(NULLIF(excluded.station_name, ''),  fleet_intel_facilities.station_name),
@@ -237,6 +320,10 @@ export class FleetIntelCollector {
         facility_uid     = COALESCE(excluded.facility_uid, fleet_intel_facilities.facility_uid),
         faction_owned    = MAX(fleet_intel_facilities.faction_owned, excluded.faction_owned),
         level            = COALESCE(excluded.level, fleet_intel_facilities.level),
+        recipe_id          = COALESCE(NULLIF(excluded.recipe_id, ''), fleet_intel_facilities.recipe_id),
+        rental_fee_per_run = COALESCE(excluded.rental_fee_per_run, fleet_intel_facilities.rental_fee_per_run),
+        labor_per_run      = COALESCE(excluded.labor_per_run, fleet_intel_facilities.labor_per_run),
+        access             = COALESCE(excluded.access, fleet_intel_facilities.access),
         last_seen     = datetime('now')
     `)
     for (const g of groups) {
@@ -259,12 +346,43 @@ export class FleetIntelCollector {
         // and must never be summed into our rent bill.
         const rent = typeof f.rent_per_cycle === 'number' ? f.rent_per_cycle : null
         const lvl = typeof f.level === 'number' ? f.level : null
+        // What this facility can MAKE. The payload never says, so resolve it from the
+        // catalog's produced_by_facility_ids; a type that runs several recipes stores them
+        // comma-separated. Without this the roster lists names we cannot act on.
+        const recipeId = str(f.recipe_id || '') ||
+          recipesForFacility(type).map(r => r.id).join(',')
+        // Per-run economics. rental_fee_per_run is what a RENTER pays us; labor_per_run is
+        // what the treasury is billed each run. Both were being dropped on the floor.
+        const fee = typeof f.rental_fee_per_run === 'number' ? f.rental_fee_per_run : null
+        const labor = typeof f.labor_per_run === 'number' ? f.labor_per_run : null
+        // `production.public` is the only place the roster states access. Capture it here so
+        // the page does not have to wait for somebody to run set_access. Still nullable:
+        // absent stays UNKNOWN rather than defaulting to public.
+        const prod = (f.production && typeof f.production === 'object' ? f.production : {}) as Record<string, unknown>
+        const acc = typeof prod.public === 'boolean' ? (prod.public ? 'public' : 'private') : null
         q.run(stationId, type, str(f.name || ''), stationName,
               str(f.status || ''), maintenance,
               g.owned ? 1 : 0, (g.owned && !g.faction) ? ownerId : null, buildCost, reportedBy,
-              rent, str(f.facility_id || '') || null, g.faction ? 1 : 0, lvl)
+              rent, str(f.facility_id || '') || null, g.faction ? 1 : 0, lvl,
+              recipeId, fee, labor, acc)
       }
     }
+  }
+
+  /** Record the REAL access state after a set_access. The `facility_owned` payload never
+   *  states access, and the table's `public` column defaults to 1, so faction rows read as
+   *  public whether they were or not. Keyed on facility_uid because the response carries a
+   *  facility_id and no station. */
+  private static processFacilityAccess(r: Record<string, unknown>): void {
+    const d = (r.details && typeof r.details === 'object' ? r.details : r) as Record<string, unknown>
+    const uid = str(d.facility_id || '')
+    const access = str(d.access || '').toLowerCase()
+    if (!uid || (access !== 'public' && access !== 'private')) return
+    getDb().query(`
+      UPDATE fleet_intel_facilities
+         SET access = ?, public = ?, last_seen = datetime('now')
+       WHERE facility_uid = ?
+    `).run(access, access === 'public' ? 1 : 0, uid)
   }
 
   /** Harvest the `no_facility` error, which volunteers the nearest public site:

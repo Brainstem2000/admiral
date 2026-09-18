@@ -18,6 +18,9 @@ const faction = new Hono()
 // The leader sees the most (role management, full treasury actions).
 const LEADER_NAME_HINT = 'CyberSpock'
 
+// The faction's home station — the one the Build Here page is about.
+const HOME_STATION = 'crimson_war_citadel'
+
 interface StorageStation {
   station_id: string
   status: 'unlocked' | 'locked' | 'error'
@@ -39,6 +42,31 @@ async function runQuery(agentId: string, command: string, args?: Record<string, 
  * when passed `station_id`, and that form works from deep space — only the
  * no-argument form needs a dock, and this route no longer depends on it.
  */
+/** Where an agent is DOCKED right now, or null if it is in space. `facility action='list'`
+ *  and every other station-scoped query answer for THIS station and no other, so a caller
+ *  that needs one station's data must pick an agent standing in it. */
+function dockedAt(profileId: string): string | null {
+  const conn = (agentManager.getAgent(profileId) as unknown as
+    { connection?: { getLocalState?: () => { location?: { docked_at?: string | null } } | null } } | null)?.connection
+  return conn?.getLocalState?.()?.location?.docked_at ?? null
+}
+
+/**
+ * An agent DOCKED AT `stationId`, or null. Needed because `facility action='list'` reports
+ * the station the agent is standing in and says so only in its `base_id` — so the Build Here
+ * page's "Under construction — live from the station" panel showed whatever station the
+ * picked agent happened to be at. On 2026-09-18 that was Central Nexus's 8,829,000cr
+ * Singularity Charge Foundry, rendered as if it were ours at War Citadel, because the leader
+ * (CyberSpock) had just been connected while docked there.
+ */
+function pickAgentDockedAt(stationId: string): string | null {
+  for (const p of listProfiles()) {
+    if (!agentManager.getAgent(p.id)?.isConnected) continue
+    if (dockedAt(p.id) === stationId) return p.id
+  }
+  return null
+}
+
 function pickAgent(): string | null {
   const profiles = listProfiles()
   const connected = profiles.filter((p) => agentManager.getAgent(p.id)?.isConnected)
@@ -468,13 +496,20 @@ faction.get('/rent', (c) => {
   const CYCLES_PER_DAY = 86
   const rows = getDb().query(`
     SELECT station_id, facility_type, facility_name, level, rent_per_cycle, faction_owned,
-           build_cost, last_seen
+           build_cost, last_seen, recipe_id, access, rental_fee_per_run, labor_per_run
       FROM fleet_intel_facilities
      WHERE rent_per_cycle IS NOT NULL AND rent_per_cycle > 0
      ORDER BY rent_per_cycle DESC`).all() as Array<Record<string, unknown>>
   const facilities = rows.map(r => ({
     ...r,
     per_day: Math.round(Number(r.rent_per_cycle) * CYCLES_PER_DAY),
+    // What it MAKES and whether it EARNS. A roster of names cannot answer "do we own
+    // something that makes X" — on 2026-09-18 the Plasma Injector Assembly sat in this
+    // table with a NULL recipe while the injector line was called unbuildable.
+    // `access` is NULL until the game states it; NULL is UNKNOWN, never "public".
+    makes: String(r.recipe_id ?? '').split(',').filter(Boolean),
+    net_per_run: r.rental_fee_per_run == null ? null
+      : Math.round((Number(r.rental_fee_per_run) - Number(r.labor_per_run ?? 0)) * 100) / 100,
   }))
   const perCycle = facilities.reduce((s, f) => s + Number(f.rent_per_cycle), 0)
   return c.json({
@@ -483,7 +518,9 @@ faction.get('/rent', (c) => {
     facilities,
     totals: { per_cycle: perCycle, per_day: Math.round(perCycle * CYCLES_PER_DAY) },
     note: 'Rates are what the game stated the last time an agent docked at that station. '
-        + 'A facility we own at a station nobody has visited recently will be missing here.',
+        + 'A facility we own at a station nobody has visited recently will be missing here. '
+        + 'Access shows UNKNOWN until the game states it — the column used to default to '
+        + 'public, which is why the Plasma Injector Assembly read as rentable while it was private.',
   })
 })
 
@@ -643,7 +680,10 @@ faction.get('/build-queue', async (c) => {
     station, treasury, queue,
     built: builtCache?.rows ?? [],
     // What the GAME says is actually being built here, with real per-material gaps.
+    // `under_construction_station` is the station this answer is FOR — the panel must
+    // name it rather than say "the station" and let the reader assume it is ours.
     under_construction: stationCache?.pending ?? [],
+    under_construction_station: stationCache?.station_id ?? null,
     // Cheapest public venue per recipe — rent before you build.
     rentable: stationCache?.rentable ?? [],
   })
@@ -673,16 +713,21 @@ faction.get('/build-queue', async (c) => {
  * public facilities at the station with their rental fees. Both now reach the UI, so the page
  * shows reality first and our wishlist second.
  */
-let stationCache: { at: number; pending: unknown[]; rentable: unknown[] } | null = null
+let stationCache: { at: number; station_id: string; pending: unknown[]; rentable: unknown[] } | null = null
 
 async function refreshStation(): Promise<void> {
   if (stationCache && Date.now() - stationCache.at < 60_000) return
-  const agentId = pickAgent()
+  // MUST be an agent docked at the home station: this answer is per-station and the panel
+  // is labelled as ours. No docked agent means no panel — never another station's queue.
+  const agentId = pickAgentDockedAt(HOME_STATION)
   if (!agentId) return
   try {
     const raw = await runQuery(agentId, 'facility', { action: 'list' })
     const res = (raw.structuredContent ?? raw.result) as Record<string, unknown> | undefined
     if (!res) return
+    // Trust the answer's own base_id over where we thought the agent was.
+    const reported = String(res.base_id ?? '')
+    if (reported && reported !== HOME_STATION) return
     const construction = (res.construction ?? {}) as Record<string, unknown>
     const pending = (Array.isArray(construction.pending) ? construction.pending : []) as Array<Record<string, unknown>>
 
@@ -715,7 +760,7 @@ async function refreshStation(): Promise<void> {
       const row = byRecipe.get(String(r.recipe_id))
       if (row) row.copies = Number(row.copies ?? 0) + 1
     }
-    stationCache = { at: Date.now(), pending, rentable: [...byRecipe.values()] }
+    stationCache = { at: Date.now(), station_id: reported || HOME_STATION, pending, rentable: [...byRecipe.values()] }
   } catch { /* a live read failing must never take the page down */ }
 }
 

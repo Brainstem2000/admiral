@@ -28,6 +28,11 @@ export interface CatalogItem {
 export interface CatalogRecipe {
   id: string; name: string; description: string; category: string
   inputs: QtyRef[]; outputs: QtyRef[]; crafting_time: number; no_recycle?: boolean
+  // Which facility types can run this, and whether a Station Workshop will do instead.
+  // A recipe that is facility_only and lists no facility we own or can rent is a HARD
+  // block, not a shopping problem — `create_ceramite_plating` stalled 150 plasma_injector
+  // on 2026-09-18 for exactly that reason and nothing in the DB said so.
+  produced_by_facility_ids?: string[]; hand_craftable?: boolean; facility_only?: boolean
 }
 export interface CatalogShip {
   id: string; name: string; class: string; tier: number; faction: string; category: string
@@ -55,6 +60,7 @@ let catalog: Catalog | null = null
 let itemsById = new Map<string, CatalogItem>()
 let recipesById = new Map<string, CatalogRecipe>()
 let recipesByOutput = new Map<string, CatalogRecipe[]>()
+let recipesByFacility = new Map<string, CatalogRecipe[]>()
 // The craft QUEUE reports a recipe by its display name ('Assemble Platinum Control
 // Node'), never its id, so pacing cannot price a queue without this index.
 let recipesByName = new Map<string, CatalogRecipe>()
@@ -68,6 +74,14 @@ function buildIndexes(c: Catalog): void {
   recipesById = new Map(c.recipes.map((r) => [r.id, r]))
   recipesByName = new Map(c.recipes.filter(r => r.name).map((r) => [r.name.toLowerCase(), r]))
   recipesByOutput = new Map()
+  recipesByFacility = new Map()
+  for (const r of c.recipes) {
+    for (const fid of r.produced_by_facility_ids ?? []) {
+      const fl = recipesByFacility.get(fid) ?? []
+      fl.push(r)
+      recipesByFacility.set(fid, fl)
+    }
+  }
   for (const r of c.recipes) {
     for (const out of r.outputs ?? []) {
       const list = recipesByOutput.get(out.item_id) ?? []
@@ -154,6 +168,14 @@ export function craftingSecondsFor(recipeNameOrId: string): number | null {
   return typeof secs === 'number' && secs > 0 ? secs : null
 }
 export function getFacility(id: string): CatalogFacility | undefined { return facilitiesById.get(id) }
+
+/** Every recipe a facility TYPE can run. Owning a facility is only useful if you know what
+ *  it makes: `fleet_intel_facilities` recorded "plasma_injector_assembly" with a NULL
+ *  recipe_id, so the roster could not answer "what do we own that makes X" and the answer
+ *  had to be rebuilt from the raw catalog by hand. */
+export function recipesForFacility(facilityType: string): CatalogRecipe[] {
+  return recipesByFacility.get(facilityType) ?? []
+}
 
 /** Fittable-module catalog entry: any item declaring a mount slot. The raw
  *  catalog types these loosely (module stats ride as extra keys on items). */

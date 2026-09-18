@@ -1674,12 +1674,33 @@ export function recordStorageMutationFromCommand(
       return [r]
     }
 
+    /** WHOSE storage a deposit/withdraw touches. `deposit_items target="faction"` moves cargo
+     *  into the FACTION VAULT and leaves personal storage untouched — booking it as a personal
+     *  gain is what filled `storage_inventory` with items nobody owns. On 2026-09-18 that sent
+     *  four agents to sweep lockers the table swore held 76 circuit_board; every one read empty.
+     *  The mirror case is just as wrong: `withdraw_items source="faction"` lands in the pilot's
+     *  LOCKER, so personal storage goes UP, not down. The `transfer` case below already reads
+     *  source/destination; these two never did. */
+    const facTarget = (strField(r.target) || strField(commandArgs?.target) || '').toLowerCase()
+    const facSource = (strField(r.source) || strField(commandArgs?.source) || '').toLowerCase()
+    const depositIsFaction = facTarget === 'faction'
+    const withdrawIsFaction = facSource === 'faction'
+
     switch (action) {
-      case 'deposit_items': { const l = line(r); apply(profileId, docked, l.id, +l.qty, bare, 'exact', l.name); break }
-      case 'withdraw_items': { const l = line(r); apply(profileId, docked, l.id, -l.qty, bare, 'exact', l.name); break }
+      case 'deposit_items': {
+        // Into the faction vault: the faction ledger owns this movement, personal storage does not change.
+        if (depositIsFaction) break
+        const l = line(r); apply(profileId, docked, l.id, +l.qty, bare, 'exact', l.name); break
+      }
+      case 'withdraw_items': {
+        const l = line(r)
+        // Out of the faction vault -> the pilot's locker GAINS. Out of their own locker -> it loses.
+        apply(profileId, docked, l.id, withdrawIsFaction ? +l.qty : -l.qty, bare, 'exact', l.name); break
+      }
       case 'bulk_deposit':
       case 'bulk_withdraw': {
-        const sign = action === 'bulk_deposit' ? +1 : -1
+        if (action === 'bulk_deposit' && depositIsFaction) break
+        const sign = action === 'bulk_deposit' ? +1 : (withdrawIsFaction ? +1 : -1)
         for (const res of Array.isArray(r.results) ? (r.results as unknown[]) : []) {
           if (!res || typeof res !== 'object' || (res as ResultRecord).success === false) continue
           const l = line(res as ResultRecord)

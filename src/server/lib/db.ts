@@ -323,6 +323,58 @@ VERSIONED_MIGRATIONS.push({
   },
 })
 
+VERSIONED_MIGRATIONS.push({
+  version: 12,
+  name: 'facility capability + real access (what it makes, what it charges, whether it is public)',
+  up: (d) => {
+    // A facility roster that lists NAMES but not CAPABILITIES cannot answer "do we own
+    // something that makes X" — on 2026-09-18 the Plasma Injector Assembly sat in this table
+    // with recipe_id NULL while the 150-unit injector line was called unbuildable.
+    //
+    // `access` is deliberately NULLABLE: NULL means UNKNOWN. The existing `public` column
+    // DEFAULTs to 1 and was never written for faction rows, so the table claimed the
+    // assembly was open to renters while it was private.
+    //
+    // These columns belong to their own version: they were first written into v11, which
+    // every live database had already applied, so the ALTERs never ran and `/api/faction/rent`
+    // died with "no such column: access". A migration that has shipped is immutable — extend
+    // it with a NEW version, never by editing it in place.
+    const cols = (d.query('PRAGMA table_info(fleet_intel_facilities)').all() as { name: string }[]).map(c => c.name)
+    if (!cols.includes('rental_fee_per_run')) d.exec('ALTER TABLE fleet_intel_facilities ADD COLUMN rental_fee_per_run REAL')
+    if (!cols.includes('labor_per_run')) d.exec('ALTER TABLE fleet_intel_facilities ADD COLUMN labor_per_run INTEGER')
+    if (!cols.includes('access')) d.exec('ALTER TABLE fleet_intel_facilities ADD COLUMN access TEXT')
+  },
+})
+
+VERSIONED_MIGRATIONS.push({
+  version: 13,
+  name: 'storage_inventory: one key per station, and purge faction-deposit phantoms',
+  up: (d) => {
+    // 1. Fold display-name station keys onto their canonical id, summing any collision.
+    //    "Crimson War Citadel" and "crimson_war_citadel" were separate rows for one place.
+    const rows = d.query(`SELECT DISTINCT station_id FROM storage_inventory WHERE station_id IS NOT NULL`)
+      .all() as Array<{ station_id: string }>
+    for (const { station_id } of rows) {
+      const norm = station_id.trim().toLowerCase().replace(/\s+/g, '_')
+      if (!norm || norm === station_id) continue
+      d.query(`INSERT INTO storage_inventory (profile_id, station_id, item_id, item_name, quantity, updated_at)
+               SELECT profile_id, ?, item_id, item_name, quantity, updated_at FROM storage_inventory WHERE station_id = ?
+               ON CONFLICT(profile_id, station_id, item_id) DO UPDATE SET
+                 quantity = quantity + excluded.quantity,
+                 updated_at = MAX(storage_inventory.updated_at, excluded.updated_at)`).run(norm, station_id)
+      d.query(`DELETE FROM storage_inventory WHERE station_id = ?`).run(station_id)
+      console.log(`[DB] storage key folded: "${station_id}" -> "${norm}"`)
+    }
+    // 2. `deposit_items target="faction"` moved cargo to the VAULT but was booked as a personal
+    //    gain (fixed in tools.ts). Those rows were never confirmed by a view_storage, so they
+    //    carry observed_at IS NULL. Drop them rather than leave the table asserting stock that
+    //    is not there — a read that says nothing beats a read that says the wrong thing.
+    const n = d.query(`DELETE FROM storage_inventory
+                        WHERE observed_at IS NULL AND quantity > 0`).run()
+    console.log(`[DB] purged ${(n as { changes?: number }).changes ?? 0} unverified storage rows (never confirmed by a live view_storage)`)
+  },
+})
+
 function runVersionedMigrations(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -2424,13 +2476,27 @@ function nowIso(): string { return new Date().toISOString() }
  * caller marks the profile dirty and the next view_storage settles it.
  * Returns the ledger row id.
  */
+/** One station, one key. `storage_inventory` is keyed (profile_id, station_id, item_id), so
+ *  "Crimson War Citadel" and "crimson_war_citadel" become two rows for the same place and a
+ *  read on the canonical id cannot see the other. That is exactly how CyberSapper's locker
+ *  held a phantom 42 circuit_board on 2026-09-18 — the row existed under the display name,
+ *  the live read used the id, and four agents were sent to sweep lockers that were empty.
+ *  Station ids from the game are lowercase snake or a hex hash, so this only ever folds a
+ *  display name onto its id. */
+export function normStationId(s: string | null | undefined): string | null {
+  const t = (s ?? '').trim()
+  if (!t) return null
+  return t.toLowerCase().replace(/\s+/g, '_')
+}
+
 export function applyStorageDelta(
   profileId: string,
-  stationId: string | null,
+  stationIdRaw: string | null,
   itemId: string,
   delta: number,
   meta: { source: StorageLedgerSource; ref: string; confidence: StorageLedgerConfidence; eventId?: number | null; itemName?: string; at?: string },
 ): number {
+  const stationId = normStationId(stationIdRaw)
   const d = Math.trunc(Number(delta))
   if (!itemId || !Number.isFinite(d) || d === 0) return 0
   const confidence: StorageLedgerConfidence = stationId ? meta.confidence : 'unplaced'
@@ -3201,10 +3267,47 @@ export function clearStorageDirty(profileId: string): void {
  * The query that did not exist: agents re-flew to rediscover deposits because
  * nothing indexed what they had already surveyed.
  */
-export function findDeposits(itemId: string, limit = 25): Array<Record<string, unknown>> {
-  return db.query(`SELECT * FROM fleet_intel_deposits
-    WHERE item_id = ? AND remaining > 0
-    ORDER BY remaining DESC, richness DESC LIMIT ?`).all(itemId, limit) as Array<Record<string, unknown>>
+export function findDeposits(itemId: string, limit = 25, includeEmpty = false): Array<Record<string, unknown>> {
+  // Ranked on RICHNESS, not `remaining`. Richness is a property of the seam and
+  // barely moves; `remaining` is a reading that was true once, falls as the belt
+  // is mined and climbs again as it regenerates over days. The game gates access
+  // on `too_sparse` against `lock_minimum_stock` — a number we do not hold — so a
+  // cached `remaining` is evidence, never a verdict. Ordering on it once put the
+  // emptiest-looking belt last when it had regenerated, and a survey claiming
+  // 18,879 units got an agent refused at the rock face.
+  const where = includeEmpty ? '' : 'AND remaining > 0'
+  return db.query(`SELECT *,
+      CAST(julianday('now') - julianday(last_seen) AS REAL) AS age_days
+    FROM fleet_intel_deposits
+    WHERE item_id = ? ${where}
+    ORDER BY richness DESC, remaining DESC LIMIT ?`).all(itemId, limit) as Array<Record<string, unknown>>
+}
+
+/**
+ * Every ore the fleet has actually surveyed — the picker behind "where do we mine X".
+ *
+ * Matches the id or the display name, so "titanium", "Titanium Ore" and
+ * "titanium_ore" all land on the same row. An empty query lists everything we
+ * have ever seen in the ground, which is the honest starting point: the answer
+ * to "where can we mine this" is bounded by where the fleet has actually been.
+ */
+export function searchDepositItems(q: string, limit = 80): Array<Record<string, unknown>> {
+  const raw = (q ?? '').trim().toLowerCase()
+  const byId = `%${raw.replace(/\s+/g, '_')}%`
+  const byName = `%${raw}%`
+  return db.query(`SELECT item_id,
+      MAX(item_name)               AS item_name,
+      COUNT(DISTINCT poi_id)       AS pois,
+      COUNT(DISTINCT system_id)    AS systems,
+      MAX(richness)                AS best_richness,
+      MAX(supported_power)         AS best_power,
+      SUM(remaining)               AS last_seen_total,
+      MAX(last_seen)               AS newest
+    FROM fleet_intel_deposits
+    WHERE (? = '' OR item_id LIKE ? OR LOWER(item_name) LIKE ?)
+    GROUP BY item_id
+    ORDER BY pois DESC, item_id ASC
+    LIMIT ?`).all(raw, byId, byName, limit) as Array<Record<string, unknown>>
 }
 
 /** Everything known about one POI. */
