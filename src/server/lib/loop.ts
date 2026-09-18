@@ -721,6 +721,7 @@ export async function runAgentTurn(
         estimatedTokens: totalMessageTokens(context.messages, cpt),
         durationMs,
         error: msg,
+        ...errorDetail(err),
       }, null, 2))
       return 'completed'
     }
@@ -1393,7 +1394,7 @@ function errorDetail(err: unknown): Record<string, unknown> {
   if (!err || typeof err !== 'object') return out
   const e = err as Record<string, unknown>
   const pick = (k: string) => { const v = e[k]; if (v !== undefined && v !== null && v !== '') out[k] = v }
-  for (const k of ['name', 'status', 'statusCode', 'code', 'type']) pick(k)
+  for (const k of ['name', 'status', 'statusCode', 'code', 'type', 'timedOut', 'timeoutMs', 'stopReason', 'contentBlocks']) pick(k)
   // A response body is the single most useful field and the one most likely to be huge.
   for (const k of ['body', 'error', 'response', 'data']) {
     const v = e[k]
@@ -1456,7 +1457,27 @@ export async function completeWithRetry(
         clearTimeout(timeout)
 
         if (result.stopReason === 'error') {
-          throw new Error(result.errorMessage || 'LLM returned an error response')
+          // The provider library collapses most failures to the single string
+          // "An unknown error occurred", and re-throwing only that is why two completely
+          // different faults were indistinguishable on 2026-09-17: a call killed by our own
+          // timeout (slow — the abort surfaces HERE as stopReason 'error', not as an
+          // AbortError) and a request the API rejected outright (fast — CyberSpock's died
+          // 2s after his loop started). Same message, opposite fixes, and chasing the wrong
+          // one cost two wrong diagnoses.
+          //
+          // So carry everything the result still knows. `timedOut` is the discriminator that
+          // was missing: whether OUR controller fired. `usage` separates "the API never
+          // accepted this" (no tokens) from "it ran and we cut it off" (tokens billed).
+          const timedOut = timeoutController.signal.aborted
+          const err = new Error(result.errorMessage || 'LLM returned an error response')
+          Object.assign(err, {
+            timedOut,
+            timeoutMs,
+            stopReason: result.stopReason,
+            usage: result.usage ?? null,
+            contentBlocks: result.content?.length ?? 0,
+          })
+          throw err
         }
         if (result.content.length === 0) {
           // An empty COMPLETED reply is the model saying "nothing to add" — most
