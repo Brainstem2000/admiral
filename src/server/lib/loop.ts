@@ -74,8 +74,29 @@ const RETRY_BASE_DELAY = 10_000
 //      text-rendered status 2.9, JSON 3.0; oMLX reported 33.8k prompt tokens where
 //      the 2-chars/token estimate said 47.6k).
 
-/** The 90s default is a hosted-API figure. */
-export const DEFAULT_LLM_TIMEOUT_MS = 90_000
+/**
+ * Hosted-API ceiling for one call.
+ *
+ * This was 90_000 and it was BELOW the real distribution of planner calls, which is the
+ * failure mode this file's own rule warns about: sanity-check a timeout against
+ * maxTokens / measured tok-per-s, because a budget that cannot fit the token allowance
+ * kills the model mid-generation every time it uses it.
+ *
+ * Measured on 2026-09-17, hosted claude-sonnet-5 planner calls: 67.2, 73.9, 74.4, 81.4,
+ * 85.3, 91.4, 97.5, 98.6s — straddling 90 exactly, so a planner that wrote a long plan
+ * died and a short one lived. The kill surfaces as `"An unknown error occurred"` with no
+ * further detail, retries five times on the identical request, fails identically, and
+ * ends with the agent parked. Five agents hit it within two minutes of each other
+ * (Morg'Thar, CyberSpock, CyberSapper, Bob Comet, and earlier Juno Freight at 157.3s),
+ * which reads exactly like a provider outage and is not one — other calls succeeded
+ * throughout.
+ *
+ * 240s fits ~14,800 output tokens at the 62 tok/s measured on the call that did land
+ * (6,076 tokens in 98.6s). Raise this if the output budget grows; do not lower it
+ * without re-measuring, and do not diagnose "unknown error" as a model or prompt fault
+ * before checking the duration against this number.
+ */
+export const DEFAULT_LLM_TIMEOUT_MS = 240_000
 /** A dense 27B at 8-bit on Apple silicon measured ~14 output tok/s, so the
  *  4096-token executor budget needs ~293s to finish. At 90s the model could
  *  only ever emit ~1,260 tokens and was killed mid-thought on 6 of 8 calls. */
