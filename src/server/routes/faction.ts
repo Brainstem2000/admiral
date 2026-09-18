@@ -293,10 +293,13 @@ faction.get('/vault-ledger', (c) => {
   const held = new Map<string, number>()
   for (const r of getFactionStorage(station)) held.set(r.item_id, Number(r.quantity) || 0)
 
-  const checkpoint = new Map<string, { balance: number; id: number }>()
+  // Checkpoints and "movements since" are both keyed on TIME, not on id. Audit-log rows
+  // carry the game's own historical stamps, so a higher id no longer means "later" — using
+  // id here would count a just-discovered old transfer as having happened after a newer one.
+  const checkpoint = new Map<string, { balance: number; at: string; id: number }>()
   for (const m of movements) {                       // newest first
     if (m.balance_after === null || m.station_id !== station) continue
-    if (!checkpoint.has(m.item_id)) checkpoint.set(m.item_id, { balance: m.balance_after, id: m.id })
+    if (!checkpoint.has(m.item_id)) checkpoint.set(m.item_id, { balance: m.balance_after, at: m.timestamp, id: m.id })
   }
   const unexplained: Array<{ item_id: string; expected: number; actual: number; difference: number }> = []
   let unknownItems = 0
@@ -304,7 +307,8 @@ faction.get('/vault-ledger', (c) => {
     const cp = checkpoint.get(itemId)
     if (!cp) { if (actual > 0) unknownItems += 1; continue }
     const since = movements
-      .filter(m => m.item_id === itemId && m.station_id === station && m.id > cp.id)
+      .filter(m => m.item_id === itemId && m.station_id === station
+        && (m.timestamp > cp.at || (m.timestamp === cp.at && m.id > cp.id)))
       .reduce((n, m) => n + m.delta, 0)
     const expected = cp.balance + since
     if (expected !== actual) unexplained.push({ item_id: itemId, expected, actual, difference: actual - expected })

@@ -1958,6 +1958,31 @@ export interface FactionLedgerRow {
   timestamp?: string
 }
 
+/**
+ * Did the COMMAND path already book this movement? Guards the faction audit-log ingest
+ * against double-counting our own agents — the audit log lists every member's transfers,
+ * ours included, and both sources have different dedupe keys so nothing else would stop it.
+ *
+ * The window is deliberately loose (±120s): our row is written when the command reply
+ * lands, the game's audit entry is stamped when the transfer executed, and the two drift
+ * by seconds. A tight match would let duplicates through, which is the failure that
+ * matters here — a missed skip inflates every total, while an over-eager skip only costs
+ * a row we already have.
+ */
+export function factionLedgerHasCommandRow(
+  profileId: string, itemId: string, quantity: number, direction: 'deposit' | 'withdraw', at: string,
+): boolean {
+  const stamp = at.replace('T', ' ').replace(/\..*$/, '')
+  const row = getDb().query(`
+    SELECT 1 FROM faction_ledger
+     WHERE source_command <> 'audit_log'
+       AND profile_id = ? AND item_id = ? AND ABS(quantity) = ?
+       AND kind LIKE ?
+       AND ABS(strftime('%s', timestamp) - strftime('%s', ?)) <= 120
+     LIMIT 1`).get(profileId, itemId, quantity, `%${direction}%`, stamp)
+  return !!row
+}
+
 /** INSERT OR IGNORE on dedupe_key: replays of the same tick/command book once. Returns true when a row was written. */
 export function insertFactionLedger(row: FactionLedgerRow): boolean {
   const res = getDb().query(`
@@ -4632,7 +4657,13 @@ export function getVaultMovements(opts: {
       FROM faction_ledger fl
       LEFT JOIN profiles p ON p.id = fl.profile_id
      WHERE ${cond.join(' AND ')}
-     ORDER BY fl.id DESC LIMIT ?`).all(...params, limit) as Array<Record<string, unknown>>
+     -- Sort by TIME, not by id. Those were the same thing until the faction audit-log
+     -- ingest landed: it books rows carrying the game's own historical timestamps, so a
+     -- row inserted now can describe a transfer from an hour ago. Ordering by id then
+     -- shuffles newly-discovered history to the top of a ledger that is supposed to read
+     -- newest-first. id is kept as the tiebreaker for rows sharing a timestamp, which
+     -- happens whenever several transfers land inside the same second.
+     ORDER BY fl.timestamp DESC, fl.id DESC LIMIT ?`).all(...params, limit) as Array<Record<string, unknown>>
 
   return rows.map(r => {
     const magnitude = Math.abs(Number(r.quantity) || 0)

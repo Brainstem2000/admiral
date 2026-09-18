@@ -1,6 +1,6 @@
 import {
   insertFactionLedger, recordFactionStorageSnapshot, recordFactionTreasurySnapshot, applyFactionStorageDelta,
-  getProfileLastState, getMostRecentStation, getProfile, getKnownFactionId, listProfiles,
+  getProfileLastState, getMostRecentStation, getProfile, getKnownFactionId, listProfiles, factionLedgerHasCommandRow,
 } from './db'
 import type { FactionLedgerRow } from './db'
 
@@ -70,6 +70,16 @@ function ingestFactionAuditLog(
     const profileId = byName.get(player.toLowerCase())
       ?? byName.get(player.replace(/[^A-Za-z0-9]/g, '').toLowerCase())
       ?? null
+
+    // DO NOT DOUBLE-BOOK OUR OWN AGENTS. The audit log lists every member's transfers,
+    // including the ones we already booked from our own command replies — so ingesting it
+    // blindly counts each of our movements twice. It did: 18 of the first 22 audit rows
+    // duplicated a command row, and the by-item totals were inflated accordingly.
+    // The audit log's job is the members we CANNOT see, so a movement the command path
+    // already recorded is skipped here. Matching is by item + magnitude + direction inside
+    // a two-minute window, because the two records are written at slightly different
+    // moments (ours when the reply lands, the game's when the transfer executed).
+    if (profileId && factionLedgerHasCommandRow(profileId, itemId, Math.abs(qty), deposit ? 'deposit' : 'withdraw', ts)) continue
 
     const ok = insertFactionLedger({
       timestamp: ts.replace('T', ' ').replace(/\..*$/, ''),
