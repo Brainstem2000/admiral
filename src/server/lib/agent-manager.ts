@@ -229,6 +229,23 @@ class AgentManager {
     this.backoff.delete(profileId)
   }
 
+  /** Park: stop the LLM loop, KEEP the game connection.
+   *
+   *  The token-saving half of a safe dock. `safeDock` tells the agent to fly somewhere safe
+   *  and stop; this stops the thinking outright while leaving the account reachable, so the
+   *  Admiral can still drive reads and crafting jobs through it for free. Until this existed
+   *  the only way to get there was disconnect-then-bare-connect, which drops and re-opens the
+   *  game session for no reason. */
+  async parkLLM(profileId: string): Promise<boolean> {
+    this.stopRequested.add(profileId)
+    setWindDown(profileId, false)
+    this.resetBackoff(profileId)
+    const agent = this.agents.get(profileId)
+    if (!agent) return false
+    await agent.stopLoop()
+    return true
+  }
+
   async disconnect(profileId: string): Promise<void> {
     this.stopRequested.add(profileId)
     setWindDown(profileId, false)

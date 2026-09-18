@@ -1281,6 +1281,31 @@ export class Agent {
     }
   }
 
+  /** Stop the LLM loop but KEEP the game connection open.
+   *
+   *  A parked agent is `connected: true, running: false`: it takes no turns and costs no
+   *  tokens, but `executeCommand` still works — the /command route gates on `isConnected`
+   *  only, never on `running`. So a parked agent can still run queries AND actions,
+   *  including `facility job_add`, driven from the dashboard or API. That is the whole
+   *  point: crafting chains can be fed by agents that are not thinking.
+   *
+   *  The AbortController is REPLACED rather than left aborted — `startLLMLoop` bails
+   *  immediately on an aborted signal, so leaving the spent one in place would make the
+   *  park irreversible without a full reconnect. */
+  async stopLoop(): Promise<void> {
+    this.running = false
+    this.pendingSafeDock = false
+    this.safeDockTurnsRemaining = 0
+    this.pendingWindDown = false
+    this.windDownTurnsRemaining = 0
+    this.abortController?.abort()
+    this.abortController = new AbortController()
+    clearBriefingCache(this.profileId)
+    cleanupProfileToolState(this.profileId)
+    this.setActivity('parked — game link only')
+    this.log('system', 'LLM loop PARKED. Game connection kept: reads and commands still work, no turns are taken and no tokens are spent.')
+  }
+
   async stop(): Promise<void> {
     this.running = false
     this.pendingSafeDock = false

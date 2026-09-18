@@ -187,6 +187,13 @@ profiles.post('/:id/connect', async (c) => {
       await agentManager.disconnect(id)
       return c.json({ connected: false, running: false })
     }
+    // PARK: stop the LLM loop, keep the game link. The agent still answers
+    // /command for both reads AND actions (that route gates on isConnected,
+    // never on running), so a parked agent can still be fed crafting jobs.
+    if (action === 'park') {
+      await agentManager.parkLLM(id)
+      return c.json(agentManager.getStatus(id))
+    }
     await agentManager.connect(id)
     if (action === 'connect_llm' && profile.provider && profile.provider !== 'manual' && profile.model) {
       await agentManager.startLLM(id)
@@ -479,8 +486,8 @@ profiles.post('/batch', async (c) => {
   const profileIds = body.ids as string[] | undefined // if undefined, all profiles
   const group = body.group as string | undefined // filter by group_name
 
-  if (!action || !['connect_llm', 'disconnect'].includes(action)) {
-    return c.json({ error: 'action must be connect_llm or disconnect' }, 400)
+  if (!action || !['connect_llm', 'connect', 'disconnect', 'park'].includes(action)) {
+    return c.json({ error: 'action must be connect_llm, connect, disconnect or park' }, 400)
   }
 
   let targets = listProfiles()
@@ -499,13 +506,17 @@ profiles.post('/batch', async (c) => {
       if (action === 'disconnect') {
         await agentManager.disconnect(profile.id)
         results.push({ id: profile.id, name: profile.name, ok: true })
+      } else if (action === 'park') {
+        const ok = await agentManager.parkLLM(profile.id)
+        results.push({ id: profile.id, name: profile.name, ok, error: ok ? undefined : 'not connected' })
       } else if (!profile.enabled) {
         // A bulk "connect everyone" must not sweep up an account that is
         // deliberately parked for another harness to drive.
         results.push({ id: profile.id, name: profile.name, ok: false, error: 'profile disabled (enabled=0)' })
       } else {
         await agentManager.connect(profile.id)
-        if (profile.provider && profile.provider !== 'manual' && profile.model) {
+        // `connect` is the game-only form: link the account, start no LLM loop.
+        if (action !== 'connect' && profile.provider && profile.provider !== 'manual' && profile.model) {
           await agentManager.startLLM(profile.id)
         }
         results.push({ id: profile.id, name: profile.name, ok: true })

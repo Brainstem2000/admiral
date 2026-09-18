@@ -1,6 +1,6 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { Square, Plug, PlugZap, Trash2, Pencil, Check, X, PanelLeft, PanelLeftClose, PanelRightClose, MessageSquare, Anchor, User } from 'lucide-react'
+import { Square, Plug, PlugZap, Trash2, Pencil, Check, X, PanelLeft, PanelLeftClose, PanelRightClose, MessageSquare, Anchor, User, Link2 } from 'lucide-react'
 import type { Profile, Provider } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -601,6 +601,33 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
     onRefresh()
   }
 
+  /** Link the game account WITHOUT starting the LLM loop. A linked agent takes no turns
+   *  and costs nothing, but still answers commands — reads and actions alike, including
+   *  facility job_add — so it can hold and feed crafting jobs while parked. */
+  async function handleLinkOnly() {
+    setConnecting(true)
+    try {
+      await fetch(`/api/profiles/${profile.id}/connect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'connect' }),
+      })
+      onRefresh()
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  /** Stop the LLM loop but keep the game link — the token-saving half of a safe dock. */
+  async function handlePark() {
+    await fetch(`/api/profiles/${profile.id}/connect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'park' }),
+    })
+    onRefresh()
+  }
+
   const handleSendCommand = useCallback(async (command: string, args?: Record<string, unknown>) => {
     setQuickResult({ title: command, text: 'Running…', loading: true })
     try {
@@ -1085,6 +1112,7 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
         <div className="flex-1" />
 
         {!status.connected ? (
+          <>
           <Button
             data-tour="connect-btn"
             variant="outline"
@@ -1096,8 +1124,49 @@ export function ProfileView({ profile, providers, status, playerData, onPlayerDa
             {connecting ? <PlugZap size={12} className="animate-pulse" /> : <Plug size={12} />}
             {connecting ? 'Connecting...' : (isManual ? 'Connect' : 'Connect + Start')}
           </Button>
+            {!isManual && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleLinkOnly}
+                disabled={connecting}
+                className="gap-1.5 font-semibold text-[hsl(var(--smui-frost-2))] border-[hsl(var(--smui-frost-2)/0.4)] hover:bg-[hsl(var(--smui-frost-2)/0.1)]"
+                title="Open the game session only — no LLM loop, no turns, no tokens. Commands and crafting jobs still work."
+              >
+                <Link2 size={12} />
+                Link Only
+              </Button>
+            )}
+          </>
         ) : (
           <>
+            {/* Link only: game session, no LLM loop. A parked agent still answers
+                commands — including crafting jobs — for zero tokens. */}
+            {!status.running && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleLinkOnly}
+                disabled={connecting}
+                className="gap-1.5 font-semibold text-[hsl(var(--smui-frost-2))] border-[hsl(var(--smui-frost-2)/0.4)] hover:bg-[hsl(var(--smui-frost-2)/0.1)]"
+                title="Game link is up and the LLM loop is stopped. Reads and commands still work — including facility jobs — at no token cost."
+              >
+                <Link2 size={12} />
+                Linked
+              </Button>
+            )}
+            {status.running && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handlePark}
+                className="gap-1.5 font-semibold text-[hsl(var(--smui-frost-2))] border-[hsl(var(--smui-frost-2)/0.4)] hover:bg-[hsl(var(--smui-frost-2)/0.1)]"
+                title="Stop the LLM loop but keep the game connection. No turns, no tokens — commands and crafting jobs still work."
+              >
+                <Link2 size={12} />
+                Park
+              </Button>
+            )}
             <Button
               variant="outline"
               size="sm"

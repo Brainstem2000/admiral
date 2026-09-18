@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from 'react'
-import { Plus, Bot, User, GripVertical, Play, Square } from 'lucide-react'
+import { Plus, Bot, User, GripVertical, Play, Square, Link2 } from 'lucide-react'
 import type { Profile } from '@/types'
 
 interface Props {
@@ -46,7 +46,7 @@ function groupProfiles(profiles: Profile[], playerDataMap: Record<string, Record
   return result
 }
 
-async function batchAction(action: 'connect_llm' | 'disconnect', ids?: string[], group?: string) {
+async function batchAction(action: 'connect_llm' | 'connect' | 'disconnect' | 'park', ids?: string[], group?: string) {
   try {
     await fetch('/api/profiles/batch', {
       method: 'POST',
@@ -138,6 +138,16 @@ export function ProfileList({ profiles, activeId, statuses, playerDataMap, onSel
           >
             <Play size={9} fill="currentColor" />
             <span>All</span>
+          </button>
+          {/* Park all: stop every LLM loop, keep every game link. Parked agents still
+              answer commands (reads AND crafting jobs) at zero token cost. */}
+          <button
+            onClick={() => batchAction('park')}
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-muted-foreground/60 hover:text-[hsl(var(--smui-frost-2))] hover:bg-[hsl(var(--smui-frost-2)/0.1)] transition-colors rounded"
+            title="Park all — stop the LLM loops but keep the game links. No turns, no tokens; commands and crafting jobs still work."
+          >
+            <Link2 size={9} />
+            <span>Park</span>
           </button>
           <button
             onClick={() => batchAction('disconnect')}
