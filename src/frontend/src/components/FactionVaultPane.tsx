@@ -483,7 +483,17 @@ function VaultItemLedger() {
       } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
     })()
   }, [limit])
-  useEffect(load, [load])
+  // Poll like the sibling panes. A deposit made by a HUMAN (UMan) reaches this table only
+  // when some agent next runs view_faction_storage — that response carries recent_activity,
+  // which is the only place a non-Admiral player's transfer is visible. With no interval the
+  // pane then sat on its mount-time fetch and showed nothing until the operator hit refresh,
+  // which reads as "my deposit vanished" (reported 2026-09-18, a 110 silicon_ore deposit that
+  // was in the DB the whole time).
+  useEffect(() => {
+    load()
+    const t = setInterval(load, 30000)
+    return () => clearInterval(t)
+  }, [load])
 
   if (err) return <div className="dossier-card p-3 text-[11.5px]" style={{ color: 'hsl(var(--smui-red))' }}>Vault ledger unavailable: {err}</div>
   if (!d) return <div className="dossier-card p-3 text-[11.5px] text-muted-foreground">Reading the vault ledger…</div>
@@ -495,6 +505,12 @@ function VaultItemLedger() {
   const items = needle ? d.by_item.filter(r => (r.item_id ?? '').toLowerCase().includes(needle)) : d.by_item
   const agents = needle ? d.by_agent.filter(r => (r.agent ?? '').toLowerCase().includes(needle)) : d.by_agent
   const n = (v: number) => v.toLocaleString()
+  /** Item ids are normally short slugs, but a PACKAGE carries its whole manifest as its name —
+   *  "crimson_pact_military_supplies_29x_crimson_ordnance_bay_depot_iron_reach..." is 138
+   *  characters and blew the column across the table. Truncate for the cell, keep the full
+   *  string on hover and in the title attribute so nothing is actually hidden. */
+  const ITEM_MAX = 44
+  const shortItem = (v: string) => (v ?? '').length > ITEM_MAX ? (v ?? '').slice(0, ITEM_MAX - 1) + '…' : (v ?? '')
   // Stored stamps are UTC with no zone marker; formatStamp pins that before rendering.
   const when = (t: string) => formatStamp(t, tz)
   const green = 'hsl(var(--smui-green))', red = 'hsl(var(--smui-red))'
@@ -559,7 +575,7 @@ function VaultItemLedger() {
               {moves.map(m => (
                 <tr key={m.id} className="border-t border-border/40">
                   <td className="py-0.5 pr-3 text-muted-foreground whitespace-nowrap">{when(m.timestamp)}</td>
-                  <td className="pr-3">{m.item_id}</td>
+                  <td className="pr-3 max-w-[20rem] truncate" title={m.item_id}>{shortItem(m.item_id)}</td>
                   <td className="pr-3 text-right" style={{ color: m.delta >= 0 ? green : red }}>{m.delta >= 0 ? '+' : ''}{n(m.delta)}</td>
                   <td className="pr-3 text-right text-muted-foreground">{m.balance_after === null ? '—' : n(m.balance_after)}</td>
                   <td className="pr-3">
@@ -604,7 +620,7 @@ function VaultItemLedger() {
                 <tbody>
                   {d.reconciliation!.unexplained.map(r => (
                     <tr key={r.item_id} className="border-t border-border/40">
-                      <td className="py-0.5 pr-3">{r.item_id}</td>
+                      <td className="py-0.5 pr-3 max-w-[20rem] truncate" title={r.item_id ?? ''}>{shortItem(r.item_id ?? '')}</td>
                       <td className="pr-3 text-right text-muted-foreground">{n(r.expected)}</td>
                       <td className="pr-3 text-right">{n(r.actual)}</td>
                       <td className="pr-3 text-right" style={{ color: r.difference >= 0 ? green : red }}>
@@ -775,6 +791,10 @@ interface RentRow {
   station_id: string; facility_type: string; facility_name: string | null
   level: number | null; rent_per_cycle: number; per_day: number
   faction_owned: number; build_cost: number | null; last_seen: string
+  // What it can run, and whether it is open to renters. `access` is null until the
+  // game states it — null means UNKNOWN and must never be rendered as "public".
+  makes: string[]; access: string | null
+  rental_fee_per_run: number | null; labor_per_run: number | null; net_per_run: number | null
 }
 interface RentPayload {
   cycles_per_day: number; cycle_minutes: number
@@ -828,7 +848,7 @@ interface RentableVenue {
 function BuildQueue() {
   const [data, setData] = useState<{
     station: string; treasury: number; queue: QueueEntry[]; built?: BuiltFacility[]
-    under_construction?: PendingBuild[]; rentable?: RentableVenue[]
+    under_construction?: PendingBuild[]; under_construction_station?: string | null; rentable?: RentableVenue[]
   } | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
@@ -876,8 +896,15 @@ function BuildQueue() {
           while agents worked on them. This section cannot go stale: it is the live answer. */}
       {!!data.under_construction?.length && (
         <div className="flex flex-col gap-2">
-          <div className="text-[11px] uppercase tracking-wide text-muted-foreground px-1">
-            Under construction — live from the station
+          {/* NEVER default this to the home station. `facility list` answers for whichever
+              station the queried agent is docked at, so a missing station id means we do not
+              know whose build this is — and saying "Crimson War Citadel" anyway is how an
+              8,829,000cr Singularity Charge Foundry at central_nexus read as ours. */}
+          <div className="text-[11px] uppercase tracking-wide px-1"
+            style={{ color: data.under_construction_station ? undefined : 'hsl(var(--smui-orange))' }}>
+            {data.under_construction_station
+              ? <span className="text-muted-foreground">Under construction — live at {label(data.under_construction_station)}</span>
+              : <>Under construction — STATION UNVERIFIED (may not be ours)</>}
           </div>
           {data.under_construction.map(b => {
             const gaps = (b.materials ?? []).filter(m => (m.quantity_missing ?? 0) > 0)
@@ -1101,19 +1128,41 @@ function FacilityRent() {
                   {(cyc * d.cycles_per_day).toLocaleString()}/day</b>
               </span>
             </div>
-            <div className="grid grid-cols-[1fr_auto_auto_auto] gap-3 px-3 py-1.5 text-[10px] uppercase tracking-[0.12em] text-muted-foreground border-b border-border/30">
+            <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-3 px-3 py-1.5 text-[10px] uppercase tracking-[0.12em] text-muted-foreground border-b border-border/30">
               <span>Facility</span><span className="text-right">Per cycle</span>
-              <span className="text-right">Per day</span><span className="text-right pr-1">Built for</span>
+              <span className="text-right">Per day</span><span className="text-right">Rental</span>
+              <span className="text-right pr-1">Built for</span>
             </div>
             {rows.map(f => (
-              <div key={f.facility_type} className="grid grid-cols-[1fr_auto_auto_auto] gap-3 px-3 py-1.5 border-t border-border/20 items-baseline">
-                <span className="text-[12px] truncate">
-                  {(f.facility_name || f.facility_type).replace(/_/g, ' ')}
+              <div key={f.facility_type} className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-3 px-3 py-1.5 border-t border-border/20 items-baseline">
+                <span className="text-[12px] min-w-0">
+                  <span className="truncate">{(f.facility_name || f.facility_type).replace(/_/g, ' ')}</span>
                   {f.level != null && <span className="text-[10px] text-muted-foreground ml-1.5">L{f.level}</span>}
                   {!!f.faction_owned && <span className="text-[9.5px] uppercase tracking-wider ml-1.5" style={{ color: 'hsl(var(--smui-yellow))' }}>faction</span>}
+                  <AccessTag access={f.access} />
+                  {/* The line that was missing: what this thing can actually make. */}
+                  {f.makes?.length > 0 && (
+                    <span className="block text-[10px] text-muted-foreground truncate">
+                      makes {f.makes.slice(0, 3).map(m => m.replace(/_/g, ' ')).join(', ')}
+                      {f.makes.length > 3 && ` +${f.makes.length - 3} more`}
+                    </span>
+                  )}
                 </span>
                 <span className="text-[12px] tabular-nums text-right">{f.rent_per_cycle.toLocaleString()}</span>
                 <span className="text-[12px] tabular-nums text-right" style={{ color: 'hsl(var(--smui-red))' }}>{f.per_day.toLocaleString()}</span>
+                <span className="text-[11px] tabular-nums text-right text-muted-foreground">
+                  {f.rental_fee_per_run == null ? '—' : (
+                    <>
+                      {f.rental_fee_per_run.toLocaleString()}<span className="opacity-60">/run</span>
+                      {f.net_per_run != null && (
+                        <span className="block text-[9.5px]"
+                          style={{ color: `hsl(var(--smui-${f.net_per_run > 0 ? 'green' : 'red'}))` }}>
+                          net {f.net_per_run.toLocaleString()}
+                        </span>
+                      )}
+                    </>
+                  )}
+                </span>
                 <span className="text-[11px] tabular-nums text-right pr-1 text-muted-foreground">
                   {f.build_cost ? f.build_cost.toLocaleString() : '—'}
                 </span>
@@ -1125,6 +1174,22 @@ function FacilityRent() {
 
       <div className="text-[11px] text-muted-foreground leading-relaxed">{d.note}</div>
     </div>
+  )
+}
+
+/** Access is three-valued, not two. The table's `public` column defaults to 1, so for
+ *  weeks every faction facility rendered as open to renters — including the Plasma
+ *  Injector Assembly, which was private. UNKNOWN is shown as UNKNOWN. */
+function AccessTag({ access }: { access: string | null }) {
+  const a = (access ?? '').toLowerCase()
+  const known = a === 'public' || a === 'private'
+  return (
+    <span className="text-[9.5px] uppercase tracking-wider ml-1.5"
+      style={{ color: `hsl(var(--smui-${a === 'public' ? 'green' : a === 'private' ? 'muted-foreground' : 'yellow'}))`,
+               opacity: known ? 1 : 0.75 }}
+      title={known ? `Access is ${a}` : 'The game has not stated this facility\u2019s access since we started recording it'}>
+      {known ? a : 'access unknown'}
+    </span>
   )
 }
 
