@@ -304,6 +304,9 @@ export function Places() {
           {!route.found ? <div className="text-[12px] text-muted-foreground">No known route — the map graph may not reach it.</div> : <>
             <div className="flex items-baseline gap-2 flex-wrap">
               <span className="text-[13px] font-semibold">{route.jumps} jumps</span>
+              {route.note && (
+                <span className="text-[10.5px] text-muted-foreground">({route.note})</span>
+              )}
               <span className="text-[11px]" style={{ color: route.lawless_hops ? 'hsl(var(--smui-orange))' : 'hsl(var(--smui-green))' }}>
                 {route.lawless_hops} lawless hop{route.lawless_hops === 1 ? '' : 's'}
               </span>

@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { describePlace, routeWithSafety, resolvePlace } from '../lib/places'
+import { describePlace, routeWithSafety, resolvePlace, systemFor } from '../lib/places'
 import { getGalaxyMap, setGalaxyMap } from '../lib/db'
 import { agentManager } from '../lib/agent-manager'
 import type { GalaxyMapData, GalaxySystem } from '../../shared/galaxy-types'
@@ -81,7 +81,16 @@ galaxy.get('/route', (c) => {
   const f = resolvePlace(from), t = resolvePlace(to)
   if (!f.exact && f.candidates.length) return c.json({ from, to, found: false, ambiguous: 'from', candidates: f.candidates })
   if (!t.exact && t.candidates.length) return c.json({ from, to, found: false, ambiguous: 'to', candidates: t.candidates })
-  return c.json({ ...routeWithSafety(f.exact ?? from, t.exact ?? to), resolved_from: f.exact ?? from, resolved_to: t.exact ?? to })
+  // A station is not a node in the system graph — route to the system it sits in, and say
+  // so, rather than answering "no known route" for a place we demonstrably reach.
+  const fromId = f.exact ?? from, toId = t.exact ?? to
+  const fromSys = systemFor(fromId), toSys = systemFor(toId)
+  return c.json({
+    ...routeWithSafety(fromSys, toSys),
+    resolved_from: fromId, resolved_to: toId,
+    from_system: fromSys, to_system: toSys,
+    ...(toSys !== toId ? { note: `${toId} is a station in ${toSys}` } : {}),
+  })
 })
 
 export default galaxy

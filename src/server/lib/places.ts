@@ -230,10 +230,40 @@ export function resolvePlace(text: string): { exact: string | null; candidates: 
   for (const id of [
     ...hit(`SELECT system_id AS id FROM fleet_intel_systems WHERE system_id <> '' AND system_id LIKE ? ORDER BY length(system_id) LIMIT 12`, like),
     ...hit(`SELECT DISTINCT station_id AS id FROM storage_inventory WHERE station_id IS NOT NULL AND station_id LIKE ? ORDER BY length(station_id) LIMIT 12`, like),
+    ...hit(`SELECT DISTINCT station_id AS id FROM faction_storage_inventory WHERE station_id IS NOT NULL AND station_id LIKE ? ORDER BY length(station_id) LIMIT 12`, like),
   ]) {
     if (!seen.has(id)) { seen.add(id); out.push(id) }
   }
   // One unambiguous match is not a question — treat it as what they meant.
   if (out.length === 1) return { exact: out[0], candidates: [] }
   return { exact: null, candidates: out.slice(0, 10) }
+}
+
+/**
+ * The route graph is SYSTEM-based; a station is not a node in it.
+ *
+ * `resolvePlace` happily resolves `gold_run_extraction_hub` — it is a real place and we
+ * hold stock there — and handing that straight to `routeWithSafety` returned
+ * `found: false`, which the UI renders as "No known route". The route exists: the station
+ * sits in `gold_run`, 24 jumps from Krynn. Asking for a route to a STATION is the normal
+ * way to ask, so the lookup has to do this conversion rather than the operator.
+ *
+ * Two sources, because neither alone covers it: the stations feed is authoritative but
+ * only knows stations it has seen, and the intel table's longest-prefix match covers the
+ * rest. The empty system_id row is excluded — `x LIKE '%'` matches it for every station
+ * and it has already reported three in-island stations as unreachable.
+ */
+export function systemFor(placeId: string): string {
+  const id = String(placeId || '').trim().toLowerCase()
+  if (!id) return id
+  const db = getDb()
+  const known = db.query(`SELECT 1 FROM fleet_intel_systems WHERE system_id = ? LIMIT 1`).get(id)
+  if (known) return id                                   // already a system
+  const feed = systemForBase(id)
+  if (feed) return feed
+  const row = db.query(
+    `SELECT system_id FROM fleet_intel_systems
+      WHERE system_id <> '' AND ? LIKE system_id || '%'
+      ORDER BY length(system_id) DESC LIMIT 1`).get(id) as { system_id?: string } | null
+  return row?.system_id ?? id
 }
