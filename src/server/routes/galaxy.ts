@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { describePlace, routeWithSafety } from '../lib/places'
+import { describePlace, routeWithSafety, resolvePlace } from '../lib/places'
 import { getGalaxyMap, setGalaxyMap } from '../lib/db'
 import { agentManager } from '../lib/agent-manager'
 import type { GalaxyMapData, GalaxySystem } from '../../shared/galaxy-types'
@@ -60,12 +60,28 @@ galaxy.post('/refresh', async (c) => {
  * worst intermediate hop is reported rather than averaged away, and a route that
  * crosses a hard-banned killzone also returns a killzone-free detour when one exists.
  */
-galaxy.get('/place/:id', (c) => c.json(describePlace(c.req.param('id'))))
+galaxy.get('/place/:id', (c) => {
+  const raw = c.req.param('id')
+  const r = resolvePlace(raw)
+  if (!r.exact && r.candidates.length) return c.json({ query: raw, found: false, candidates: r.candidates })
+  return c.json(describePlace(r.exact ?? raw))
+})
 
+/**
+ * Both lookups used to take the text as an EXACT id and answer `found: false` on a miss.
+ * "iron" from krynn returned nothing at all, while iron_reach, ironhearth, ironhollow,
+ * ironpeak and ironveil were all sitting in the graph — which reads as "there is no route
+ * from here", a far more alarming claim than "say which one you meant". Now an ambiguous
+ * query comes back with the candidates so the UI can offer them, and a query matching
+ * exactly one place is simply resolved.
+ */
 galaxy.get('/route', (c) => {
   const from = c.req.query('from'), to = c.req.query('to')
   if (!from || !to) return c.json({ error: 'from and to are required' }, 400)
-  return c.json(routeWithSafety(from, to))
+  const f = resolvePlace(from), t = resolvePlace(to)
+  if (!f.exact && f.candidates.length) return c.json({ from, to, found: false, ambiguous: 'from', candidates: f.candidates })
+  if (!t.exact && t.candidates.length) return c.json({ from, to, found: false, ambiguous: 'to', candidates: t.candidates })
+  return c.json({ ...routeWithSafety(f.exact ?? from, t.exact ?? to), resolved_from: f.exact ?? from, resolved_to: t.exact ?? to })
 })
 
 export default galaxy

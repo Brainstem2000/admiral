@@ -197,3 +197,43 @@ export function describePlace(id: string): PlaceReport {
     neighbours: system ? neighbours(system).map(riskOf) : [],
   }
 }
+
+/**
+ * Turn what someone TYPED into place ids that actually exist.
+ *
+ * The route and place lookups took their input as an exact id and said only
+ * `found: false` when it missed. Typing "iron" — with iron_reach, ironhearth,
+ * ironhollow, ironpeak and ironveil all in the graph — returned an empty result and
+ * no hint that five matches existed. That reads as "no route from here", which is a
+ * different and much more alarming statement than "say which one you meant".
+ *
+ * Exact id wins. Otherwise: a station whose id starts with the text, then any system
+ * or station containing it, shortest first so `iron_reach` outranks
+ * `iron_reach_mining_colony` for the query "iron". The empty system_id row is excluded
+ * — `x LIKE '%'` matches it for every query and it poisons any LIKE lookup here.
+ */
+export function resolvePlace(text: string): { exact: string | null; candidates: string[] } {
+  const q = String(text || '').trim().toLowerCase()
+  if (!q) return { exact: null, candidates: [] }
+  const db = getDb()
+  const hit = (sql: string, ...p: unknown[]) =>
+    (db.query(sql).all(...p) as Array<{ id: string }>).map(r => r.id).filter(Boolean)
+
+  const exactSys = hit(`SELECT system_id AS id FROM fleet_intel_systems WHERE system_id = ? LIMIT 1`, q)
+  if (exactSys.length) return { exact: exactSys[0], candidates: [] }
+  const exactSta = hit(`SELECT DISTINCT station_id AS id FROM faction_storage_inventory WHERE station_id = ? LIMIT 1`, q)
+  if (exactSta.length) return { exact: exactSta[0], candidates: [] }
+
+  const like = `%${q}%`
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const id of [
+    ...hit(`SELECT system_id AS id FROM fleet_intel_systems WHERE system_id <> '' AND system_id LIKE ? ORDER BY length(system_id) LIMIT 12`, like),
+    ...hit(`SELECT DISTINCT station_id AS id FROM storage_inventory WHERE station_id IS NOT NULL AND station_id LIKE ? ORDER BY length(station_id) LIMIT 12`, like),
+  ]) {
+    if (!seen.has(id)) { seen.add(id); out.push(id) }
+  }
+  // One unambiguous match is not a question — treat it as what they meant.
+  if (out.length === 1) return { exact: out[0], candidates: [] }
+  return { exact: null, candidates: out.slice(0, 10) }
+}

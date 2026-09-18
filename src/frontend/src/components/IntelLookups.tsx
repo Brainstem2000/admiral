@@ -237,24 +237,38 @@ export function Places() {
   const [route, setRoute] = useState<any>(null)
   const [place, setPlace] = useState<any>(null)
   const [err, setErr] = useState<string | null>(null)
+  // A partial name is the NORMAL way to type a place. "iron" matches five systems; the
+  // lookup used to answer found:false and show nothing, which reads as "no route exists".
+  const [choices, setChoices] = useState<{ field: 'from' | 'to'; ids: string[] } | null>(null)
 
-  const go = async () => {
-    setErr(null)
+  const go = async (overrideFrom?: string, overrideTo?: string) => {
+    setErr(null); setChoices(null)
+    const f = overrideFrom ?? from, t = overrideTo ?? to
     try {
-      if (to.trim()) {
-        const r = await fetch(`/api/galaxy/route?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)
-        setRoute(await r.json()); setPlace(null)
+      if (t.trim()) {
+        const r = await fetch(`/api/galaxy/route?from=${encodeURIComponent(f)}&to=${encodeURIComponent(t)}`)
+        const j = await r.json()
+        if (j.candidates?.length) { setChoices({ field: j.ambiguous === 'from' ? 'from' : 'to', ids: j.candidates }); setRoute(null); setPlace(null); return }
+        setRoute(j); setPlace(null)
       } else {
-        const r = await fetch(`/api/galaxy/place/${encodeURIComponent(from)}`)
-        setPlace(await r.json()); setRoute(null)
+        const r = await fetch(`/api/galaxy/place/${encodeURIComponent(f)}`)
+        const j = await r.json()
+        if (j.candidates?.length) { setChoices({ field: 'from', ids: j.candidates }); setPlace(null); setRoute(null); return }
+        setPlace(j); setRoute(null)
       }
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
+  }
+
+  const pick = (id: string) => {
+    if (choices?.field === 'from') { setFrom(id); void go(id, undefined) }
+    else { setTo(id); void go(undefined, id) }
   }
 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2 flex-wrap">
         <input value={from} onChange={e => setFrom(e.target.value)} placeholder="system or station"
+          onKeyDown={e => { if (e.key === 'Enter') void go() }}
           className="bg-transparent border border-border/60 px-2 py-1 text-[12px] font-mono outline-none focus:border-foreground/40 w-56" />
         <span className="text-[11px] text-muted-foreground">→</span>
         <input value={to} onChange={e => setTo(e.target.value)} placeholder="destination (blank = describe the place)"
@@ -267,6 +281,23 @@ export function Places() {
         <strong> with every hop graded</strong> — a run is only as safe as its worst jump, not its endpoint.
       </p>
       {err && <div className="text-[11.5px]" style={{ color: 'hsl(var(--smui-orange))' }}>{err}</div>}
+
+      {choices && (
+        <div className="border px-3 py-2.5" style={{ borderColor: 'hsl(var(--smui-yellow) / 0.5)' }}>
+          <div className="text-[11.5px] mb-1.5">
+            <span style={{ color: 'hsl(var(--smui-yellow))' }}>Several places match that.</span>
+            <span className="text-muted-foreground"> Which did you mean?</span>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {choices.ids.map(id => (
+              <button key={id} onClick={() => pick(id)}
+                className="text-[11px] font-mono px-2 py-0.5 border border-border/60 hover:border-foreground/40">
+                {id}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {route && (
         <div className="border px-3 py-2.5" style={{ borderColor: route.crosses_killzone ? 'hsl(var(--smui-red) / 0.6)' : 'hsl(var(--border))' }}>
