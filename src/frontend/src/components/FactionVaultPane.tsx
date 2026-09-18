@@ -15,7 +15,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useDisplayTimeZone, formatStamp, tzAbbrev, currentTimeZone } from '../lib/displayTime'
-import { Warehouse, RefreshCw, Search, LockOpen, Lock, Hammer, AlertTriangle, Receipt, Factory, Rocket, ArrowLeftRight } from 'lucide-react'
+import { Warehouse, RefreshCw, Search, LockOpen, Lock, Hammer, AlertTriangle, Receipt, Factory, Rocket, ArrowLeftRight, ClipboardList } from 'lucide-react'
 
 const DISPLAY = { fontFamily: "'Chakra Petch', system-ui, sans-serif" } as const
 
@@ -46,7 +46,7 @@ export function FactionVaultPane() {
   // Two jobs live here and they are read at different times: 'what do we hold against the
   // builds' and 'where did the money go'. One page made both harder to scan, so they are
   // separate views rather than one long scroll.
-  const [tab, setTab] = useState<'inventory' | 'vault' | 'ledger' | 'rent' | 'build' | 'ship'>('inventory')
+  const [tab, setTab] = useState<'inventory' | 'needed' | 'vault' | 'ledger' | 'rent' | 'build' | 'ship'>('inventory')
   const tzTop = useDisplayTimeZone()
 
   const load = async (fresh = false) => {
@@ -116,6 +116,7 @@ export function FactionVaultPane() {
           <span className="text-[11px] text-muted-foreground">
             {tab === 'inventory'
               ? 'shared stock — anyone docked there can draw it'
+              : tab === 'needed' ? 'every open build, every material, and what we are still short'
               : tab === 'vault' ? 'every item in and out of the vault — what, how many, and who moved it'
               : tab === 'ledger' ? 'every credit in and out of the faction treasury, with a reason'
               : tab === 'rent' ? 'what the fleet pays to keep its facilities standing'
@@ -135,6 +136,9 @@ export function FactionVaultPane() {
         <div className="flex items-center gap-1.5">
           <TabButton active={tab === 'inventory'} onClick={() => setTab('inventory')} icon={<Warehouse size={12} />}>
             Inventory
+          </TabButton>
+          <TabButton active={tab === 'needed'} onClick={() => setTab('needed')} icon={<ClipboardList size={12} />}>
+            Needed for build
           </TabButton>
           <TabButton active={tab === 'vault'} onClick={() => setTab('vault')} icon={<ArrowLeftRight size={12} />}>
             Item ledger
@@ -159,6 +163,8 @@ export function FactionVaultPane() {
 
 
         {tab === 'rent' && <FacilityRent />}
+
+        {tab === 'needed' && <NeededForBuild />}
 
         {tab === 'vault' && <VaultItemLedger />}
 
@@ -339,6 +345,127 @@ interface VPayload {
  *    presented as all-time. A partial total passed off as complete is how the treasury
  *    attribution went wrong before.
  */
+interface NeedRow {
+  item_id: string; needed: number; wanted_by: string[]
+  vault: number; other_vaults: number; lockers: number
+  short: number; short_after_retrieval: number
+  status: 'covered' | 'retrievable' | 'must_source'
+}
+interface NeedPayload {
+  station: string
+  builds: Array<{ kind: string; name: string; status: string; short_lines: number }>
+  items: NeedRow[]
+  totals: { items: number; covered: number; retrievable: number; must_source: number; units_short: number; units_short_after_retrieval: number }
+}
+
+/**
+ * Everything still needed, across every open build, in one place.
+ *
+ * The data lived in three views that never spoke: the facility queue knew its own gaps, the
+ * ship build knew its lines, and the vault knew what we hold. Answering "what is this fleet
+ * actually missing?" meant reading all three and doing the arithmetic by hand, which is how
+ * a whole night went into hauling 200,000 units of ore while the real shortfall was ~600.
+ *
+ * Three statuses, and the distinction is the point:
+ *   covered      the vault at this station already has it
+ *   retrievable  we own it, but it is in another vault or a personal locker — a trip, not a purchase
+ *   must_source  nobody in the fleet has it; it has to be crafted, mined or bought
+ */
+function NeededForBuild() {
+  const [d, setD] = useState<NeedPayload | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [onlyShort, setOnlyShort] = useState(true)
+
+  const load = useCallback(() => {
+    void (async () => {
+      try {
+        const r = await fetch('/api/faction/needed')
+        const j = await r.json()
+        if (j.error) setErr(String(j.error)); else { setD(j); setErr(null) }
+      } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
+    })()
+  }, [])
+  useEffect(load, [load])
+
+  if (err) return <div className="dossier-card p-3 text-[11.5px]" style={{ color: 'hsl(var(--smui-red))' }}>Needs view unavailable: {err}</div>
+  if (!d) return <div className="dossier-card p-3 text-[11.5px] text-muted-foreground">Working out what is still needed…</div>
+
+  const n = (v: number) => v.toLocaleString()
+  const rows = onlyShort ? d.items.filter(i => i.short > 0) : d.items
+  const tone = (s: NeedRow['status']) =>
+    s === 'covered' ? 'hsl(var(--smui-green))' : s === 'retrievable' ? 'hsl(var(--smui-yellow))' : 'hsl(var(--smui-red))'
+  const label = (s: NeedRow['status']) =>
+    s === 'covered' ? 'covered' : s === 'retrievable' ? 'we own it — go get it' : 'must craft, mine or buy'
+
+  return (
+    <div className="dossier-card p-3 space-y-2">
+      <div className="flex items-baseline gap-2 flex-wrap">
+        <ClipboardList size={13} style={{ color: 'hsl(var(--smui-yellow))' }} />
+        <h2 className="text-[12px] font-bold uppercase tracking-[0.12em] m-0" style={DISPLAY}>Needed for build</h2>
+        <span className="text-[10.5px] text-muted-foreground">every open build, every material</span>
+        <button onClick={load} className="ml-auto text-[10.5px] text-muted-foreground hover:text-foreground flex items-center gap-1">
+          <RefreshCw size={10} /> refresh
+        </button>
+      </div>
+
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] tabular-nums">
+        <span><span className="text-muted-foreground">short at the vault </span>
+          <b style={{ color: d.totals.units_short ? 'hsl(var(--smui-red))' : 'hsl(var(--smui-green))' }}>{n(d.totals.units_short)}</b></span>
+        <span><span className="text-muted-foreground">after retrieving what we own </span>
+          <b style={{ color: 'hsl(var(--smui-yellow))' }}>{n(d.totals.units_short_after_retrieval)}</b></span>
+        <span className="text-muted-foreground">
+          {d.totals.covered} covered · {d.totals.retrievable} retrievable · {d.totals.must_source} to source
+        </span>
+      </div>
+
+      <div className="text-[10.5px] text-muted-foreground">
+        Open builds: {d.builds.map(b => b.name).join(' · ') || 'none'}
+      </div>
+
+      <label className="flex items-center gap-1.5 text-[10.5px] text-muted-foreground cursor-pointer w-fit">
+        <input type="checkbox" checked={onlyShort} onChange={e => setOnlyShort(e.target.checked)} className="accent-current" />
+        only what we are short of
+      </label>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11px] tabular-nums border-collapse">
+          <thead>
+            <tr className="text-muted-foreground text-left">
+              <th className="font-normal py-1 pr-3">item</th>
+              <th className="font-normal pr-3 text-right">needed</th>
+              <th className="font-normal pr-3 text-right">vault</th>
+              <th className="font-normal pr-3 text-right" title="our other faction vaults">other vaults</th>
+              <th className="font-normal pr-3 text-right" title="personal lockers across the fleet">lockers</th>
+              <th className="font-normal pr-3 text-right">short</th>
+              <th className="font-normal">for</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(i => (
+              <tr key={i.item_id} className="border-t border-border/40">
+                <td className="py-0.5 pr-3">{i.item_id}</td>
+                <td className="pr-3 text-right">{n(i.needed)}</td>
+                <td className="pr-3 text-right text-muted-foreground">{n(i.vault)}</td>
+                <td className="pr-3 text-right text-muted-foreground">{i.other_vaults ? n(i.other_vaults) : '—'}</td>
+                <td className="pr-3 text-right text-muted-foreground">{i.lockers ? n(i.lockers) : '—'}</td>
+                <td className="pr-3 text-right" style={{ color: tone(i.status) }} title={label(i.status)}>
+                  {i.short ? n(i.short) : '✓'}
+                </td>
+                <td className="text-muted-foreground text-[10.5px]">{i.wanted_by.join(', ')}</td>
+              </tr>
+            ))}
+            {!rows.length && (
+              <tr><td colSpan={7} className="py-2 text-[11.5px]" style={{ color: 'hsl(var(--smui-green))' }}>
+                Nothing outstanding — every material for every open build is in the vault.
+              </td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 function VaultItemLedger() {
   const [d, setD] = useState<VPayload | null>(null)
   const [err, setErr] = useState<string | null>(null)

@@ -346,6 +346,114 @@ faction.get('/vault-ledger', (c) => {
   })
 })
 
+/**
+ * EVERYTHING WE STILL NEED, in one list.
+ *
+ * The data existed in three places and nothing joined them: `/build-queue` knows what each
+ * facility is short of, `/ship-build` knows the Devastator's lines, and the vault knows what
+ * we hold. So the question an operator actually asks — "what is this fleet still missing,
+ * across every open build?" — had no answer without reading three pages and doing the
+ * arithmetic by hand. Brian asked for exactly that view.
+ *
+ * Merges facility builds and the ship build, aggregates by ITEM, and reports for each:
+ * how much every open build wants in total, what we hold and where, and the net shortfall.
+ *
+ * Two things it deliberately does NOT do:
+ *  - It does not net a shortfall against stock at another station without saying so. Vault
+ *    material elsewhere is ours and withdrawable, but it is a retrieval run away, and
+ *    collapsing that distinction is how 3,346 steel_plate stayed invisible across four
+ *    vaults while a facility sat 102 short.
+ *  - It does not resolve a shortfall into its craft inputs. That is a different question
+ *    with a different answer per recipe, and guessing at it here would produce a number
+ *    that looks authoritative and is not.
+ */
+faction.get('/needed', async (c) => {
+  const station = c.req.query('station') || 'crimson_war_citadel'
+
+  interface Want { item_id: string; needed: number; wanted_by: string[] }
+  const wants = new Map<string, Want>()
+  const add = (itemId: string, qty: number, by: string) => {
+    if (!itemId || !(qty > 0)) return
+    const w = wants.get(itemId) ?? { item_id: itemId, needed: 0, wanted_by: [] }
+    w.needed += qty
+    if (!w.wanted_by.includes(by)) w.wanted_by.push(by)
+    wants.set(itemId, w)
+  }
+
+  // Populate the built-facility cache BEFORE reading it. It is filled lazily by whichever
+  // route asks first, so a fresh server answering /needed saw an empty cache and counted
+  // every facility as still-to-build — including the four we already own, which inflated
+  // steel_plate demand by thousands. Never read a lazily-filled cache without filling it.
+  await refreshBuilt()
+
+  const builds: Array<{ kind: string; name: string; status: string; short_lines: number }> = []
+
+  // 1) Facilities still to build, from the runtime queue.
+  for (const id of facilityQueue()) {
+    const f = getFacility(id)
+    if (!f) continue
+    const mats = (f.build_materials ?? []) as Array<{ item_id: string; quantity: number }>
+    if (!mats.length) continue
+    // Already standing? Skip it. `builtCache` is the same 60s-cached `facility
+    // faction_owned` read the build queue uses, so the two pages cannot disagree
+    // about what exists — the bug that made a built facility keep asking for
+    // materials until someone noticed.
+    const owned = new Set((builtCache?.rows ?? []).map(r => String((r as { type?: string }).type ?? '')))
+    if (owned.has(id)) continue
+    for (const m of mats) add(String(m.item_id), Number(m.quantity) || 0, f.name ?? id)
+    builds.push({ kind: 'facility', name: f.name ?? id, status: 'planned', short_lines: mats.length })
+  }
+
+  // 2) The ship build — its bill is the BARE HULL, not the default loadout (plan §43).
+  const ship = getShip('crimson_devastator')
+  if (ship) {
+    const bill = (ship.build_materials ?? []) as Array<{ item_id: string; quantity: number }>
+    for (const m of bill) add(String(m.item_id), Number(m.quantity) || 0, ship.name ?? 'Crimson Devastator')
+    builds.push({ kind: 'ship', name: ship.name ?? 'Crimson Devastator', status: 'staging', short_lines: bill.length })
+  }
+
+  // What we hold, by location class.
+  const vault = new Map<string, number>()
+  for (const r of getFactionStorage(station)) vault.set(r.item_id, (vault.get(r.item_id) ?? 0) + Number(r.quantity))
+  const otherVault = new Map<string, number>()
+  for (const r of getFactionStorage()) {
+    if (r.station_id === station) continue
+    otherVault.set(r.item_id, (otherVault.get(r.item_id) ?? 0) + Number(r.quantity))
+  }
+  const lockers = new Map<string, number>()
+  for (const r of getDb().query(
+    `SELECT item_id, SUM(quantity) q FROM storage_inventory
+      WHERE quantity > 0 AND station_id IS NOT NULL GROUP BY item_id`).all() as Array<{ item_id: string; q: number }>) {
+    lockers.set(r.item_id, Number(r.q) || 0)
+  }
+
+  const items = [...wants.values()].map(w => {
+    const v = vault.get(w.item_id) ?? 0
+    const ov = otherVault.get(w.item_id) ?? 0
+    const lk = lockers.get(w.item_id) ?? 0
+    const short = Math.max(0, w.needed - v)
+    return {
+      ...w,
+      vault: v, other_vaults: ov, lockers: lk,
+      short,                                   // against THIS station's vault only
+      short_after_retrieval: Math.max(0, w.needed - v - ov - lk),
+      status: short === 0 ? 'covered' : (short <= ov + lk ? 'retrievable' : 'must_source'),
+    }
+  }).sort((a, b) => (b.short - a.short) || b.needed - a.needed)
+
+  return c.json({
+    station, builds, items,
+    totals: {
+      items: items.length,
+      covered: items.filter(i => i.status === 'covered').length,
+      retrievable: items.filter(i => i.status === 'retrievable').length,
+      must_source: items.filter(i => i.status === 'must_source').length,
+      units_short: items.reduce((n, i) => n + i.short, 0),
+      units_short_after_retrieval: items.reduce((n, i) => n + i.short_after_retrieval, 0),
+    },
+  })
+})
+
 /** Treasury reconciliation: last reported balance vs booked movements. */
 faction.get('/treasury', (c) => c.json(getFactionTreasurySummary()))
 
