@@ -42,10 +42,23 @@ export async function resolveModel(modelStr: string): Promise<{ model: Model<any
     const apiKey = await getClaudeMaxToken()
     const anthropicModels = getModels('anthropic' as KnownProvider)
 
-    // Try exact match in Anthropic registry
+    // Try exact match in Anthropic registry.
+    //
+    // `getModel` does NOT reliably miss on an unknown id — it resolves fuzzily and hands
+    // back the nearest thing it knows. On 2026-09-17 that turned every `claude-sonnet-5`
+    // planner request into `claude-sonnet-4-0` ("Claude Sonnet 4 (latest)"), an id the API
+    // has retired, so all ten hosted agents 404'd on every planning call while their haiku
+    // executors — a model the registry really does have — kept working. It presented as a
+    // provider outage and cost three wrong diagnoses before the error body was surfaced.
+    //
+    // So the returned model is only accepted when it IS the model that was asked for.
+    // Anything else is treated as a miss and falls through to the clone below, which keeps
+    // the requested id intact. Honouring the profile matters: silently substituting a
+    // different model is a config change nobody authorised.
     try {
       const model = getModel('anthropic' as KnownProvider, rawModelId as never)
-      if (model) return { model, apiKey }
+      const got = (model as { id?: string } | undefined)?.id
+      if (model && got === rawModelId) return { model, apiKey }
     } catch {
       // Fall through
     }
