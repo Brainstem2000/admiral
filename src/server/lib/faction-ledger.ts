@@ -1,6 +1,6 @@
 import {
   insertFactionLedger, recordFactionStorageSnapshot, recordFactionTreasurySnapshot, applyFactionStorageDelta,
-  getProfileLastState, getMostRecentStation, getProfile, getKnownFactionId,
+  getProfileLastState, getMostRecentStation, getProfile, getKnownFactionId, listProfiles,
 } from './db'
 import type { FactionLedgerRow } from './db'
 
@@ -15,6 +15,80 @@ function rememberFaction(profileId: string, r: R): void {
   const id = str(r.faction_id) || null
   const tag = str(r.faction_tag) || null
   if (id || tag) factionByProfile.set(profileId, { id: id ?? factionByProfile.get(profileId)?.id ?? null, tag: tag ?? factionByProfile.get(profileId)?.tag ?? null })
+}
+
+/**
+ * Ingest the faction's own AUDIT LOG, which rides along on every `view_faction_storage`
+ * reply as `recent_activity` and which we threw away for the whole campaign.
+ *
+ * This is the only record of what faction members OUTSIDE the harness do. Admiral's
+ * ledger is otherwise built from our own agents' command replies, so UMan — Quartermaster,
+ * hand-played, not a profile here — deposited into the vault and left no row anywhere.
+ * Brian asked three times why his deposits were missing. They were missing because nobody
+ * read this array, not because the game withholds it: the faction docs say plainly that
+ * "every deposit and withdrawal is written to an audit log the whole faction can review",
+ * and `view_faction_storage` is where it is served.
+ *
+ * Two details that matter:
+ *  - Entries are keyed by PLAYER NAME ("UMan"), not by profile id, because most of the
+ *    faction is not us. The name is kept verbatim in raw_ref and mapped to a profile id
+ *    only when it actually matches one of ours.
+ *  - Quantities come with DISPLAY names ("Lead Ore"). The same reply carries the item
+ *    list with both id and name, so the map is built from the payload itself and only
+ *    falls back to slugifying when an item has since left the vault entirely.
+ */
+function ingestFactionAuditLog(
+  entries: R[], station: string, fac: { id: string | null; tag: string | null }, items: R[] | null,
+): number {
+  const nameToId = new Map<string, string>()
+  for (const i of items ?? []) {
+    const id = str(i.item_id), nm = str(i.name) || str(i.item_name)
+    if (id && nm) nameToId.set(nm.toLowerCase(), id)
+  }
+  const byName = new Map<string, string>()
+  for (const p of listProfiles()) {
+    // Game handles drop spaces and punctuation ("JunoFreight" for "Juno Freight - Trader").
+    const base = p.name.split(' -')[0].trim()
+    byName.set(base.toLowerCase(), p.id)
+    byName.set(base.replace(/[^A-Za-z0-9]/g, '').toLowerCase(), p.id)
+  }
+
+  let rows = 0
+  for (const e of entries) {
+    const player = str(e.player)
+    const action = str(e.action)
+    const qty = num(e.quantity)
+    const itemName = str(e.item)
+    const ts = str(e.timestamp)
+    if (!player || !qty || !itemName || !ts) continue
+    const deposit = /deposit/i.test(action)
+    const withdraw = /withdraw/i.test(action)
+    if (!deposit && !withdraw) continue          // credits and admin entries are not stock
+
+    const itemId = nameToId.get(itemName.toLowerCase())
+      ?? itemName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')
+    const profileId = byName.get(player.toLowerCase())
+      ?? byName.get(player.replace(/[^A-Za-z0-9]/g, '').toLowerCase())
+      ?? null
+
+    const ok = insertFactionLedger({
+      timestamp: ts.replace('T', ' ').replace(/\..*$/, ''),
+      faction_id: fac.id, faction_tag: fac.tag,
+      kind: deposit ? 'lockbox_deposit' : 'lockbox_withdraw',
+      profile_id: profileId,
+      station_id: station,
+      item_id: itemId,
+      quantity: Math.abs(qty),
+      credits_signed: null,
+      source_command: 'audit_log',
+      raw_ref: JSON.stringify({ source: 'faction_audit_log', player, action, item: itemName, quantity: qty }),
+      tick: null,
+      // Nanosecond stamps are unique per entry, so replays of the same view book once.
+      dedupe_key: `audit:${player}:${action}:${itemId}:${qty}:${ts}`,
+    })
+    if (ok) rows += 1
+  }
+  return rows
 }
 
 function factionFor(profileId: string, r: R): { id: string | null; tag: string | null } {
@@ -91,6 +165,11 @@ export function captureFactionFromCommand(command: string, args: R | undefined, 
       }
       const credits = num(r.credits)
       if (credits !== null) recordFactionTreasurySnapshot(fac.id, credits, profileName, source, opts.at)
+      // The faction's own audit log rides along here. It is the ONLY record of members
+      // outside the harness, so it is booked even though this branch is otherwise a
+      // read — see ingestFactionAuditLog.
+      const activity = Array.isArray(r.recent_activity) ? (r.recent_activity as R[]) : null
+      if (station && activity && fac.id) return ingestFactionAuditLog(activity, station, fac, items)
       return 0
     }
 

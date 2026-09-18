@@ -4589,6 +4589,8 @@ export interface VaultMovement {
   source_command: string | null
   /** Vault total AFTER this movement, when the game reported one. Null when it did not. */
   balance_after: number | null
+  /** True when this row came from the faction audit log for a player Admiral does not drive. */
+  via_audit_log?: boolean
 }
 
 /**
@@ -4641,13 +4643,25 @@ export function getVaultMovements(opts: {
       const t = raw.storage_total ?? raw.dest_total
       if (typeof t === 'number' && Number.isFinite(t)) balanceAfter = t
     } catch { /* raw_ref is a convenience payload, not a contract — never fail a read on it */ }
+    // A row booked from the faction AUDIT LOG carries the player's name rather than one of
+    // our profile ids, because most of the faction is not us — UMan is Quartermaster and
+    // hand-played. Prefer our profile name when the row belongs to an agent we drive, and
+    // fall back to the audit log's own name so members outside the harness appear BY NAME
+    // instead of as "unknown". That is the whole point of reading the audit log.
+    let auditPlayer: string | null = null
+    try {
+      const raw = JSON.parse(String(r.raw_ref || '{}')) as Record<string, unknown>
+      if (raw.source === 'faction_audit_log' && typeof raw.player === 'string') auditPlayer = raw.player
+    } catch { /* raw_ref is a convenience payload, never a contract */ }
+
     return {
       id: Number(r.id),
       timestamp: String(r.timestamp),
       station_id: String(r.station_id ?? ''),
       item_id: String(r.item_id),
       delta: out ? -magnitude : magnitude,
-      agent: String(r.agent_name ?? r.profile_id ?? 'unknown'),
+      agent: String(r.agent_name ?? auditPlayer ?? r.profile_id ?? 'unknown'),
+      via_audit_log: auditPlayer !== null && !r.agent_name,
       profile_id: r.profile_id ? String(r.profile_id) : null,
       kind: String(r.kind ?? ''),
       source_command: r.source_command ? String(r.source_command) : null,

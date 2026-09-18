@@ -300,7 +300,7 @@ const ct = (iso: string) => formatStamp(iso, currentTimeZone(), { hour12: false 
 interface VMove {
   id: number; timestamp: string; station_id: string; item_id: string; delta: number
   agent: string; profile_id: string | null; kind: string; source_command: string | null
-  balance_after: number | null
+  balance_after: number | null; via_audit_log?: boolean
 }
 interface VRoll { item_id?: string; agent?: string; in: number; out: number; net: number; moves: number; last: string }
 interface VRecon {
@@ -435,7 +435,13 @@ function VaultItemLedger() {
                   <td className="pr-3">{m.item_id}</td>
                   <td className="pr-3 text-right" style={{ color: m.delta >= 0 ? green : red }}>{m.delta >= 0 ? '+' : ''}{n(m.delta)}</td>
                   <td className="pr-3 text-right text-muted-foreground">{m.balance_after === null ? '—' : n(m.balance_after)}</td>
-                  <td className="pr-3">{m.agent}</td>
+                  <td className="pr-3">
+                    {m.agent}
+                    {m.via_audit_log && (
+                      <span className="ml-1 text-[9.5px] px-1 rounded" title="Not an Admiral-driven agent — booked from the faction audit log"
+                        style={{ color: 'hsl(var(--smui-yellow))', border: '1px solid hsl(var(--smui-yellow) / 0.4)' }}>human</span>
+                    )}
+                  </td>
                   <td className="pr-3 text-muted-foreground">{m.station_id}</td>
                   <td className="text-muted-foreground">{m.source_command ?? m.kind}</td>
                 </tr>
@@ -551,14 +557,26 @@ function TreasuryStatement() {
         <Receipt size={13} style={{ color: 'hsl(var(--smui-yellow))' }} />
         <h2 className="text-[12px] font-bold uppercase tracking-[0.12em] m-0" style={DISPLAY}>Treasury statement</h2>
         <span className="text-[10.5px] text-muted-foreground">every credit in and out, with a reason</span>
-        {t.closing && (
-          <span className="ml-auto text-[11px] tabular-nums">
-            <span className="text-muted-foreground">balance </span>
-            <b style={{ color: 'hsl(var(--smui-green))' }}>{t.closing.credits.toLocaleString()}</b>
-            <span className="text-muted-foreground"> as of {ct(t.closing.at)} CT</span>
-          </span>
-        )}
       </div>
+
+      {/* The balance is the single number anyone opens this page for, and it used to be an
+          11px span wedged into the right of the header — smaller than the column labels
+          under it. It gets its own line. */}
+      {t.closing && (
+        <div className="flex items-end gap-3 flex-wrap border-y py-2" style={{ borderColor: 'hsl(var(--smui-yellow) / 0.25)' }}>
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground" style={DISPLAY}>Treasury balance</div>
+            <div className="text-[30px] leading-none font-bold tabular-nums" style={{ ...DISPLAY, color: 'hsl(var(--smui-green))' }}>
+              {t.closing.credits.toLocaleString()}
+              <span className="text-[13px] font-normal text-muted-foreground ml-1.5">cr</span>
+            </div>
+          </div>
+          <div className="text-[10.5px] text-muted-foreground pb-0.5">
+            as of {ct(t.closing.at)} {tzAbbrev(currentTimeZone())}
+            {t.closing.reported_by && <> · reported by {t.closing.reported_by}</>}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         <Stat label="Paid in" value={t.totals.in.toLocaleString()} accent="var(--smui-green)" />
