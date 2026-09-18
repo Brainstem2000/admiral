@@ -1372,6 +1372,45 @@ async function summarizeViaLLM(
 /** Exported for tests: the abort/timeout handling here is the difference
  *  between a stalled local model retrying and the same model being silently
  *  scored as an idle agent. */
+/**
+ * Everything about a failed call that is NOT in `error.message`.
+ *
+ * The provider library reports most failures as the single string
+ * `"An unknown error occurred"`, and we logged only that — so five agents failing at
+ * once on 2026-09-17 gave no way to tell a 90-second timeout (long planner call, dies
+ * slowly) from an outright API rejection (CyberSpock, dying 2 seconds after his loop
+ * started). Both read identically in the log, and they need opposite fixes. Two wrong
+ * diagnoses came out of that: corrupted context, then a provider outage.
+ *
+ * So pull the fields the library hangs off the Error but never puts in the message:
+ * HTTP status, error type/name, the response body when there is one, and the `cause`
+ * chain. Everything is defensive — a diagnostic that throws while reporting a failure
+ * turns one fault into two — and the body is clipped, because an API error body can
+ * carry the whole request back.
+ */
+function errorDetail(err: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  if (!err || typeof err !== 'object') return out
+  const e = err as Record<string, unknown>
+  const pick = (k: string) => { const v = e[k]; if (v !== undefined && v !== null && v !== '') out[k] = v }
+  for (const k of ['name', 'status', 'statusCode', 'code', 'type']) pick(k)
+  // A response body is the single most useful field and the one most likely to be huge.
+  for (const k of ['body', 'error', 'response', 'data']) {
+    const v = e[k]
+    if (v === undefined || v === null) continue
+    try { out[`detail_${k}`] = JSON.stringify(v).slice(0, 600) } catch { out[`detail_${k}`] = String(v).slice(0, 600) }
+  }
+  // `cause` is where fetch/undici put the real network fault (ECONNRESET, socket hang up).
+  let cause = e.cause, depth = 0
+  while (cause && depth < 3) {
+    const c = cause as Record<string, unknown>
+    out[`cause_${depth}`] = `${c.name ?? ''}${c.code ? ' ' + String(c.code) : ''}: ${String(c.message ?? c).slice(0, 200)}`
+    cause = c.cause; depth += 1
+  }
+  if (typeof e.stack === 'string') out.stack_head = e.stack.split('\n').slice(0, 3).join(' | ').slice(0, 400)
+  return out
+}
+
 export async function completeWithRetry(
   model: Model<any>,
   context: Context,
@@ -1561,6 +1600,7 @@ export async function completeWithRetry(
         attempt: attempt + 1,
         maxRetries: MAX_RETRIES,
         error: lastError.message,
+        ...errorDetail(lastError),
       }, null, 2))
       await sleep(delay)
     }
