@@ -1,8 +1,12 @@
 import { Hono } from 'hono'
 import { FleetIntelCollector } from '../lib/fleet-intel'
-import { findDeposits, getPoiDeposits, depositStats, realisableValue, getFleetItemTotals, listObligations, listActiveObligations, getIntelDashboard } from '../lib/db'
+import { findDeposits, getPoiDeposits, depositStats, searchDepositItems, realisableValue, getFleetItemTotals, listObligations, listActiveObligations, getIntelDashboard } from '../lib/db'
+import { routeWithSafety, systemFor, resolvePlace } from '../lib/places'
 
 const fleetIntel = new Hono()
+
+/** Where the fleet asks from unless told otherwise: the home system, Krynn. */
+const HOME_SYSTEM = 'krynn'
 
 // GET /api/fleet-intel/dashboard — central intelligence dashboard: coverage,
 // freshness, cross-domain discovery feed, per-agent contribution leaderboard.
@@ -75,8 +79,49 @@ fleetIntel.get('/', (c) => {
 fleetIntel.get('/deposits', (c) => {
   const item = c.req.query('item')
   const poi = c.req.query('poi')
+  const q = c.req.query('q')
   const limit = Math.min(Number(c.req.query('limit') ?? 25), 200)
-  if (item) return c.json({ item_id: item, deposits: findDeposits(item, limit) })
+
+  // The picker: which ores have we ever actually seen in the ground.
+  if (q != null && !item && !poi) return c.json({ q, items: searchDepositItems(q, 80) })
+
+  if (item) {
+    // "How far is that from me" is asked in whatever way is to hand — a system, a
+    // station, or half a name. A station is not a node in the route graph, so it is
+    // resolved and then converted to the system it sits in; an ambiguous fragment
+    // comes back as a question rather than a silent guess at the wrong end of the map.
+    let origin = HOME_SYSTEM
+    let ambiguous: string[] = []
+    const asked = (c.req.query('from') || '').trim()
+    if (asked) {
+      const r = resolvePlace(asked)
+      if (r.exact) origin = systemFor(r.exact)
+      else if (r.candidates.length) ambiguous = r.candidates
+      else origin = asked.toLowerCase().replace(/\s+/g, '_')
+    }
+    if (ambiguous.length) return c.json({ item_id: item, from: asked, ambiguous })
+
+    const rows = findDeposits(item, limit, c.req.query('empty') === '1')
+    // A belt is only as useful as the trip to it, so every row carries the route
+    // from where the asking is done. Graded per SYSTEM and memoised: a dozen
+    // deposits routinely share three systems, and BFS over the whole known map
+    // per row turned a lookup into a stall.
+    const seen = new Map<string, ReturnType<typeof routeWithSafety>>()
+    const deposits = rows.map(r => {
+      const sys = String(r.system_id || '') || systemFor(String(r.poi_id || ''))
+      let route = seen.get(sys)
+      if (!route && sys) { route = routeWithSafety(origin, sys); seen.set(sys, route) }
+      return {
+        ...r,
+        jumps: route?.found ? route.jumps : null,
+        worst_hop: route?.worst?.risk ?? null,
+        lawless_hops: route?.lawless_hops ?? null,
+        crosses_killzone: route?.crosses_killzone ?? false,
+      }
+    })
+    return c.json({ item_id: item, from: origin, deposits })
+  }
+
   if (poi) return c.json({ poi_id: poi, deposits: getPoiDeposits(poi) })
   return c.json(depositStats())
 })

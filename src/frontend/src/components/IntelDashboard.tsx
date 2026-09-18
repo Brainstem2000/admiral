@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Globe, Radar, TrendingUp, Users, Gem, Factory, Crosshair, AlertTriangle, Skull, RefreshCw, Package, Map as MapIcon, Search } from 'lucide-react'
-import { FindAnything, Packages, Places } from './IntelLookups'
+import { Globe, Radar, TrendingUp, Users, Gem, Factory, Crosshair, AlertTriangle, Skull, RefreshCw, Package, Map as MapIcon, Search, Pickaxe } from 'lucide-react'
+import { FindAnything, Packages, Places, WhereToMine } from './IntelLookups'
 
 interface FeedRow { kind: string; name: string; detail: string; by: string; at: string }
 interface LeaderRow { by: string; total: number; last_24h: number; systems: number; market: number; players: number; deposits: number; facilities: number }
@@ -220,7 +220,7 @@ function IntelFeed() {
 }
 
 
-type IntelTab = 'feed' | 'find' | 'packages' | 'places'
+type IntelTab = 'feed' | 'find' | 'mine' | 'packages' | 'places'
 
 function IntelTabButton({ active, onClick, icon, children }:
   { active: boolean; onClick: () => void; icon: React.ReactNode; children: React.ReactNode }) {
@@ -254,6 +254,9 @@ export function IntelDashboard() {
         <IntelTabButton active={tab === 'find'} onClick={() => setTab('find')} icon={<Search size={12} />}>
           Find anything
         </IntelTabButton>
+        <IntelTabButton active={tab === 'mine'} onClick={() => setTab('mine')} icon={<Pickaxe size={12} />}>
+          Where to mine
+        </IntelTabButton>
         <IntelTabButton active={tab === 'packages'} onClick={() => setTab('packages')} icon={<Package size={12} />}>
           Packages
         </IntelTabButton>
@@ -265,6 +268,7 @@ export function IntelDashboard() {
       {tab === 'feed' ? <IntelFeed /> : (
         <div className="p-4">
           {tab === 'find' && <FindAnything />}
+          {tab === 'mine' && <WhereToMine />}
           {tab === 'packages' && <Packages />}
           {tab === 'places' && <Places />}
         </div>
