@@ -13,6 +13,8 @@ interface Row {
   item_name: string
   quantity: number
   location: string   // 'Ship cargo' or station id
+  /** Set only on a GROUPED row: where the total is actually split. */
+  at?: Array<[string, number]>
   inCargo: boolean
   updated_at: string
   bid?: Bid
@@ -72,6 +74,13 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
   const [loading, setLoading] = useState(false)
   const [filter, setFilter] = useState('')
   const [locFilter, setLocFilter] = useState<'all' | 'cargo' | 'storage'>('all')
+  // Grouped by default. An agent holding one ore at four stations produced four identical-
+  // looking rows, which reads as duplicated data — Brian asked why carbon_ore was listed
+  // repeatedly for Bob Comet. It was not duplicated; it was four locations. Grouping also
+  // FIXES A REAL ERROR: realisable value applies bid DEPTH, and computing it per station
+  // row lets the same depth be counted once per location, overstating what the holding
+  // could actually be sold for.
+  const [grouped, setGrouped] = useState(true)
   const [sortKey, setSortKey] = useState<SortKey>('item')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
 
@@ -113,8 +122,25 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
 
   const view = useMemo(() => {
     const needle = filter.trim().toLowerCase()
-    return (rows ?? [])
-      .filter(r => locFilter === 'all' || (locFilter === 'cargo' ? r.inCargo : !r.inCargo))
+    const base = (rows ?? []).filter(r => locFilter === 'all' || (locFilter === 'cargo' ? r.inCargo : !r.inCargo))
+    // One row per item, quantities summed, with the split kept for the detail line.
+    const source: Row[] = grouped
+      ? [...base.reduce((m, r) => {
+          const g = m.get(r.item_id)
+          if (!g) {
+            m.set(r.item_id, { ...r, at: [[r.location, r.quantity]] })
+          } else {
+            g.quantity += r.quantity
+            g.at!.push([r.location, r.quantity])
+            // Keep the most recent sighting, so "Seen" reflects the freshest evidence
+            // rather than whichever station happened to sort first.
+            if ((r.updated_at || '') > (g.updated_at || '')) g.updated_at = r.updated_at
+            g.inCargo = g.inCargo || r.inCargo
+          }
+          return m
+        }, new Map<string, Row>()).values()]
+      : base
+    return source
       // A package's id is an opaque hash, so searching must reach its decoded
       // name — that is where "30x Lead Sheet" or "Foundry materials (3/21)" lives.
       .filter(r => !needle
@@ -240,6 +266,14 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
           placeholder='filter items or locations — e.g. "ore", "war citadel"…'
           className="flex-1 min-w-[200px] bg-transparent border border-border px-2 py-1 text-[12px] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary"
         />
+        <button
+          onClick={() => setGrouped(g => !g)}
+          title={grouped
+            ? 'One row per item, quantities summed across every location'
+            : 'One row per item PER LOCATION — the same item repeats once per station'}
+          className={`text-[10.5px] px-2 py-0.5 rounded border mr-1 ${grouped ? 'border-foreground/40 text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>
+          {grouped ? 'grouped' : 'by location'}
+        </button>
         {(['all', 'cargo', 'storage'] as const).map(k => (
           <button key={k} onClick={() => setLocFilter(k)}
             className={`px-2 py-0.5 text-[10px] uppercase tracking-wider border ${locFilter === k ? 'border-primary text-primary' : 'border-border text-muted-foreground hover:text-foreground'}`}>
@@ -309,7 +343,18 @@ export function InventoryTab({ profile }: { profile: Profile; connected?: boolea
                     ) : <span className="text-muted-foreground/40">no lookup</span>}
                   </td>
                   <td className={`px-3 py-1.5 ${r.inCargo ? 'text-[hsl(var(--smui-frost-2))]' : 'text-muted-foreground'}`}>
-                    {r.inCargo ? 'Ship cargo' : stationLabel(r.location)}
+                    {r.at && r.at.length > 1 ? (
+                      // Grouped across several places: name them all, with each share, so the
+                      // single row loses none of the information the four rows carried.
+                      <span className="flex flex-col gap-0.5">
+                        {r.at.slice().sort((a, b) => b[1] - a[1]).map(([loc, q]) => (
+                          <span key={loc}>
+                            {loc === 'Ship cargo' ? 'Ship cargo' : stationLabel(loc)}
+                            <span className="text-foreground/60 tabular-nums"> {q.toLocaleString()}</span>
+                          </span>
+                        ))}
+                      </span>
+                    ) : (r.inCargo ? 'Ship cargo' : stationLabel(r.at?.[0]?.[0] ?? r.location))}
                   </td>
                   <td className="px-3 py-1.5 text-right" style={stale ? { color: 'hsl(var(--smui-orange))' } : undefined} title={r.updated_at || undefined}>
                     <span className={stale ? '' : 'text-muted-foreground'}>{ageOf(r.updated_at)}</span>
