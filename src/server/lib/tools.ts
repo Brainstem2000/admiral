@@ -2367,7 +2367,25 @@ export function checkDoctrineGuards(
           const have = getStorageTotalForProfile(profileId, outId) + getCargoQuantity(profileId, outId)
           return have < req
         })
-        for (const input of feedsShortLine ? [] : (recipe?.inputs ?? [])) {
+
+        // A craft drawing from the FACTION VAULT cannot break a commission line,
+        // because a shipyard commission never reads the vault — it reads cargo and
+        // the pilot's own locker (docs/shipyard; three-containers rule). The
+        // sibling guard checkCraftInputs already resolves `source`/`deliver_to`
+        // this way, and for the same reason: reading personal storage regardless
+        // refused Bob Comet's correct vault-to-vault control_node craft on
+        // 2026-09-16 and sent him to HALT.
+        //
+        // It happened again on 2026-09-19: Morg'Thar ran
+        // `assemble_gold_processing_core x57 deliver_to="faction"` with 379 boards
+        // in the vault and 0 in his locker, and this lock refused it against a
+        // 1,900 circuit_board line recorded for a superseded industrial plan —
+        // blocking the craft that MAKES the targeting_computer the real commission
+        // is 70 short of.
+        const src = String(commandArgs?.source ?? commandArgs?.deliver_to ?? '').trim().toLowerCase()
+        const drawsFromVault = src === 'faction' || src.startsWith('faction:')
+
+        for (const input of (feedsShortLine || drawsFromVault) ? [] : (recipe?.inputs ?? [])) {
           const itemId = String(input?.item_id ?? '').toLowerCase()
           if (!itemId) continue
           const required = getCommissionRequirement(itemId, profileId)
