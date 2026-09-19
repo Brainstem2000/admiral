@@ -4,6 +4,7 @@ import fs from 'fs'
 import type { Provider, Profile, LogEntry } from '../../shared/types'
 import type { GalaxyMapData } from '../../shared/galaxy-types'
 import { refreshStationsFeed, MIN_PLAUSIBLE_STATIONS } from './stations-feed'
+import { getShip } from './catalog'
 
 // Tests running IN the test process (no subprocess helper) used to open the
 // real data/admiral.db: on 2026-09-12 three destination-gate tests wrote six
@@ -375,6 +376,28 @@ VERSIONED_MIGRATIONS.push({
   },
 })
 
+VERSIONED_MIGRATIONS.push({
+  version: 14,
+  name: 'banned_systems: the no-go list is LEARNED from capital-ship losses, not hardcoded',
+  up: (d) => {
+    // Its own table, never pruned: action_events IS pruned (see pruneOldData), and a
+    // ban that lived only in the event log would silently expire with it. That is how
+    // the Juggernaut loss fell out of view before this existed.
+    d.exec(`CREATE TABLE IF NOT EXISTS banned_systems (
+      system_id TEXT PRIMARY KEY,
+      ship_class TEXT,
+      ship_tier INTEGER,
+      lost_at TEXT,
+      profile_id TEXT,
+      wreck_id TEXT,
+      insurance_payout INTEGER,
+      source TEXT NOT NULL,
+      note TEXT,
+      banned_at TEXT DEFAULT (datetime('now'))
+    )`)
+  },
+})
+
 function runVersionedMigrations(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -400,6 +423,7 @@ function runVersionedMigrations(db: Database): void {
     db.exec(`PRAGMA user_version = ${m.version}`)
     console.log(`[DB] migration v${m.version} applied: ${m.name}`)
   }
+  refreshBannedSystems(db)
 }
 
 function migrate(db: Database): void {
@@ -2758,6 +2782,14 @@ export function recordActionEvents(
     }
   })
   tx()
+  // A capital-ship loss bans its system immediately. Outside the insert transaction so
+  // a ban problem can never cost us the events themselves.
+  if (inserted.length && events.some((e) => e.event_type === 'combat.ship_destroyed' && inserted.includes(e.event_id))) {
+    try {
+      const added = syncCapitalLossBans()
+      if (added.length) console.log(`[BAN] capital-ship loss — system(s) now banned: ${added.join(', ')}`)
+    } catch { /* never break event ingestion */ }
+  }
   return inserted
 }
 
@@ -3123,31 +3155,96 @@ export function getAgentSnapshot(profileId: string, kind: string):
   }
 }
 
-/** Fleet hard bans — systems no route may cross, whatever the evidence says today. */
 /**
- * Systems no fleet ship enters, ever. Derived from our OWN loss record, not from
- * the game's danger grading — these are places that have actually killed us.
+ * Systems no route may cross — LEARNED from the fleet's own capital-ship losses.
  *
- *   ross_248     124 losses (the June massacre; agents respawned into it repeatedly)
- *   goldcrest     12 losses in one morning, 2026-08-06, all to wildlife
- *   xamidimura     9 losses
- *   alhena         6 losses, INCLUDING Morg'Thar's Warmaul on 2026-09-14 (516,324 insured)
- *   algol          Morg'Thar's Crimson Devastator, 2026-09-03 — 2,640,487 insured, our worst
- *   glenhaven      Morg'Thar's Gauntlet, 2026-09-14, no payout
- *   nekkar         3 losses
- *   sadalmelik     3 losses
- *   bluerift       standing ban (leviathan corridor)
+ * Until 2026-09-18 this was a hardcoded nine, and places.ts kept a second, different
+ * hardcoded five (KILLZONES). The two disagreed on six systems, directives quoted the
+ * wrong one, and nothing kept either current. Brian's rule (2026-09-15, restated
+ * 2026-09-18): keep ships out of any system that has "eaten a capital hull". So a
+ * system is banned when we lose a ship of tier CAPITAL_TIER or above there — the
+ * whole recorded history counts, and every new loss is banned the moment the game
+ * reports it. Each ban carries its evidence in `banned_systems`.
  *
- * Brian, 2026-09-15: "You should have kept him out of Alhena and where he lost the
- * previous [capital ship]." That is exactly what this list is for. Clearing a hunter
- * for "more risk" is a call about CONTRACTS, never a licence to enter a system that
- * has already eaten a capital hull. The risk floor is code, not directive prose,
- * because a directive gets rewritten and this must not be.
+ * What the old list recorded, for reference — most of it was small-ship losses, which
+ * the rule deliberately does not count:
+ *   ross_248 124 losses (the June massacre) · goldcrest 12 (wildlife, 2026-08-06) ·
+ *   xamidimura 9 · alhena 6 incl. Morg's Warmaul (tier 3, 516,324 insured) ·
+ *   algol — Morg's Crimson Devastator (TIER 4), 2026-09-03, 2,640,487 insured ·
+ *   glenhaven — Morg's Gauntlet (tier 2) · nekkar 3 · sadalmelik 3 · bluerift standing ban.
+ *
+ * One live Set, mutated in place: every module that imported it (agent.ts, tools.ts,
+ * places.ts as KILLZONES) sees a new ban without re-importing.
  */
-export const FORBIDDEN_SYSTEMS = new Set([
-  'goldcrest', 'bluerift',
-  'ross_248', 'xamidimura', 'alhena', 'algol', 'glenhaven', 'nekkar', 'sadalmelik',
-])
+export const FORBIDDEN_SYSTEMS = new Set<string>()
+
+/** Losing a ship of this tier or above bans the system. Tiers run 0-5; 4-5 are capital. */
+export const CAPITAL_TIER = 4
+
+/** Reload FORBIDDEN_SYSTEMS in place from banned_systems. */
+export function refreshBannedSystems(d: Database = db): void {
+  FORBIDDEN_SYSTEMS.clear()
+  try {
+    for (const r of d.query('SELECT system_id FROM banned_systems').all() as Array<{ system_id: string }>) {
+      if (r.system_id) FORBIDDEN_SYSTEMS.add(r.system_id.toLowerCase())
+    }
+  } catch { /* before v14 there is no table, and nothing is banned */ }
+}
+
+/** Ban one system, keeping its evidence. The first loss recorded stays as the evidence. */
+export function banSystem(e: {
+  system_id: string; source: string
+  ship_class?: string | null; ship_tier?: number | null; lost_at?: string | null
+  profile_id?: string | null; wreck_id?: string | null; insurance_payout?: number | null; note?: string | null
+}): boolean {
+  const sys = String(e.system_id ?? '').toLowerCase().trim()
+  if (!sys) return false
+  const r = db.query(`INSERT OR IGNORE INTO banned_systems
+    (system_id, ship_class, ship_tier, lost_at, profile_id, wreck_id, insurance_payout, source, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(sys, e.ship_class ?? null, e.ship_tier ?? null,
+      e.lost_at ?? null, e.profile_id ?? null, e.wreck_id ?? null, e.insurance_payout ?? null, e.source, e.note ?? null)
+  FORBIDDEN_SYSTEMS.add(sys)
+  return r.changes > 0
+}
+
+function catalogShipTier(shipClass: string): number | null {
+  try {
+    const s = getShip(shipClass)
+    return s && typeof s.tier === 'number' ? s.tier : null
+  } catch { return null }
+}
+
+/**
+ * Ban every system where a capital ship has been lost, from the full loss record.
+ * Idempotent; returns the systems newly banned. A class the catalog cannot grade is
+ * skipped rather than guessed, and re-examined on the next sync.
+ */
+export function syncCapitalLossBans(tierOf: (shipClass: string) => number | null = catalogShipTier): string[] {
+  const rows = db.query(`SELECT profile_id, created_at, data FROM action_events
+    WHERE event_type = 'combat.ship_destroyed'`).all() as Array<{ profile_id: string; created_at: string; data: string }>
+  const added: string[] = []
+  for (const r of rows) {
+    let d: Record<string, unknown>
+    try { d = JSON.parse(r.data || '{}') } catch { continue }
+    const sys = String(d.system_id ?? '').toLowerCase().trim()
+    const cls = String(d.ship_class ?? '').toLowerCase().trim()
+    if (!sys || !cls) continue
+    const tier = tierOf(cls)
+    if (tier === null || tier < CAPITAL_TIER) continue
+    if (banSystem({
+      system_id: sys, source: 'action_event', ship_class: cls, ship_tier: tier, lost_at: r.created_at,
+      profile_id: r.profile_id, wreck_id: d.wreck_id ? String(d.wreck_id) : null,
+      insurance_payout: typeof d.insurance_payout === 'number' ? d.insurance_payout : null,
+    })) added.push(sys)
+  }
+  return added
+}
+
+/** Every ban with its evidence, oldest first. */
+export function listBannedSystems(): Array<Record<string, unknown>> {
+  try { return db.query('SELECT * FROM banned_systems ORDER BY banned_at, system_id').all() as Array<Record<string, unknown>> }
+  catch { return [] }
+}
 
 const GRADE_RANK: Record<string, number> = { SAFE: 0, RISKY: 1, DANGEROUS: 2, FORBIDDEN: 3 }
 

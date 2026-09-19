@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { getDb } from '../src/server/lib/db'
+import { getDb, banSystem } from '../src/server/lib/db'
 import { routeWithSafety, riskOf, KILLZONES } from '../src/server/lib/places'
 
 /**
@@ -8,8 +8,9 @@ import { routeWithSafety, riskOf, KILLZONES } from '../src/server/lib/places'
  * zero-police run to a policed station. A corridor is exactly as safe as its worst
  * intermediate jump, so that is what gets reported.
  *
- * Travel doctrine is TIERED, not a ban: five systems are hard-banned, and a
- * zero-police system that is not one of them is workable with the right hull.
+ * Travel doctrine is TIERED, not a ban: only systems where the fleet has lost a capital
+ * ship are hard-banned (learned, 2026-09-18), and a zero-police system that is not one of
+ * them is workable with the right hull.
  * Grading all lawless space as forbidden is what left every silver and silicon
  * seam "unreachable" while agents idled — all of them sit at police 0.
  */
@@ -46,10 +47,14 @@ describe('a route is graded by its worst hop, not its destination', () => {
   })
 
   test('a killzone in the corridor is flagged and a detour offered when one exists', () => {
-    const kz = [...KILLZONES][0]
-    sys('t_k_home', 100); sys(kz, 0); sys('t_k_dest', 80); sys('t_k_long', 30)
+    const kz = 't_kz_banned'
+    banSystem({ system_id: kz, source: 'seed:test' })
+    // The direct run crosses the banned system in 2 hops; the detour takes 3. It must be
+    // strictly longer, or which path BFS returns depends on the order ids sort in — this
+    // test once passed only because '70_ophiuchi' happened to sort before 't_k_long'.
+    sys('t_k_home', 100); sys(kz, 0); sys('t_k_dest', 80); sys('t_k_long', 30); sys('t_k_long2', 30)
     link('t_k_home', kz); link(kz, 't_k_dest')
-    link('t_k_home', 't_k_long'); link('t_k_long', 't_k_dest')
+    link('t_k_home', 't_k_long'); link('t_k_long', 't_k_long2'); link('t_k_long2', 't_k_dest')
 
     const r = routeWithSafety('t_k_home', 't_k_dest')
     expect(r.crosses_killzone).toBe(true)
@@ -62,12 +67,14 @@ describe('a route is graded by its worst hop, not its destination', () => {
     expect(riskOf(`t_unknown_${Math.random().toString(36).slice(2, 7)}`).risk).toBe('thin')
   })
 
-  test('zero police is lawless but NOT a hard ban unless it is one of the five', () => {
+  test('zero police is lawless but NOT a hard ban unless a capital ship was lost there', () => {
     sys('t_plain_lawless', 0)
     const r = riskOf('t_plain_lawless')
     expect(r.risk).toBe('lawless')
     expect(r.killzone).toBe(false)          // tiered doctrine: workable with the right hull
-    expect(riskOf([...KILLZONES][0]).killzone).toBe(true)
+    banSystem({ system_id: 't_capital_grave', source: 'seed:test' })
+    expect(KILLZONES.has('t_capital_grave')).toBe(true)
+    expect(riskOf('t_capital_grave').killzone).toBe(true)
   })
 
   test('no path returns found:false rather than a misleading empty route', () => {

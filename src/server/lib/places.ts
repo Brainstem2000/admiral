@@ -15,13 +15,18 @@
  * forbidden is what left every silver and silicon seam "unreachable" while agents
  * sat idle — every known deposit for both sits at police 0.
  */
-import { getDb } from './db'
+import { getDb, FORBIDDEN_SYSTEMS } from './db'
 import { systemForBase, stationsInSystem, listFeedStations } from './stations-feed'
 
-/** Hard ban. Never route through these, whatever the cargo. */
-export const KILLZONES = new Set([
-  '70_ophiuchi', 'alhena', 'glenhaven', 'lacaille_8760', 'ross_248',
-])
+/**
+ * Hard ban. Never route through these, whatever the cargo.
+ *
+ * The SAME Set as db.ts's FORBIDDEN_SYSTEMS — learned from capital-ship losses. This was a
+ * separate hardcoded five until 2026-09-18 (70_ophiuchi, alhena, glenhaven, lacaille_8760,
+ * ross_248). It disagreed with the other list on six systems, and directives quoted this one
+ * as if it were the fleet's ban list. One list, one source.
+ */
+export const KILLZONES = FORBIDDEN_SYSTEMS
 
 export type Risk = 'safe' | 'policed' | 'thin' | 'lawless' | 'KILLZONE'
 

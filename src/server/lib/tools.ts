@@ -176,7 +176,7 @@ export const allTools: Tool[] = [
   },
   {
     name: 'fleet_route',
-    description: "Route estimate between ANY two systems from the fleet's learned jump graph (every route any agent has ever flown) — no game tick, works without being at either end, and AVOIDS every fleet-banned system automatically (the nine in FORBIDDEN_SYSTEMS — goldcrest, bluerift, ross_248, xamidimura, alhena, algol, glenhaven, nekkar, sadalmelik), which the game's find_route will not do, so prefer this when the game's route crosses one. Distances are upper bounds that improve as the fleet flies; before committing to a trip, confirm with a live find_route from your position.",
+    description: "Route estimate between ANY two systems from the fleet's learned jump graph (every route any agent has ever flown) — no game tick, works without being at either end, and AVOIDS every fleet-banned system automatically — any system where the fleet has lost a capital ship (tier 4 or 5), learned from our own loss record and updated the moment a new one happens — which the game's find_route will not do, so prefer this when the game's route crosses one. Distances are upper bounds that improve as the fleet flies; before committing to a trip, confirm with a live find_route from your position.",
     parameters: Type.Object({
       from: Type.String({ description: 'Origin system_id (e.g. krynn)' }),
       to: Type.String({ description: 'Destination system_id (e.g. haven)' }),
@@ -5797,7 +5797,8 @@ export function mineStopMessage(mines: number, minedUnits: number, used: number 
  * exists. The graph is partial — a null is "not learned", never "impossible".
  */
 function knownShortestPath(from: string, to: string): string[] | null {
-  const FORBIDDEN = new Set(['goldcrest', 'bluerift'])
+  // The learned ban list, not a private copy: this read two hardcoded systems until 2026-09-18.
+  const FORBIDDEN = FORBIDDEN_SYSTEMS
   const adj = new Map<string, Set<string>>()
   for (const l of getKnownLinks()) {
     if (FORBIDDEN.has(l.a) || FORBIDDEN.has(l.b)) continue

@@ -20,7 +20,7 @@ import codexRoutes from './routes/codex'
 import factionRoutes from './routes/faction'
 import planRoutes from './routes/plan'
 import { startScheduler } from './lib/scheduler'
-import { pruneOldData, backfillSystemsFromStations } from './lib/db'
+import { pruneOldData, backfillSystemsFromStations, syncCapitalLossBans, FORBIDDEN_SYSTEMS } from './lib/db'
 import { startCatalogService } from './lib/catalog'
 import { startGalaxyMarketCollector } from './lib/galaxy-market'
 import { startGalaxyMapRefresher } from './lib/galaxy-refresh'
@@ -124,6 +124,20 @@ if (isDev) {
 startScheduler()
 startCatalogService()
 
+// The no-go list is LEARNED: any system where the fleet has lost a capital ship (tier 4-5).
+// The catalog loaded synchronously from its disk cache just above, so the full loss record
+// can be graded now; the 6-hourly prune re-runs it for any class it could not grade yet.
+function syncBans(when: string) {
+  try {
+    const added = syncCapitalLossBans()
+    console.log(`[BAN] ${when}: ${FORBIDDEN_SYSTEMS.size} system(s) banned for capital-ship losses` +
+      `${added.length ? ` — new: ${added.join(', ')}` : ''} [${[...FORBIDDEN_SYSTEMS].sort().join(', ') || 'none'}]`)
+  } catch (err) {
+    console.warn('[BAN] capital-loss sync failed:', err)
+  }
+}
+syncBans('startup')
+
 // Galaxy-wide market feed relay (agents cannot fetch HTTP; briefings can).
 startGalaxyMarketCollector()
 
@@ -139,6 +153,7 @@ backfillSystemsFromStations()
 // Prune aged logs/snapshots/intel on startup, then every 6 hours, so these
 // tables don't grow without bound.
 function runPrune() {
+  syncBans('periodic')
   try {
     const { logs, snapshots, intel, ledger, events, history, orders } = pruneOldData()
     if (logs || snapshots || intel || ledger || events || history || orders) {
