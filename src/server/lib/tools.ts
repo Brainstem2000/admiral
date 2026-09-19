@@ -1114,7 +1114,26 @@ function checkCraftInputs(ctx: ToolContext, deep: string, commandArgs: Record<st
  */
 /** Base values from the fuel guide (docs/guides/fuel): a cell is worth this at the station tank. */
 const FUEL_CELL_BASE: Record<string, number> = { fuel_cell: 43, premium_fuel_cell: 120, military_fuel_cell: 390 }
-const FUEL_CELL_PRICE_CAP_X = 5
+/** Cells are capped at 12x base, not 5x.
+ *
+ *  Base value is what the fuel guide says a cell is WORTH against a station tank
+ *  — it is not a trading price, and 5x base (215cr for a fuel_cell) is below the
+ *  galactic market everywhere. Measured 2026-09-19: fuel_cell asks **400cr in
+ *  five of six empires** — crimson, nebula, outerrim, solarian and voidborn —
+ *  at depths of 3,876 to 12,947. Only the pirate board asks more (2,803).
+ *
+ *  So the 5x cap did not stop a lowball, it stopped every purchase: Grit Vane
+ *  was refused 8 cells at War Citadel at the ONLY price anyone charges, while
+ *  staging a rescue for a pilot stranded 27 jumps out. Worse, the cap can only
+ *  evaluate when a fresh view_market exists, so it blocked the agent who checked
+ *  the board and waved through Bob Comet, who had bought the same 8 cells at the
+ *  same 400cr an hour earlier without looking.
+ *
+ *  12x (516cr) still catches both real incidents the guard was written for —
+ *  Nova's 3,000cr/cell at Hex Star (70x) and the pirate board's 2,803 (65x) —
+ *  while allowing the price that actually exists. The hard bound on exposure is
+ *  the QUANTITY cap of 8 cells, which is unchanged: at most ~3,200cr. */
+const FUEL_CELL_PRICE_CAP_X = 12
 /** A market buy is a lowball trap when the ask is far above what the fleet has seen the item
  *  sell for elsewhere this week (3x), or — with no fleet reference — absurdly above the
  *  catalog base value (30x; titanium_alloy trades at 25x base everywhere, so base alone is
