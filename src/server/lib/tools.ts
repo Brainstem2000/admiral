@@ -3900,7 +3900,7 @@ function executeLocalTool(name: string, args: Record<string, unknown>, ctx: Tool
             const warn = dangerous > 0
               ? `\n⚠ ${dangerous} DANGEROUS hop(s) — "only go if you are strapped": armed, shielded, and cleared by the Admiral for unpoliced space.`
               : risky > 0 ? `\n${risky} RISKY hop(s) (low/unknown police) — get_nearby on arrival, leave on hostile contact.` : ''
-            result = `LEARNED ROUTE (${path.length - 1} jumps, goldcrest/bluerift excluded): ${annotated.join(' > ')}${warn}\n` +
+            result = `LEARNED ROUTE (${path.length - 1} jumps, capital-loss systems excluded: ${[...FORBIDDEN].join(', ') || 'none'}): ${annotated.join(' > ')}${warn}\n` +
               `Upper bound from the fleet's learned graph — the real route may be shorter. Confirm with a live find_route before committing fuel.`
           }
         }
