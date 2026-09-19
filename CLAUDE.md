@@ -543,6 +543,12 @@ mechanism to the agent's state**, because interruption cost scales with how mobi
 | `PUT /:id {todo}` | silent — but **the agent will overwrite it** | seeding a plan they then own |
 | `PUT /:id {memory}` | silent — **agent-owned, they rewrite it** | facts worth surviving, expect edits |
 | disconnect → `PUT` → `connect_llm` | clean boot on the new state | agent is MID-ROUTE or oscillating |
+| `POST /:id/connect {"action":"park"}` | stops the loop only when the in-flight turn ENDS | agent is docked and idle — never to stop a moving one |
+
+**Park does not stop a moving agent.** It lets the running turn finish, and a `goto_system` macro
+is one tool call, so every remaining hop still flies. On 2026-09-19 Nova was parked to redirect
+her and jumped three more systems into a station that refuses us; `connect_llm` was then ignored
+("LLM loop already active") until the macro ended. Only `disconnect` aborts the macro.
 
 **There is no `/connect_llm` ROUTE.** `connect_llm` is an *action* in the body of `POST /:id/connect`;
 the bare path exists but only opens the game connection, leaving the agent `connected: true, running:
