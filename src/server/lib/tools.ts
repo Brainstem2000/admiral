@@ -5,7 +5,7 @@ import { hasLibV2Route, libV2GroupActions } from './connections/lib_v2'
 import { scrubLiveState, scrubNotice, dedupeTodoAgainstMemory, ageCompletedTodoLines, scrubMemoryTaskLines, hygieneNotice, resetNoteHygiene } from './note-hygiene'
 import { refuseAccept, noteMissionTitles, acceptSideEffect, refusalText as refusalTextFor, refuseAbandon, noteAbandon, knownTitle, isRefusedMissionTitle } from './mission-guard'
 import { recordActiveShip, updateProfile, createFleetOrder, getFleetOrders, getFleetOrdersByChain, updateFleetOrder, listProfiles, getPreference, getSellQuota, decrementSellQuota, recordStorageSnapshot, recordCargoSnapshot, clearStorageDirty, setCommissionRequirements, getCommissionRequirement, getStorageQuantity, getFactionStorageQuantity, isStorageDirty, getStorageElsewhere, getMostRecentStation, getStorageTotalForProfile, replaceInsurancePolicies, replaceShipsForProfile, recordShipModules, upsertFreightContracts, recordEmpirePolicy, recordSystemLinks, getKnownLinks, assessSystemDanger, getFreshMarketDepth, getCargoQuantity, getRecentBuyUnitPrice, getRecentPurchasedQuantity, bookOrderFillsFromView, closeOrderOnCancel, getProfileLastState, getNavIntel, getDb, getProfile, FORBIDDEN_SYSTEMS, systemHasStation, cheapestRecentAsk, applyStorageDelta, markStorageDirty, findProfileByPlayer, recordPosition, describeStorageDrift, getCargoForProfile, type StorageDrift } from './db'
-import { systemForBase } from './stations-feed'
+import { systemForBase, stationsInSystem } from './stations-feed'
 import { swallow } from './swallow'
 import { FleetIntelCollector } from './fleet-intel'
 import { LedgerCollector } from './ledger'
@@ -933,6 +933,13 @@ async function checkDockedState(
   commandArgs: Record<string, unknown> | undefined,
 ): Promise<string | null> {
   if (!isDockedOnly(deep, commandArgs) || getPreference('docked_gate') === 'off') return null
+  // A bare `refuel` is NOT dock-only when the hold carries cells: the game falls back
+  // to them in open space ("If you're not docked at a station with usable fuel,
+  // refuel auto-selects from cargo cells" — docs/guides/fuel). Refusing it blocked
+  // Ledger Voss at Bellatrix on 2026-09-18 with four cells aboard and 30 fuel, after
+  // a rescue flown 27 jumps to hand him those cells. Refueling from cells anywhere
+  // is the entire point of carrying them.
+  if (deep === 'refuel' && cellFuelInCargo(ctx.profileId) > 0) return null
   const t = tacticalFor(ctx.profileId)
   let gs: Record<string, unknown> | null = null
   try { gs = ctx.connection.getLocalState?.() ?? null } catch { gs = null }
@@ -3023,6 +3030,49 @@ export async function executeTool(
     }
   }
 
+  // PREFLIGHT: no pickup on a full hold. Read from the connection's own cache —
+  // no round trip; an unknown fill lets the game answer.
+  if (PICKUP_COMMANDS.has(deepBare) && getPreference('full_hold_gate') !== 'off') {
+    let used: number | null = null, cap: number | null = null
+    try {
+      const gs = ctx.connection.getLocalState?.() ?? null
+      const ship = (gs?.ship ?? {}) as Record<string, unknown>
+      used = typeof ship.cargo_used === 'number' ? ship.cargo_used : null
+      cap = typeof ship.cargo_capacity === 'number' ? ship.cargo_capacity
+        : (typeof ship.max_cargo === 'number' ? ship.max_cargo : null)
+    } catch { /* unknown fill */ }
+    const refusal = holdFullVerdict(deepBare, commandArgs, used, cap)
+    if (refusal) {
+      ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
+      ctx.log('tool_result', refusal)
+      return refusal
+    }
+  }
+
+  // PREFLIGHT: no fight without ammo in every gun. One free get_ship read. Only the
+  // agent's own `attack` passes through here — the hunt macro calls the connection
+  // directly and keeps its own dry-gun guard, so a hunt is never interrupted by this.
+  if (deepBare === 'attack' && getPreference('attack_ammo_gate') !== 'off') {
+    try {
+      const sr = await ctx.connection.execute('get_ship')
+      if (!sr.error) {
+        const sd = (sr.structuredContent ?? sr.result) as Record<string, unknown> | undefined
+        const mods = (sd?.modules ?? (sd?.ship as Record<string, unknown> | undefined)?.modules) as unknown
+        const key = JSON.stringify(commandArgs ?? {})
+        const prior = attackAmmoBlocks.get(ctx.profileId)
+        const repeated = !!prior && prior.key === key && Date.now() - prior.at < 5 * 60_000
+        const refusal = attackAmmoVerdict(weaponAmmoState(mods), repeated)
+        if (refusal) {
+          attackAmmoBlocks.set(ctx.profileId, { key, at: Date.now() })
+          ctx.log('tool_call', `game(${command}, ${formatArgs(commandArgs ?? {})})`)
+          ctx.log('tool_result', refusal)
+          return refusal
+        }
+        attackAmmoBlocks.delete(ctx.profileId)
+      }
+    } catch { /* a failed read lets the game answer */ }
+  }
+
   // withdraw(item, qty) moves personal storage -> cargo with NO source/target; the
   // game rejects the explicit spellings of that default ("source=storage target=cargo"
   // -> invalid_source, and "source=station" the same). CyberSpock burned two ticks on
@@ -4644,6 +4694,192 @@ export function tooDryToHunt(state: { total: number; loaded: number }): boolean 
   return state.loaded * 2 < state.total
 }
 
+// ---------------------------------------------------------------------------
+// PREFLIGHT GATES (Brian, 2026-09-18). Every directive must now end with a
+// preflight block: never run out of fuel, never fight without ammo, never set off
+// to pick up cargo on a full hold. Prose alone has never held for every model, so
+// these make the three rules true in code. Each verdict is a pure function —
+// the wiring only supplies the reads — so each is unit-tested on its own.
+// ---------------------------------------------------------------------------
+
+/** Fuel each cell type restores (docs/guides/fuel). */
+export const CELL_FUEL: Record<string, number> = { fuel_cell: 20, premium_fuel_cell: 50, military_fuel_cell: 100 }
+
+/** Fuel the cells in this ship's hold would restore. A failed read counts as none. */
+export function cellFuelInCargo(profileId: string): number {
+  let total = 0
+  for (const [id, per] of Object.entries(CELL_FUEL)) {
+    try { total += (Number(getCargoQuantity(profileId, id)) || 0) * per } catch { /* none */ }
+  }
+  return total
+}
+
+/**
+ * Should a manual `attack` be refused on this loadout? The refusal text, or null.
+ *
+ * The rule is every fitted gun loaded before a fight. Under half armament is a hard
+ * refusal, the same line the hunt macro already draws (tooDryToHunt). At half or
+ * better, the first attempt is refused with the reload commands, and REPEATING the
+ * identical attack proceeds: a ship already under fire may have to answer with what
+ * it has, and a gate that traps it in a fight it did not start is worse than none.
+ * Energy-only loadouts (no ammo-using guns) are never refused.
+ */
+export function attackAmmoVerdict(state: ReturnType<typeof weaponAmmoState>, repeated: boolean): string | null {
+  if (state.total === 0 || state.dry.length === 0) return null
+  const reloads = state.dryGuns.slice(0, 6).map((g) => `reload(id="${g.id}", target="${g.ammoId}")`)
+  const how = reloads.length ? ` Reload first: ${reloads.join('; ')}.` : ' Reload each empty gun first.'
+  if (tooDryToHunt(state)) {
+    return (
+      `BLOCKED by Admiral doctrine: only ${state.loaded} of ${state.total} weapons have ammo — never start a ` +
+      `fight under half armament. EMPTY: ${state.dry.slice(0, 6).join(', ')}.${how} If you carry no ammo for ` +
+      `them, do not attack: disengage and route around the target.`
+    )
+  }
+  if (repeated) return null
+  return (
+    `BLOCKED by Admiral doctrine: ${state.dry.length} of ${state.total} weapons are EMPTY ` +
+    `(${state.dry.slice(0, 6).join(', ')}) — the rule is every gun loaded before a fight.${how} ` +
+    `If you are already under fire and must answer with what you have, repeat this exact attack to proceed.`
+  )
+}
+
+/** Commands that put items INTO the cargo hold. Macros (mine_until_full) gate themselves. */
+const PICKUP_COMMANDS = new Set(['mine', 'loot', 'loot_wreck', 'salvage', 'salvage_wreck', 'buy', 'withdraw', 'withdraw_items'])
+
+/**
+ * Refuse a pickup when the hold is already full: it cannot succeed, and the trip
+ * that set it up was wasted. A `buy` delivered to storage, and a withdraw aimed
+ * somewhere other than the hold, do not use cargo and pass. An unknown fill passes.
+ */
+export function holdFullVerdict(
+  deep: string, args: Record<string, unknown> | undefined, used: number | null, cap: number | null,
+): string | null {
+  if (!PICKUP_COMMANDS.has(deep)) return null
+  if (used === null || cap === null || !(cap > 0) || used < cap) return null
+  if (deep === 'buy' && String(args?.deliver_to ?? '').toLowerCase() === 'storage') return null
+  if (deep === 'withdraw' || deep === 'withdraw_items') {
+    const tgt = String(args?.target ?? '').toLowerCase()
+    if (tgt && !['cargo', 'ship', 'hold', 'self'].includes(tgt)) return null
+  }
+  return (
+    `BLOCKED by Admiral doctrine: your hold is FULL (${used}/${cap}) — ${deep} cannot put anything into it. ` +
+    `Unload first: at a station, deposit_items(source="cargo", target="faction") for the vault, or ` +
+    `deposit_items for your locker. Never set off to pick up cargo on a full hold.`
+  )
+}
+
+/**
+ * mine_until_full on a FULL hold. The macro can make room only by returning ore to
+ * the deposit it came from, so a hold full of anything this belt does not hold
+ * leaves it nothing to dump: zero mine actions after the whole trip. Nova Reyes
+ * flew to Mebsuta on 2026-09-18 with a hold full of other ore and got exactly that.
+ * Unknown fill, or an unknown deposit list, passes — the macro reports for itself.
+ */
+export function mineFullHoldVerdict(
+  used: number | null, cap: number | null, keep: Set<string>,
+  cargo: Array<{ item_id: string; quantity: number }>, deposits: string[],
+): string | null {
+  if (used === null || cap === null || !(cap > 0) || used < cap) return null
+  const unload = `Unload at a station first — deposit_items(source="cargo", target="faction") — then come back.`
+  if (keep.size === 0) {
+    return `MACRO ABORT: your hold is FULL (${used}/${cap}) — there is no room to mine. ${unload} Never set off to mine on a full hold.`
+  }
+  const other = cargo.filter((c) => !keep.has(c.item_id))
+  if (other.length === 0) {
+    return `MACRO ABORT: your hold is already FULL (${used}/${cap}) of ${[...keep].join('/')} — the job is done. Take it home and deposit it.`
+  }
+  if (deposits.length === 0) return null
+  if (other.some((c) => deposits.includes(c.item_id))) return null   // it can return that ore here
+  return (
+    `MACRO ABORT: your hold is FULL (${used}/${cap}) of cargo this belt cannot take back ` +
+    `(${other.slice(0, 5).map((c) => c.item_id).join(', ')}), so there is nothing mine_until_full may dump and ` +
+    `it would make zero mine actions. Only ore THIS deposit holds (${deposits.slice(0, 6).join(', ')}) can be ` +
+    `returned to it. ${unload}`
+  )
+}
+
+/**
+ * Could this ship still reach fuel after the trip? The refusal text, or null.
+ *
+ * The launch rule refuses a route the tank cannot cover (cost + 25%). It cannot see
+ * the NEXT leg. On 2026-09-18 Ledger Voss launched to Bellatrix with fuel to spare,
+ * arrived at the only station for miles, and was refused docking for -30 reputation
+ * — the station is pirate-held — holding 30 fuel, with the nearest station that
+ * would admit him 14 jumps and 56 fuel away. He sat there for most of an hour.
+ *
+ * So on arrival, the fuel left plus any cells aboard must reach the nearest station
+ * that SELLS fuel and will ADMIT this pilot, at the same 25% margin. `canRefuelIn`
+ * decides "admit": the wiring excludes stations this pilot has already been refused
+ * at and pirate-held stations, which turn this fleet away. Stands down (null) when
+ * the fleet's map cannot answer — a thin map must never refuse an honest route.
+ */
+export function routeRefuelVerdict(i: {
+  target: string
+  arrivalFuel: number
+  perJump: number
+  canRefuelIn: (systemId: string) => boolean
+  neighbours: (systemId: string) => string[]
+  forbidden: Set<string>
+  maxHops?: number
+}): string | null {
+  if (!(i.perJump > 0) || !Number.isFinite(i.arrivalFuel)) return null
+  if (i.canRefuelIn(i.target)) return null
+  if (i.neighbours(i.target).length === 0) return null            // off the known map: cannot judge
+  const maxHops = i.maxHops ?? 40
+  const seen = new Set<string>([i.target])
+  let frontier = [i.target]
+  let depth = 0
+  let found: string | null = null
+  while (frontier.length > 0 && depth < maxHops && found === null) {
+    depth++
+    const next: string[] = []
+    for (const sys of frontier) {
+      for (const n of i.neighbours(sys)) {
+        if (seen.has(n) || i.forbidden.has(n)) continue
+        seen.add(n)
+        if (i.canRefuelIn(n)) { found = n; break }
+        next.push(n)
+      }
+      if (found !== null) break
+    }
+    frontier = next
+  }
+  if (found === null) return null            // none on the known map: the map is thin, not the galaxy
+  const cost = Math.ceil(depth * i.perJump)
+  const need = Math.ceil(cost * 1.25)
+  if (i.arrivalFuel >= need) return null
+  return (
+    `MACRO ABORT: ${i.target} has no station that sells fuel AND will admit you, and you would arrive with ` +
+    `about ${Math.max(0, Math.floor(i.arrivalFuel))} fuel. The nearest one that will is ${found}, ${depth} ` +
+    `jump(s) and ~${cost} fuel on (the launch rule wants ${need}) — you would be stranded. Buy fuel cells first ` +
+    `(up to the 8-cell reserve; refuel(item_id="fuel_cell") draws them in open space), top off, or pick a ` +
+    `destination that has fuel.`
+  )
+}
+
+/** Does this system have a station that sells fuel and will admit this pilot? */
+export function systemSellsFuelTo(profileId: string, systemId: string): boolean {
+  try { if (reputationLockoutFor(profileId, systemId)) return false } catch { /* no lockout data */ }
+  return stationsInSystem(systemId).some((st) =>
+    !st.wrecked && st.services.includes('refuel') && (st.empire ?? '') !== 'pirates')
+}
+
+/** The fleet's learned jump graph as an adjacency map, forbidden systems excluded. */
+function knownAdjacency(): Map<string, Set<string>> {
+  const adj = new Map<string, Set<string>>()
+  for (const l of getKnownLinks()) {
+    if (FORBIDDEN_SYSTEMS.has(l.a) || FORBIDDEN_SYSTEMS.has(l.b)) continue
+    if (!adj.has(l.a)) adj.set(l.a, new Set())
+    if (!adj.has(l.b)) adj.set(l.b, new Set())
+    adj.get(l.a)!.add(l.b)
+    adj.get(l.b)!.add(l.a)
+  }
+  return adj
+}
+
+/** Per-profile memory of the last attack refused at partial armament (for repeat-to-proceed). */
+const attackAmmoBlocks = new Map<string, { key: string; at: number }>()
+
 /**
  * POIs each agent has recently walked away from, newest first (max 4).
  * Without this the POI picker keeps choosing the first hunting POI in the
@@ -5433,6 +5669,10 @@ async function macroMineUntilFull(args: Record<string, unknown>, ctx: ToolContex
   if (keep.size > 0 && start.depositItems.length > 0 && ![...keep].some((k) => start.depositItems.includes(k))) {
     return `MACRO ABORT: ${start.poiId ?? 'this POI'} has no ${[...keep].join('/')} deposit (deposits here: ${start.depositItems.join(', ')}). Move to a belt that holds it.`
   }
+  if (getPreference('full_hold_gate') !== 'off') {
+    const full = mineFullHoldVerdict(start.cargoUsed, start.cargoCapacity, keep, start.cargo, start.depositItems)
+    if (full) return full
+  }
   const keptQty = (cargo: Array<{ item_id: string; quantity: number }>) => cargo.filter((c) => keep.has(c.item_id)).reduce((a, c) => a + c.quantity, 0)
 
   let mines = 0
@@ -5695,6 +5935,21 @@ async function macroGotoSystem(args: Record<string, unknown>, ctx: ToolContext, 
         `dock and fill the tank (2-20cr/unit) before any multi-hop route. No exceptions: ` +
         `margin is what survives detours.`
       )
+    }
+
+    // Launch margin covers THIS route. Would the ship still reach fuel from the far
+    // end? Only judged when the tank reading exists; a thin map stands down.
+    if (!Number.isNaN(fuelAvail) && getPreference('route_refuel_gate') !== 'off') {
+      const adj = knownAdjacency()
+      const verdict = routeRefuelVerdict({
+        target,
+        arrivalFuel: fuelAvail + cellFuelInCargo(ctx.profileId) - estFuel,
+        perJump: hopIds.length > 0 ? estFuel / hopIds.length : 0,
+        canRefuelIn: (sys) => systemSellsFuelTo(ctx.profileId, sys),
+        neighbours: (sys) => [...(adj.get(sys) ?? [])],
+        forbidden: FORBIDDEN_SYSTEMS,
+      })
+      if (verdict) return verdict
     }
 
     // Undock if needed, then jump each hop

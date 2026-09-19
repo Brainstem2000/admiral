@@ -39,6 +39,10 @@ export interface StationRecord {
   system_name: string
   services: string[]
   wrecked: boolean
+  /** Controlling empire, lowercased ('crimson', 'pirates', ...). Empty when the feed omits it.
+   *  Kept because a station that SELLS fuel is not one that will ADMIT you: pirate-held
+   *  stations refuse this fleet's pilots (Crix Stronghold, Bellatrix, 2026-09-18). */
+  empire: string
 }
 
 interface FeedSnapshot {
@@ -86,6 +90,7 @@ function normalise(raw: unknown): StationRecord[] | null {
       system_name: String(o.system_name ?? ''),
       services: Array.isArray(o.services) ? o.services.map(String).filter(Boolean) : [],
       wrecked: o.wrecked === true,
+      empire: String(o.empire ?? o.empire_id ?? '').toLowerCase().trim(),
     })
   }
   return out
