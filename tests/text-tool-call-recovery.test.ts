@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { recoverToolCallFromText, repairToolName, readableThought } from '../src/server/lib/loop'
+import { recoverToolCallFromText, repairToolName, readableThought, toolParamShapes } from '../src/server/lib/loop'
 
 /**
  * gpt-oss on oMLX sometimes prints its tool call as TEXT in an OpenAI-style
@@ -81,5 +81,73 @@ describe('tool calls emitted as text — OpenAI envelopes', () => {
   test('the thought lane names the intended call instead of listing keys', () => {
     expect(readableThought('{ "role": "assistant", "function_call": { "name": "update_todo", "arguments": {} } }')).toContain('update_todo')
     expect(readableThought('{ "role": "assistant", "function_call:": "update_ttodo", "arguments": {} }')).toContain('update_ttodo')
+  })
+})
+
+/**
+ * A bare ARGUMENTS object with no tool name. gpt-oss on Ledger Voss, 2026-09-19 01:47 and 01:50 CT,
+ * at a tungsten belt: `{"keep":"tungsten_ore"}` twice, each scored idle, one short of the backoff
+ * parking him. It is recovered only when the keys fit exactly one declared tool.
+ */
+describe('tool calls emitted as a bare arguments object', () => {
+  const SHAPES = toolParamShapes([
+    { name: 'mine_until_full', parameters: { type: 'object', properties: { max_mines: {}, stop_at_pct: {}, keep: {} } } },
+    { name: 'goto_system', parameters: { type: 'object', properties: { target_system: {}, dock_at_poi: {} }, required: ['target_system'] } },
+    { name: 'fleet_route', parameters: { type: 'object', properties: { from: {}, to: {} }, required: ['from', 'to'] } },
+    { name: 'update_todo', parameters: { type: 'object', properties: { content: {} }, required: ['content'] } },
+    { name: 'update_memory', parameters: { type: 'object', properties: { content: {} }, required: ['content'] } },
+    { name: 'status_log', parameters: { type: 'object', properties: { note: {} }, required: ['note'] } },
+    { name: 'fleet_order', parameters: { type: 'object', properties: { note: {}, to: {} }, required: ['note'] } },
+    { name: 'game', parameters: { type: 'object', properties: { command: {}, args: {} }, required: ['command'] } },
+  ])
+  function bare(text: string) {
+    const m = msg(text); const logs: string[] = []
+    const ok = recoverToolCallFromText(m, (t: string, s: string) => { logs.push(`${t}:${s}`) }, KNOWN, SHAPES)
+    return { ok, call: m.content.find((c: any) => c.type === 'toolCall'), logs }
+  }
+
+  test('Ledger 2026-09-19: {"keep":"tungsten_ore"} is mine_until_full', () => {
+    const r = bare('{"keep":"tungsten_ore"}')
+    expect(r.ok).toBe(true)
+    expect(r.call.name).toBe('mine_until_full')
+    expect(r.call.arguments).toEqual({ keep: 'tungsten_ore' })
+    expect(r.logs.some(l => l.includes('Recovered a tool call'))).toBe(true)
+  })
+
+  test('a destination alone is goto_system', () => {
+    const r = bare('```json\n{"target_system":"krynn","dock_at_poi":"crimson_war_citadel"}\n```')
+    expect(r.ok).toBe(true)
+    expect(r.call.name).toBe('goto_system')
+  })
+
+  test('keys two tools accept are NOT guessed', () => {
+    // status_log and fleet_order both take a lone `note`.
+    expect(bare('{"note":"standing by"}').ok).toBe(false)
+  })
+
+  test('a missing required parameter does not fit', () => {
+    expect(bare('{"dock_at_poi":"crimson_war_citadel"}').ok).toBe(false)
+  })
+
+  test('an unknown key fits nothing', () => {
+    expect(bare('{"keep":"tungsten_ore","hurry":true}').ok).toBe(false)
+    expect(bare('{}').ok).toBe(false)
+  })
+
+  test('a lone content payload still goes to update_todo, as before', () => {
+    const r = bare('{"content":"1. mine"}')
+    expect(r.ok).toBe(true)
+    expect(r.call.name).toBe('update_todo')
+  })
+
+  test('without shapes the old behaviour stands', () => {
+    const m = msg('{"keep":"tungsten_ore"}')
+    expect(recoverToolCallFromText(m, () => {}, KNOWN)).toBe(false)
+  })
+
+  test('toolParamShapes reads properties and required off a JSON schema', () => {
+    const sh = toolParamShapes([{ name: 't', parameters: { properties: { a: {}, b: {} }, required: ['a'] } }, { name: 'u' }])
+    expect(sh.get('t')).toEqual({ props: ['a', 'b'], required: ['a'] })
+    expect(sh.get('u')).toEqual({ props: [], required: [] })
   })
 })

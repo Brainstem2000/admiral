@@ -395,7 +395,23 @@ export function repairToolName(name: string, known?: Set<string>): string {
   return hits.length === 1 ? hits[0] : name
 }
 
-export function recoverToolCallFromText(response: AssistantMessage, log: LogFn, knownTools?: Set<string>): boolean {
+/** A declared tool's parameter names and the subset it requires — enough to recognise a bare
+ *  arguments object that fits exactly one tool. */
+export type ToolParamShapes = Map<string, { props: string[]; required: string[] }>
+
+export function toolParamShapes(tools: ReadonlyArray<{ name: string; parameters?: unknown }>): ToolParamShapes {
+  const shapes: ToolParamShapes = new Map()
+  for (const t of tools) {
+    const p = (t.parameters ?? {}) as { properties?: Record<string, unknown>; required?: unknown }
+    shapes.set(t.name, {
+      props: Object.keys(p.properties ?? {}),
+      required: Array.isArray(p.required) ? p.required.filter((r): r is string => typeof r === 'string') : [],
+    })
+  }
+  return shapes
+}
+
+export function recoverToolCallFromText(response: AssistantMessage, log: LogFn, knownTools?: Set<string>, shapes?: ToolParamShapes): boolean {
   if (response.content.some((c) => c.type === 'toolCall')) return false
   const texts = response.content.filter((c): c is { type: 'text'; text: string } => c.type === 'text' && typeof (c as any).text === 'string')
   if (texts.length !== 1) return false
@@ -456,6 +472,21 @@ export function recoverToolCallFromText(response: AssistantMessage, log: LogFn, 
     // mild, visible error; dropping the write entirely costs a whole turn.
     name = 'update_todo'
     args = { content: obj.content }
+  } else if (shapes && Object.keys(obj).length > 0) {
+    // A BARE ARGUMENTS OBJECT for any other tool: gpt-oss on Ledger Voss, 2026-09-19 01:47 and
+    // 01:50 CT, printed {"keep":"tungsten_ore"} twice at a tungsten belt instead of calling
+    // mine_until_full. Both replies scored idle, one more would have parked him in backoff,
+    // and the same call had gone through correctly an hour earlier. Recover it only when the
+    // keys fit EXACTLY ONE declared tool (every key is one of its parameters and every
+    // parameter it requires is present). Two candidates means we cannot know which was
+    // meant, and guessing an action is worse than losing a round.
+    const keys = Object.keys(obj)
+    const fits = [...shapes].filter(([, sh]) =>
+      keys.every(k => sh.props.includes(k)) && sh.required.every(r => keys.includes(r)))
+    if (fits.length === 1) {
+      name = fits[0][0]
+      args = obj as Record<string, unknown>
+    }
   }
   if (!name) return false
   const repaired = repairToolName(name, knownTools)
@@ -584,6 +615,7 @@ export async function runAgentTurn(
   // Names the model can legitimately call. Anything declared here that is not
   // `game` or a macro runs inside Admiral and can never be a game action.
   const declaredTools = new Set((context.tools ?? []).map(t => t.name))
+  const declaredShapes = toolParamShapes(context.tools ?? [])
 
   // Operator interrupts (nudge, directive restart, disconnect) end the turn
   // as `interrupted`: a distinct outcome with its own log shape. They used to
@@ -813,7 +845,7 @@ export async function runAgentTurn(
 
     context.messages.push(response)
 
-    recoverToolCallFromText(response, log, declaredTools)
+    recoverToolCallFromText(response, log, declaredTools, declaredShapes)
     const toolCalls = response.content.filter((c): c is ToolCall => c.type === 'toolCall')
 
     const textParts = response.content
